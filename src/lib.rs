@@ -12,4 +12,5 @@ pub mod player;
 pub mod render;
 pub mod terrain;
 pub mod ui;
+pub mod updater;
 pub mod world;

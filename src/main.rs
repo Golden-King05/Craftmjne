@@ -4,15 +4,22 @@
 //! the built-in ones; register blocks/painters from your plugin's `build()`
 //! (see README "Extending the framework").
 //!
-//! CLI: `craftmjne [--seed N] [--render-distance N]`
+//! CLI: `craftmjne [--seed N] [--render-distance N] [--no-update-check] [--version]`
 
 use bevy::prelude::*;
 
 use craftmjne::config::WorldSettings;
-use craftmjne::{interact, player, render, ui, world};
+use craftmjne::updater::UpdateCheckEnabled;
+use craftmjne::{interact, player, render, ui, updater, world};
 
-fn parse_args() -> WorldSettings {
+struct Args {
+    settings: WorldSettings,
+    update_check: bool,
+}
+
+fn parse_args() -> Args {
     let mut settings = WorldSettings::default();
+    let mut update_check = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -26,15 +33,22 @@ fn parse_args() -> WorldSettings {
                     settings.render_distance = v;
                 }
             }
+            "--no-update-check" => update_check = false,
+            "--version" | "-V" => {
+                println!("craftmjne {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other => eprintln!("unknown argument: {other}"),
         }
     }
-    settings
+    Args { settings, update_check }
 }
 
 fn main() {
+    let args = parse_args();
     let mut app = App::new();
-    app.insert_resource(parse_args())
+    app.insert_resource(args.settings)
+        .insert_resource(UpdateCheckEnabled(args.update_check))
         .add_plugins(
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
@@ -51,6 +65,7 @@ fn main() {
             player::PlayerPlugin,
             interact::InteractPlugin,
             ui::UiPlugin,
+            updater::UpdaterPlugin,
         ));
 
     // CI / smoke mode: boot the real game, let the world stream in, save a

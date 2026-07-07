@@ -8,16 +8,45 @@ A well-optimized 3D Minecraft-style voxel game, built in **Rust + Bevy** as a
 > (still available in git history). Same architecture, now with real threads,
 > no GC pauses, and Bevy's ECS as the extension model.
 
-## Quick start
+## Install (Windows)
+
+Download `CraftmjneSetup.exe` from the [latest release](../../releases/latest)
+and run it — no admin rights needed. It installs to
+`%LOCALAPPDATA%\Craftmjne`, adds Start Menu and Desktop shortcuts, and
+registers a normal uninstaller in "Add or remove programs".
+
+From then on the game **updates itself**: every time it starts it checks
+GitHub Releases in the background and, if a newer version exists, downloads
+it and swaps the installed `.exe` in place (see "Auto-update" below) — you
+never need to re-run the installer. New builds are published automatically
+by CI whenever a `v*` tag is pushed (`.github/workflows/release.yml`), for
+Windows, Linux, and macOS (Intel + Apple Silicon).
+
+## Build from source
 
 ```bash
 cargo run --release
 # options:
-cargo run --release -- --seed 42 --render-distance 10
+cargo run --release -- --seed 42 --render-distance 10 --no-update-check
 ```
 
 Dev builds are configured for fast iteration (`opt-level = 1` for the game,
 `opt-level = 3` for dependencies), so plain `cargo run` is playable too.
+
+### Building the Windows installer yourself
+
+Cross-compiles fine from Linux/macOS with `mingw-w64` + NSIS installed
+(`apt install mingw-w64 nsis` / `brew install mingw-w64 makensis`), or
+natively on Windows with the MSVC target — CI uses the latter.
+
+```bash
+rustup target add x86_64-pc-windows-gnu   # once
+cargo build --release --target x86_64-pc-windows-gnu
+makensis -DAPP_VERSION=0.2.0 \
+         -DSRC_EXE="$(pwd)/target/x86_64-pc-windows-gnu/release/craftmjne.exe" \
+         installer/craftmjne.nsi
+# -> CraftmjneSetup.exe in the repo root
+```
 
 ### Controls
 
@@ -34,6 +63,34 @@ Dev builds are configured for fast iteration (`opt-level = 1` for the game,
 | Middle click | pick targeted block |
 | 1–9 / mouse wheel | hotbar selection |
 | F3 | debug overlay |
+
+## Auto-update
+
+`src/updater.rs` is the whole mechanism: on startup, a background thread asks
+GitHub Releases for the latest tag and, if it's newer than the running
+build, downloads the matching platform archive and rewrites the on-disk
+`.exe` — using [`self_update`](https://docs.rs/self_update)'s rename-based
+replace, which works even while that same binary is currently running. The
+game doesn't relaunch itself mid-session (a HUD banner just tells you a new
+version is ready); the swap takes effect next launch, the same model Steam
+and VS Code use. Failures (offline, rate-limited, no releases yet) are
+logged and silently ignored — an update check never blocks or interrupts play.
+
+This is why the installer targets `%LOCALAPPDATA%` instead of
+`Program Files`: an unprivileged process can overwrite its own exe there,
+so updates need no UAC prompt and no separate updater service.
+
+Turn it off with `--no-update-check` or `CRAFTMJNE_NO_UPDATE_CHECK=1` (it's
+also auto-disabled under `CRAFT_SMOKE`, so CI screenshots never depend on
+network access).
+
+## Releasing a new version
+
+1. Bump `version` in `Cargo.toml`.
+2. `git tag v0.3.0 && git push origin v0.3.0`.
+3. CI builds Windows/Linux/macOS binaries, packages the Windows installer,
+   and publishes everything to a GitHub Release — installed copies of the
+   game will pick it up automatically within one restart.
 
 ## Performance design
 
@@ -79,7 +136,12 @@ src/
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, camera
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
-└── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel
+├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
+└── updater.rs   # UpdaterPlugin: background GitHub-release check + self-swap
+installer/
+└── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe
+.github/workflows/
+└── release.yml           # tag push -> cross-platform build + GitHub Release
 ```
 
 Data flow for a chunk: `stream_chunks` → generation task → blocks arrive →

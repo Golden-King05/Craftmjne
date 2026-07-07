@@ -9,6 +9,7 @@ use crate::config::{TILE_SIZE, ATLAS_TILES};
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
 use crate::render::AtlasImage;
+use crate::updater::UpdateState;
 use crate::world::ChunkMap;
 
 #[derive(Component)]
@@ -16,6 +17,9 @@ struct HotbarRoot;
 
 #[derive(Component)]
 struct HintText;
+
+#[derive(Component)]
+struct UpdateBanner;
 
 #[derive(Component)]
 struct DebugText;
@@ -96,6 +100,43 @@ fn setup_ui(mut commands: Commands) {
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
         Visibility::Hidden,
     ));
+
+    commands.spawn((
+        UpdateBanner,
+        Text::new(""),
+        TextFont { font_size: 14.0, ..default() },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(72.0),
+            left: Val::Percent(50.0),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.12, 0.45, 0.2, 0.85)),
+        Visibility::Hidden,
+    ));
+}
+
+/// Reflects the background update check into a small bottom-of-screen
+/// banner: silent while checking or up to date, a one-line note once a
+/// newer version has been downloaded and is waiting for a restart.
+fn update_banner(
+    state: Res<UpdateState>,
+    mut banners: Query<(&mut Text, &mut Visibility, &mut Node), With<UpdateBanner>>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    let Ok((mut text, mut vis, mut node)) = banners.single_mut() else { return };
+    match &*state {
+        UpdateState::Ready { version } => {
+            text.0 = format!("Craftmjne {version} downloaded — restart to update");
+            *vis = Visibility::Visible;
+            node.margin = UiRect { left: Val::Px(-190.0), ..default() };
+        }
+        _ => *vis = Visibility::Hidden,
+    }
 }
 
 /// Rebuilds hotbar slots whenever the hotbar changes (selection or contents).
@@ -219,6 +260,6 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugState>()
             .add_systems(Startup, setup_ui)
-            .add_systems(Update, (rebuild_hotbar, hint_visibility, debug_panel));
+            .add_systems(Update, (rebuild_hotbar, hint_visibility, debug_panel, update_banner));
     }
 }
