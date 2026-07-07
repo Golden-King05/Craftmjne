@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Craftmjne</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #app { position: fixed; inset: 0; }
+    #app canvas { display: block; }
+
+    #overlay {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(10, 14, 20, 0.72);
+      cursor: pointer;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #e8eef5;
+      user-select: none;
+    }
+    #overlay .panel {
+      text-align: center;
+      background: rgba(18, 24, 34, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      padding: 32px 44px;
+      max-width: 460px;
+    }
+    #overlay h1 { font-size: 34px; letter-spacing: 2px; margin-bottom: 6px; }
+    #overlay .sub { color: #93a4b8; font-size: 13px; margin-bottom: 18px; }
+    #overlay .controls { text-align: left; font-size: 13px; line-height: 1.8; color: #c4d0dd; }
+    #overlay .controls b { color: #fff; display: inline-block; min-width: 118px; }
+    #overlay .cta { margin-top: 18px; font-size: 15px; color: #7fd17f; }
+    #overlay.hidden { display: none; }
+
+    #crosshair {
+      position: fixed; left: 50%; top: 50%; z-index: 5;
+      width: 20px; height: 20px; margin: -10px 0 0 -10px;
+      pointer-events: none;
+      mix-blend-mode: difference;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ''; position: absolute; background: #fff;
+    }
+    #crosshair::before { left: 9px; top: 2px; width: 2px; height: 16px; }
+    #crosshair::after { left: 2px; top: 9px; width: 16px; height: 2px; }
+
+    #hotbar {
+      position: fixed; left: 50%; bottom: 14px; z-index: 5;
+      transform: translateX(-50%);
+      display: flex; gap: 4px;
+      padding: 4px;
+      background: rgba(0, 0, 0, 0.35);
+      border-radius: 8px;
+      pointer-events: none;
+    }
+    #hotbar .slot {
+      width: 48px; height: 48px;
+      border: 2px solid rgba(255, 255, 255, 0.35);
+      border-radius: 5px;
+      background: rgba(0, 0, 0, 0.4);
+      display: flex; align-items: center; justify-content: center;
+      position: relative;
+    }
+    #hotbar .slot.selected { border-color: #fff; background: rgba(255, 255, 255, 0.18); }
+    #hotbar .slot canvas { width: 36px; height: 36px; image-rendering: pixelated; }
+    #hotbar .slot .num {
+      position: absolute; left: 3px; top: 1px;
+      font: 10px/1.4 monospace; color: rgba(255, 255, 255, 0.75);
+    }
+
+    #debug {
+      position: fixed; left: 10px; top: 10px; z-index: 5;
+      font: 12px/1.5 monospace;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.45);
+      padding: 8px 10px;
+      border-radius: 6px;
+      pointer-events: none;
+      white-space: pre;
+    }
+    #debug.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="overlay">
+    <div class="panel">
+      <h1>CRAFTMJNE</h1>
+      <div class="sub">voxel engine framework</div>
+      <div class="controls">
+        <div><b>W A S D</b> move</div>
+        <div><b>Mouse</b> look</div>
+        <div><b>Space</b> jump / swim / fly up</div>
+        <div><b>Shift</b> fly down</div>
+        <div><b>Ctrl</b> sprint</div>
+        <div><b>F</b> toggle fly</div>
+        <div><b>Left / Right click</b> break / place</div>
+        <div><b>Middle click</b> pick block</div>
+        <div><b>1-9 / Wheel</b> select block</div>
+        <div><b>F3</b> debug overlay</div>
+      </div>
+      <div class="cta">Click anywhere to play</div>
+    </div>
+  </div>
+  <div id="crosshair"></div>
+  <div id="hotbar"></div>
+  <pre id="debug" class="hidden"></pre>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
