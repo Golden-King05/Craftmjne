@@ -1,19 +1,26 @@
 # Craftmjne
 
-A well-optimized 3D Minecraft-style voxel engine, built as a **framework** you can
-expand. Browser-based (Three.js + Vite), with all block textures procedurally
-generated as **16×16 pixel art** — no image assets required.
+A well-optimized 3D Minecraft-style voxel engine **desktop app**, built as a
+**framework** you can expand. Electron + Three.js + Vite, with all block
+textures procedurally generated as **16×16 pixel art** — no image assets
+required.
 
 ## Quick start
 
 ```bash
 npm install
-npm run dev      # dev server with HMR
-npm run build    # production build to dist/
-npm run preview  # serve the production build
+npm run dev      # desktop app in dev mode (Vite HMR + Electron, F12 devtools)
+npm run start    # build and run the desktop app in production mode
+npm run dist     # package installers (AppImage / NSIS+portable / DMG) to release/
+npm run smoke    # headless desktop smoke test (CI-friendly, use xvfb-run on Linux servers)
 ```
 
-URL parameters: `?seed=42` (world seed), `?rd=10` (render distance in chunks).
+The engine is plain web tech underneath, so it also runs in a browser if you
+ever want that: `npm run build && npm run preview` (supports `?seed=42` and
+`?rd=10` URL parameters).
+
+In the desktop app, world settings come from the `Engine` constructor call in
+`src/main.js` (`seed`, `renderDistance`). Press **F11** for fullscreen.
 
 ### Controls
 
@@ -63,6 +70,10 @@ The engine is built around keeping the main thread free for rendering:
 ## Architecture
 
 ```
+electron/
+├── main.cjs                # desktop entry: window, shortcuts, dev/prod loading
+├── serve.cjs               # serves dist/ over a secure app:// scheme
+└── smoke.cjs               # headless desktop smoke test (npm run smoke)
 src/
 ├── config.js               # chunk size, world height, atlas layout
 ├── main.js                 # entry point — create Engine, register content

@@ -2,17 +2,55 @@
   "name": "craftmjne",
   "private": true,
   "version": "0.1.0",
+  "description": "A well-optimized, extensible voxel engine / Minecraft-style desktop game framework",
   "type": "module",
-  "description": "A well-optimized, extensible voxel engine / Minecraft-style game framework",
+  "main": "electron/main.cjs",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k \"vite --port 5173 --strictPort\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
+    "smoke": "npm run build && electron electron/smoke.cjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "three": "^0.172.0"
   },
   "devDependencies": {
-    "vite": "^6.0.7"
+    "concurrently": "^10.0.3",
+    "cross-env": "^10.1.0",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "vite": "^6.0.7",
+    "wait-on": "^9.0.10"
+  },
+  "build": {
+    "appId": "com.craftmjne.app",
+    "productName": "Craftmjne",
+    "files": [
+      "dist/**",
+      "electron/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Game"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.games"
+    }
   }
 }
