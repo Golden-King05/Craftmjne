@@ -1,0 +1,105 @@
+name: Release
+
+# Push a tag like "v0.3.0" (matching Cargo.toml's `version`) to build native
+# binaries for Windows/Linux/macOS and publish them as a GitHub Release.
+#
+# Two things read these release assets:
+#  - CraftmjneSetup.exe: the first-time installer end users download.
+#  - craftmjne-<target-triple>.<zip|tar.gz>: what the in-game auto-updater
+#    (src/updater.rs, via the `self_update` crate) downloads on later runs.
+#    Keep the archive naming (`craftmjne-<target-triple>`) in sync with any
+#    target added to the matrix below — self_update matches on it.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf "$GITHUB_WORKSPACE/craftmjne-${{ matrix.target }}.tar.gz" craftmjne
+
+      - name: Package (Windows, for the auto-updater)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/craftmjne.exe `
+            -DestinationPath craftmjne-${{ matrix.target }}.zip
+
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis -y --no-progress
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          & 'C:\Program Files (x86)\NSIS\makensis.exe' `
+            "-DAPP_VERSION=$version" `
+            "-DSRC_EXE=target\${{ matrix.target }}\release\craftmjne.exe" `
+            installer\craftmjne.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: craftmjne-${{ matrix.target }}
+          path: |
+            craftmjne-${{ matrix.target }}.tar.gz
+            craftmjne-${{ matrix.target }}.zip
+            CraftmjneSetup.exe
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          generate_release_notes: true
