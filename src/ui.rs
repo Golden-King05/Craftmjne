@@ -1,4 +1,6 @@
 //! HUD: crosshair, hotbar with atlas-tile icons, start hint, F3 debug panel.
+//! Everything here (except the update banner, which is meaningful in the
+//! menus too) is spawned `OnEnter(AppState::InGame)` and despawned on exit.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
@@ -9,8 +11,12 @@ use crate::config::{TILE_SIZE, ATLAS_TILES};
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
 use crate::render::AtlasImage;
+use crate::state::AppState;
 use crate::updater::UpdateState;
 use crate::world::ChunkMap;
+
+#[derive(Component)]
+struct HudRoot;
 
 #[derive(Component)]
 struct HotbarRoot;
@@ -36,71 +42,95 @@ fn tile_rect(tile: u16) -> Rect {
     Rect::new(x, y, x + TILE_SIZE as f32, y + TILE_SIZE as f32)
 }
 
-fn setup_ui(mut commands: Commands) {
-    // Crosshair: two thin bars centered on screen.
-    for (w, h) in [(2.0, 16.0), (16.0, 2.0)] {
-        commands.spawn((
+fn setup_hud(mut commands: Commands) {
+    commands
+        .spawn((
+            HudRoot,
             Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
                 position_type: PositionType::Absolute,
-                left: Val::Percent(50.0),
-                top: Val::Percent(50.0),
-                width: Val::Px(w),
-                height: Val::Px(h),
-                margin: UiRect {
-                    left: Val::Px(-w / 2.0),
-                    top: Val::Px(-h / 2.0),
-                    ..default()
-                },
                 ..default()
             },
-            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
-        ));
+        ))
+        .with_children(|root| {
+            // Crosshair: two thin bars centered on screen.
+            for (w, h) in [(2.0, 16.0), (16.0, 2.0)] {
+                root.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Percent(50.0),
+                        top: Val::Percent(50.0),
+                        width: Val::Px(w),
+                        height: Val::Px(h),
+                        margin: UiRect {
+                            left: Val::Px(-w / 2.0),
+                            top: Val::Px(-h / 2.0),
+                            ..default()
+                        },
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
+                ));
+            }
+
+            // Hotbar container (slots are (re)built by `rebuild_hotbar`).
+            root.spawn((
+                HotbarRoot,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(50.0),
+                    bottom: Val::Px(14.0),
+                    margin: UiRect { left: Val::Px(-9.0 * 27.0), ..default() },
+                    column_gap: Val::Px(4.0),
+                    padding: UiRect::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+            ));
+
+            root.spawn((
+                HintText,
+                Text::new("Click to capture the mouse  |  WASD move  Space jump  F fly  1-9 blocks  F3 debug  Esc release, Esc again for menu"),
+                TextFont { font_size: 14.0, ..default() },
+                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(10.0),
+                    left: Val::Percent(50.0),
+                    margin: UiRect { left: Val::Px(-360.0), ..default() },
+                    ..default()
+                },
+            ));
+
+            root.spawn((
+                DebugText,
+                Text::new(""),
+                TextFont { font_size: 13.0, ..default() },
+                TextColor(Color::WHITE),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(10.0),
+                    left: Val::Px(10.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+                Visibility::Hidden,
+            ));
+        });
+}
+
+fn despawn_hud(mut commands: Commands, roots: Query<Entity, With<HudRoot>>) {
+    for e in &roots {
+        commands.entity(e).despawn();
     }
+}
 
-    // Hotbar container (slots are (re)built by `rebuild_hotbar`).
-    commands.spawn((
-        HotbarRoot,
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(50.0),
-            bottom: Val::Px(14.0),
-            margin: UiRect { left: Val::Px(-9.0 * 27.0), ..default() },
-            column_gap: Val::Px(4.0),
-            padding: UiRect::all(Val::Px(4.0)),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
-    ));
-
-    commands.spawn((
-        HintText,
-        Text::new("Click to capture the mouse  |  WASD move  Space jump  F fly  1-9 blocks  F3 debug  Esc release"),
-        TextFont { font_size: 14.0, ..default() },
-        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Percent(50.0),
-            margin: UiRect { left: Val::Px(-330.0), ..default() },
-            ..default()
-        },
-    ));
-
-    commands.spawn((
-        DebugText,
-        Text::new(""),
-        TextFont { font_size: 13.0, ..default() },
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
-        Visibility::Hidden,
-    ));
-
+/// Spawned once at startup — the update-available banner is meaningful
+/// whether you're in the menus or in a world, so it lives outside the HUD.
+/// Anchored top-right so it never collides with the hotbar (bottom) or the
+/// in-game hint text (top-center).
+fn setup_update_banner(mut commands: Commands) {
     commands.spawn((
         UpdateBanner,
         Text::new(""),
@@ -108,8 +138,8 @@ fn setup_ui(mut commands: Commands) {
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Px(72.0),
-            left: Val::Percent(50.0),
+            top: Val::Px(10.0),
+            right: Val::Px(10.0),
             padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
             ..default()
         },
@@ -121,19 +151,15 @@ fn setup_ui(mut commands: Commands) {
 /// Reflects the background update check into a small bottom-of-screen
 /// banner: silent while checking or up to date, a one-line note once a
 /// newer version has been downloaded and is waiting for a restart.
-fn update_banner(
-    state: Res<UpdateState>,
-    mut banners: Query<(&mut Text, &mut Visibility, &mut Node), With<UpdateBanner>>,
-) {
+fn update_banner(state: Res<UpdateState>, mut banners: Query<(&mut Text, &mut Visibility), With<UpdateBanner>>) {
     if !state.is_changed() {
         return;
     }
-    let Ok((mut text, mut vis, mut node)) = banners.single_mut() else { return };
+    let Ok((mut text, mut vis)) = banners.single_mut() else { return };
     match &*state {
         UpdateState::Ready { version } => {
-            text.0 = format!("Craftmjne {version} downloaded — restart to update");
+            text.0 = format!("Craftmjne {version} downloaded - restart to update");
             *vis = Visibility::Visible;
-            node.margin = UiRect { left: Val::Px(-190.0), ..default() };
         }
         _ => *vis = Visibility::Hidden,
     }
@@ -259,7 +285,13 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugState>()
-            .add_systems(Startup, setup_ui)
-            .add_systems(Update, (rebuild_hotbar, hint_visibility, debug_panel, update_banner));
+            .add_systems(Startup, setup_update_banner)
+            .add_systems(OnEnter(AppState::InGame), setup_hud)
+            .add_systems(OnExit(AppState::InGame), despawn_hud)
+            .add_systems(
+                Update,
+                (rebuild_hotbar, hint_visibility, debug_panel).run_if(in_state(AppState::InGame)),
+            )
+            .add_systems(Update, update_banner);
     }
 }

@@ -10,6 +10,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::blocks::{BlockTables, Tables};
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
+use crate::state::AppState;
 use crate::world::ChunkMap;
 
 pub const HALF_W: f32 = 0.3;
@@ -230,10 +231,14 @@ fn spawn_camera(mut commands: Commands, settings: Res<WorldSettings>) {
     ));
 }
 
+/// Click captures the mouse; Escape releases it; pressing Escape again while
+/// already released saves and returns to the main menu (the actual save
+/// happens in `world::exit_world`, run on `OnExit(AppState::InGame)`).
 fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut next_state: ResMut<NextState<AppState>>,
 ) {
     let Ok(mut window) = windows.single_mut() else { return };
     if mouse.just_pressed(MouseButton::Left) && window.cursor_options.grab_mode == CursorGrabMode::None {
@@ -242,8 +247,12 @@ fn cursor_grab(
         window.cursor_options.visible = false;
     }
     if keys.just_pressed(KeyCode::Escape) {
-        window.cursor_options.grab_mode = CursorGrabMode::None;
-        window.cursor_options.visible = true;
+        if window.cursor_options.grab_mode == CursorGrabMode::None {
+            next_state.set(AppState::MainMenu);
+        } else {
+            window.cursor_options.grab_mode = CursorGrabMode::None;
+            window.cursor_options.visible = true;
+        }
     }
 }
 
@@ -315,7 +324,10 @@ impl Plugin for PlayerPlugin {
         app.add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
-                (cursor_grab, mouse_look, player_update).chain().in_set(PlayerSet),
+                (cursor_grab, mouse_look, player_update)
+                    .chain()
+                    .in_set(PlayerSet)
+                    .run_if(in_state(AppState::InGame)),
             );
     }
 }

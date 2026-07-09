@@ -20,10 +20,13 @@ use crate::config::{block_index, WorldSettings, CHUNK_SIZE, H, WORLD_HEIGHT};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
+use crate::save::{BlockEdit, PlayerSave, SaveStore, WorldData};
+use crate::state::{ActiveWorld, AppState};
 use crate::terrain::TerrainGenerator;
 
 const MAX_GEN_TASKS: usize = 12;
 const MAX_MESH_TASKS: usize = 8;
+const AUTOSAVE_INTERVAL: f32 = 30.0;
 
 #[derive(Resource, Clone)]
 pub struct WorldGen(pub Arc<TerrainGenerator>);
@@ -210,20 +213,144 @@ struct MeshTask {
     task: Task<ChunkMeshData>,
 }
 
-/// Startup: build the atlas, compile the registry, construct the generator.
-/// Runs before any render/UI setup that needs atlas indices.
+/// Edits made this session, keyed by world position (last write wins). Reset
+/// fresh on every `enter_world`; flushed to disk by `exit_world` and the
+/// periodic autosave.
+#[derive(Resource, Default)]
+pub struct EditLog(pub HashMap<IVec3, BlockId>);
+
+/// Edits loaded from a save, grouped by chunk so `collect_gen_tasks` can
+/// apply them in O(1) right after a chunk finishes procedurally generating.
+#[derive(Resource, Default)]
+struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId)>>);
+
+#[derive(Resource, Default)]
+struct AutosaveTimer(f32);
+
+/// Startup: build the atlas and compile the registry's flat lookup tables.
+/// Runs before any render/UI setup that needs atlas indices. Does not touch
+/// `WorldGen` — that's constructed per-world by `enter_world`, since each
+/// world has its own seed.
 pub fn compile_content(
     mut commands: Commands,
     mut registry: ResMut<BlockRegistry>,
     painters: Res<Painters>,
-    settings: Res<WorldSettings>,
 ) {
     let atlas = build_atlas(&painters);
     let tables = registry.compile(&atlas.indices);
-    let generator = TerrainGenerator::new(settings.seed, &registry);
     commands.insert_resource(Atlas(atlas));
     commands.insert_resource(BlockTables(tables));
+}
+
+/// `OnEnter(AppState::InGame)`: builds the terrain generator for the active
+/// world's seed, resets chunk/task state left over from any previous world,
+/// loads that world's saved edits (grouped by chunk for cheap application),
+/// and restores the saved player position if this isn't a brand new world.
+fn enter_world(
+    mut commands: Commands,
+    active: Res<ActiveWorld>,
+    registry: Res<BlockRegistry>,
+    store: Res<SaveStore>,
+    mut map: ResMut<ChunkMap>,
+    tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
+    mut players: Query<&mut Player>,
+) {
+    let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
+
+    for e in &tasks {
+        commands.entity(e).despawn();
+    }
+    for chunk in map.chunks.values_mut() {
+        for e in [chunk.solid_entity.take(), chunk.water_entity.take()].into_iter().flatten() {
+            commands.entity(e).despawn();
+        }
+    }
+    *map = ChunkMap { needs_scan: true, ..ChunkMap::default() };
+
+    let data = store.load_data(&active.slug);
+    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId)>> = HashMap::new();
+    for edit in data.edits {
+        // Unknown block names (e.g. from a mod no longer installed) are
+        // skipped rather than failing the whole load.
+        let Ok(id) = registry.by_name(&edit.block) else { continue };
+        let pos = IVec3::new(edit.x, edit.y, edit.z);
+        let coord = IVec2::new(edit.x.div_euclid(CHUNK_SIZE), edit.z.div_euclid(CHUNK_SIZE));
+        grouped.entry(coord).or_default().push((pos, id));
+    }
+    commands.insert_resource(PendingEdits(grouped));
+    commands.insert_resource(EditLog::default());
+    commands.insert_resource(AutosaveTimer::default());
+
+    if let Ok(mut player) = players.single_mut() {
+        *player = Player::default();
+        if let Some(saved) = data.player {
+            player.pos = Vec3::new(saved.x, saved.y, saved.z);
+            player.yaw = saved.yaw;
+            player.pitch = saved.pitch;
+            player.fly = saved.fly;
+            player.spawned = true;
+        }
+    }
+}
+
+fn record_edits(mut events: EventReader<BlockSetEvent>, mut log: ResMut<EditLog>) {
+    for e in events.read() {
+        log.0.insert(e.pos, e.id);
+    }
+}
+
+/// Serializes the current `EditLog` + player pose and writes it to disk.
+/// Shared by `exit_world` and the periodic autosave.
+fn write_save(
+    store: &SaveStore,
+    active: &ActiveWorld,
+    log: &EditLog,
+    registry: &BlockRegistry,
+    player: Option<&Player>,
+) {
+    let edits = log
+        .0
+        .iter()
+        .map(|(pos, &id)| BlockEdit { x: pos.x, y: pos.y, z: pos.z, block: registry.def(id).name.clone() })
+        .collect();
+    let player = player.map(|p| PlayerSave {
+        x: p.pos.x,
+        y: p.pos.y,
+        z: p.pos.z,
+        yaw: p.yaw,
+        pitch: p.pitch,
+        fly: p.fly,
+    });
+    let _ = store.save_data(&active.slug, &WorldData { player, edits });
+}
+
+fn autosave(
+    time: Res<Time>,
+    mut timer: ResMut<AutosaveTimer>,
+    store: Res<SaveStore>,
+    active: Res<ActiveWorld>,
+    log: Res<EditLog>,
+    registry: Res<BlockRegistry>,
+    players: Query<&Player>,
+) {
+    timer.0 += time.delta_secs();
+    if timer.0 < AUTOSAVE_INTERVAL {
+        return;
+    }
+    timer.0 = 0.0;
+    write_save(&store, &active, &log, &registry, players.single().ok());
+}
+
+/// `OnExit(AppState::InGame)`: persist this session's edits and player pose.
+fn exit_world(
+    store: Res<SaveStore>,
+    active: Res<ActiveWorld>,
+    log: Res<EditLog>,
+    registry: Res<BlockRegistry>,
+    players: Query<&Player>,
+) {
+    write_save(&store, &active, &log, &registry, players.single().ok());
 }
 
 /// Figures out what to generate/mesh/unload. Cheap (a few hundred map hits)
@@ -325,6 +452,7 @@ fn stream_chunks(
 fn collect_gen_tasks(
     mut commands: Commands,
     mut map: ResMut<ChunkMap>,
+    mut pending: ResMut<PendingEdits>,
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
     for (entity, mut gen_task) in &mut tasks {
@@ -334,8 +462,15 @@ fn collect_gen_tasks(
         commands.entity(entity).despawn();
         map.gen_in_flight -= 1;
         map.needs_scan = true;
-        if let Some(chunk) = map.chunks.get_mut(&gen_task.coord) {
-            chunk.blocks = Some(blocks);
+        if map.chunks.get_mut(&gen_task.coord).is_none() {
+            continue; // world was exited/switched while this chunk was generating
+        }
+        map.chunks.get_mut(&gen_task.coord).unwrap().blocks = Some(blocks);
+        // Re-apply any saved edits for this chunk on top of the fresh terrain.
+        if let Some(edits) = pending.0.remove(&gen_task.coord) {
+            for (pos, id) in edits {
+                map.set_block(pos, id);
+            }
         }
     }
 }
@@ -397,17 +532,36 @@ impl Plugin for WorldPlugin {
         if !app.world().contains_resource::<WorldSettings>() {
             app.insert_resource(WorldSettings::default());
         }
+        if !app.world().contains_resource::<SaveStore>() {
+            app.insert_resource(SaveStore::default());
+        }
         app.insert_resource(BlockRegistry::with_defaults())
             .insert_resource(default_painters())
             .insert_resource(ChunkMap { needs_scan: true, ..ChunkMap::default() })
+            .init_resource::<EditLog>()
+            .init_resource::<PendingEdits>()
+            .init_resource::<AutosaveTimer>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)
+            .add_systems(OnEnter(AppState::InGame), enter_world)
+            .add_systems(OnExit(AppState::InGame), exit_world)
             .add_systems(
                 Update,
-                (collect_gen_tasks, collect_mesh_tasks, stream_chunks)
+                (collect_gen_tasks, collect_mesh_tasks)
                     .chain()
                     .run_if(resource_exists::<ChunkMaterials>),
+            )
+            .add_systems(
+                Update,
+                stream_chunks
+                    .after(collect_mesh_tasks)
+                    .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
+            )
+            .add_systems(
+                Update,
+                (record_edits, autosave)
+                    .run_if(in_state(AppState::InGame)),
             );
     }
 }

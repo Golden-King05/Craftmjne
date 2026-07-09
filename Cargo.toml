@@ -21,6 +21,7 @@ bevy = { version = "0.16", default-features = false, features = [
   "bevy_log",
   "bevy_pbr",
   "bevy_render",
+  "bevy_state",
   "bevy_text",
   "bevy_ui",
   "bevy_window",
@@ -28,8 +29,11 @@ bevy = { version = "0.16", default-features = false, features = [
   "default_font",
   "tonemapping_luts",
   "x11",
+  "png", # only needed for the CRAFT_SMOKE=1 screenshot; the atlas is generated in-memory, not loaded from PNG
 ] }
 self_update = { version = "0.44.0", default-features = false, features = ["reqwest", "rustls", "archive-zip", "archive-tar", "compression-flate2", "compression-zip-deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Fast iteration: light optimization for our code, full for dependencies.
 [profile.dev]

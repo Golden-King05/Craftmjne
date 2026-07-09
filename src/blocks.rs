@@ -18,6 +18,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub type BlockId = u16;
+
+#[derive(Debug)]
+pub struct UnknownBlock;
+
+impl std::fmt::Display for UnknownBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown block name")
+    }
+}
+
+impl std::error::Error for UnknownBlock {}
 pub const AIR: BlockId = 0;
 
 /// Face order used across the whole engine (mesher, tiles table):
@@ -145,10 +156,14 @@ impl BlockRegistry {
     }
 
     pub fn id(&self, name: &str) -> BlockId {
-        *self
-            .by_name
-            .get(name)
-            .unwrap_or_else(|| panic!("unknown block {name:?}"))
+        self.by_name(name).unwrap_or_else(|_| panic!("unknown block {name:?}"))
+    }
+
+    /// Like [`id`](Self::id), but returns an error instead of panicking —
+    /// used when loading save data, where an unrecognized name (e.g. from a
+    /// mod that's no longer installed) shouldn't crash the load.
+    pub fn by_name(&self, name: &str) -> Result<BlockId, UnknownBlock> {
+        self.by_name.get(name).copied().ok_or(UnknownBlock)
     }
 
     pub fn def(&self, id: BlockId) -> &BlockDef {

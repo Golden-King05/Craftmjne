@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use crate::blocks::{BlockId, BlockRegistry, AIR};
 use crate::config::WORLD_HEIGHT;
 use crate::player::{cursor_grabbed, Player};
+use crate::state::AppState;
 use crate::world::{BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
@@ -217,7 +218,13 @@ impl Plugin for InteractPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Target>()
             .add_systems(Startup, setup_hotbar)
-            .add_systems(Update, (select_slot, interact).chain().after(crate::player::PlayerSet));
+            .add_systems(
+                Update,
+                (select_slot, interact)
+                    .chain()
+                    .after(crate::player::PlayerSet)
+                    .run_if(in_state(AppState::InGame)),
+            );
     }
 }
 

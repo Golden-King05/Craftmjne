@@ -63,6 +63,27 @@ makensis -DAPP_VERSION=0.2.0 \
 | Middle click | pick targeted block |
 | 1–9 / mouse wheel | hotbar selection |
 | F3 | debug overlay |
+| Esc (again, once released) | save and return to the main menu |
+
+## Menus and saved worlds
+
+The game boots into a main menu (**Worlds**, **Settings**, **Mods**, **Quit
+Game**) rather than straight into a world. **Worlds** lists your saves and has
+a **Create World** button (name + optional seed) at the bottom, Minecraft-
+style; clicking a saved world loads it. **Settings** currently exposes render
+distance (persisted, applied on next launch); **Mods** is a placeholder for
+future mod support.
+
+Worlds save to the same per-user app-data directory the installer and
+auto-updater use (`%LOCALAPPDATA%\Craftmjne\saves\<name>` on Windows,
+`~/.local/share/craftmjne/saves/<name>` on Linux, `~/Library/Application
+Support/Craftmjne/saves/<name>` on macOS) — naturally scoped to the OS user
+account. Each world is a small `meta.json` (name, seed, timestamps) plus a
+`data.json` recording the player's position and every block edit (by block
+*name*, not numeric id, so saves survive block-registry changes). Terrain
+itself is never saved — it's deterministic from the seed, so only the diff
+from procedural generation needs to persist. Autosaves every 30s and on
+returning to the menu.
 
 ## Auto-update
 
@@ -126,12 +147,15 @@ src/
 ├── main.rs      # binary: CLI args + plugin assembly
 ├── lib.rs       # library surface (used by tests and downstream crates)
 ├── config.rs    # chunk size, world height, atlas layout, WorldSettings
+├── state.rs     # AppState (menu <-> in-game) and the ActiveWorld resource
+├── save.rs      # SaveStore: per-user world/settings persistence (serde)
+├── menu.rs      # MenuPlugin: main menu, worlds list + create form, settings, mods
 ├── noise.rs     # seeded simplex noise, fBm, integer hashes
 ├── blocks.rs    # BlockRegistry: defs -> compiled flat lookup Tables
 ├── atlas.rs     # Painters resource: 16x16 procedural tiles -> RGBA atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
-├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits
+├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
 ├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas image, fog
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, camera
@@ -145,10 +169,18 @@ installer/
 ```
 
 Data flow for a chunk: `stream_chunks` → generation task → blocks arrive →
-neighbours ready → padded copy → mesh task → `Mesh3d` entity spawned. Edits
-bump a chunk version, mark it (and border neighbours) dirty, and the same
-pipeline remeshes them; results from a stale version are detected and
-re-queued automatically.
+pending saved edits applied → neighbours ready → padded copy → mesh task →
+`Mesh3d` entity spawned. Edits bump a chunk version, mark it (and border
+neighbours) dirty, and the same pipeline remeshes them; results from a stale
+version are detected and re-queued automatically.
+
+Entering a world (`world::enter_world`, on `OnEnter(AppState::InGame)`)
+builds a fresh `TerrainGenerator` for that world's seed, resets `ChunkMap`
+(despawning any previous world's chunk entities), loads its save data, and
+restores the player's saved position — or leaves them unspawned so the usual
+`try_spawn` logic places them, for a brand new world. Leaving
+(`world::exit_world`, on `OnExit`) and the periodic autosave both write the
+session's accumulated block edits and current player pose back out.
 
 ## Extending the framework
 
@@ -223,18 +255,24 @@ cargo test
 ```
 
 Unit tests cover the noise, atlas, registry, terrain, mesher (face counts, AO,
-water bucket), physics (falling, landing, wall collision) and raycasting.
+water bucket), physics (falling, landing, wall collision), raycasting, and
+save/load (slugging, sanitization, round-tripping worlds and settings against
+a throwaway temp directory — never a real user profile).
 `tests/headless.rs` boots the real ECS app **without a window or GPU** and
-drives the full streaming pipeline: generation tasks → meshing tasks → chunk
-entities, plus block edits, remeshing and cross-chunk dirty propagation.
+drives the full streaming pipeline through the actual `AppState` machine:
+menu → `InGame` → generation tasks → meshing tasks → chunk entities, plus
+block edits, remeshing, cross-chunk dirty propagation, and a full
+leave-and-relaunch cycle that confirms edits and player position survive a
+save/load round trip.
 
 ## Roadmap ideas
 
 Natural next steps the architecture is prepared for: greedy meshing as an
 alternative mesher, block light propagation (extra vertex-color channel),
-chunk persistence (serialize `ChunkMap` regions), entities/mobs as plugins,
-day/night cycle (shader uniforms already in place), biome-driven generation
-parameters, and audio (enable Bevy's `bevy_audio` feature).
+multiple save slots per world / world deletion and rename in the Worlds
+screen, real mod loading (the Mods screen is a placeholder), entities/mobs as
+plugins, day/night cycle (shader uniforms already in place), biome-driven
+generation parameters, and audio (enable Bevy's `bevy_audio` feature).
 
 ## License
 
