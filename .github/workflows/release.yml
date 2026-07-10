@@ -76,9 +76,14 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
+          # NSIS resolves relative `File` paths against the .nsi script's own
+          # directory (installer/), not the working directory - SRC_EXE must
+          # be absolute or it silently resolves to installer/target/... and
+          # fails with "no files found".
+          $srcExe = Join-Path "${{ github.workspace }}" "target\${{ matrix.target }}\release\craftmjne.exe"
           & 'C:\Program Files (x86)\NSIS\makensis.exe' `
             "-DAPP_VERSION=$version" `
-            "-DSRC_EXE=target\${{ matrix.target }}\release\craftmjne.exe" `
+            "-DSRC_EXE=$srcExe" `
             installer\craftmjne.nsi
 
       - uses: actions/upload-artifact@v4
