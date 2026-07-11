@@ -97,6 +97,11 @@ jobs:
 
   release:
     needs: build
+    # Publish whatever platforms did build even if one leg failed or got
+    # stuck without a runner (macos-13 has been flaky) - previously a
+    # single failed/cancelled matrix leg silently skipped this job and the
+    # release. `!cancelled()` still skips if the whole run was cancelled.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
