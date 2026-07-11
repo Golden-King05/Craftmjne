@@ -20,7 +20,7 @@ use crate::config::{block_index, WorldSettings, CHUNK_SIZE, H, WORLD_HEIGHT};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
-use crate::save::{BlockEdit, PlayerSave, SaveStore, WorldData};
+use crate::save::{BlockEdit, GameMode, PlayerSave, SaveStore, WorldData};
 use crate::state::{ActiveWorld, AppState};
 use crate::terrain::TerrainGenerator;
 
@@ -245,7 +245,9 @@ pub fn compile_content(
 /// `OnEnter(AppState::InGame)`: builds the terrain generator for the active
 /// world's seed, resets chunk/task state left over from any previous world,
 /// loads that world's saved edits (grouped by chunk for cheap application),
-/// and restores the saved player position if this isn't a brand new world.
+/// restores the saved player position if this isn't a brand new world, and
+/// makes the world's game mode available as a resource (read by
+/// `player::player_update` to gate flying).
 fn enter_world(
     mut commands: Commands,
     active: Res<ActiveWorld>,
@@ -257,6 +259,7 @@ fn enter_world(
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
+    commands.insert_resource(active.meta.mode);
 
     for e in &tasks {
         commands.entity(e).despawn();
@@ -288,7 +291,7 @@ fn enter_world(
             player.pos = Vec3::new(saved.x, saved.y, saved.z);
             player.yaw = saved.yaw;
             player.pitch = saved.pitch;
-            player.fly = saved.fly;
+            player.fly = saved.fly && active.meta.mode == GameMode::Creative;
             player.spawned = true;
         }
     }
@@ -534,6 +537,9 @@ impl Plugin for WorldPlugin {
         }
         if !app.world().contains_resource::<SaveStore>() {
             app.insert_resource(SaveStore::default());
+        }
+        if !app.world().contains_resource::<GameMode>() {
+            app.insert_resource(GameMode::default());
         }
         app.insert_resource(BlockRegistry::with_defaults())
             .insert_resource(default_painters())

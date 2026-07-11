@@ -1,5 +1,6 @@
 //! App-level state machine (main menu <-> worlds list <-> settings <-> mods
-//! <-> in-game) and the resource carrying which world is currently loaded.
+//! <-> in-game) and the resources carrying which world is currently loaded
+//! and whether the in-game pause menu is up.
 
 use bevy::prelude::*;
 
@@ -22,4 +23,14 @@ pub enum AppState {
 pub struct ActiveWorld {
     pub slug: String,
     pub meta: WorldMeta,
+}
+
+/// Whether the pause menu is open. This is a resource rather than an
+/// `AppState` variant on purpose: pausing must not despawn/reload the world
+/// (unlike leaving `AppState::InGame` would), it just frees the cursor,
+/// freezes player input, and shows an overlay on top of the still-rendering
+/// game. Reset to closed on every `OnEnter(AppState::InGame)`.
+#[derive(Resource, Default)]
+pub struct PauseState {
+    pub open: bool,
 }

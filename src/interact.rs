@@ -5,9 +5,10 @@ use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
 use crate::blocks::{BlockId, BlockRegistry, AIR};
+use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::player::{cursor_grabbed, Player};
-use crate::state::AppState;
+use crate::state::{AppState, PauseState};
 use crate::world::{BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
@@ -100,11 +101,19 @@ fn setup_hotbar(mut commands: Commands, registry: Res<BlockRegistry>) {
     commands.insert_resource(Hotbar { slots, selected: 0 });
 }
 
+/// Skips entirely while chat or the pause menu is open, so typing a digit
+/// or scrolling doesn't also swap the selected hotbar slot.
 fn select_slot(
     keys: Res<ButtonInput<KeyCode>>,
     mut wheel: EventReader<MouseWheel>,
+    chat: Res<ChatState>,
+    paused: Res<PauseState>,
     mut hotbar: ResMut<Hotbar>,
 ) {
+    if chat.open || paused.open {
+        wheel.clear();
+        return;
+    }
     const DIGITS: [KeyCode; 9] = [
         KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5,
         KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,

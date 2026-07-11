@@ -11,6 +11,7 @@ use crate::config::{TILE_SIZE, ATLAS_TILES};
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
 use crate::render::AtlasImage;
+use crate::save::GameMode;
 use crate::state::AppState;
 use crate::updater::UpdateState;
 use crate::world::ChunkMap;
@@ -91,14 +92,14 @@ fn setup_hud(mut commands: Commands) {
 
             root.spawn((
                 HintText,
-                Text::new("Click to capture the mouse  |  WASD move  Space jump  F fly  1-9 blocks  F3 debug  Esc release, Esc again for menu"),
+                Text::new("WASD move  Space jump  F fly (creative)  T chat  1-9 blocks  F3 debug  Esc pause"),
                 TextFont { font_size: 14.0, ..default() },
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
                 Node {
                     position_type: PositionType::Absolute,
                     top: Val::Px(10.0),
                     left: Val::Percent(50.0),
-                    margin: UiRect { left: Val::Px(-360.0), ..default() },
+                    margin: UiRect { left: Val::Px(-310.0), ..default() },
                     ..default()
                 },
             ));
@@ -241,6 +242,7 @@ fn debug_panel(
     mut state: ResMut<DebugState>,
     diagnostics: Res<DiagnosticsStore>,
     map: Res<ChunkMap>,
+    game_mode: Res<GameMode>,
     players: Query<&Player>,
     mut texts: Query<(&mut Text, &mut Visibility), With<DebugText>>,
 ) {
@@ -270,12 +272,14 @@ fn debug_panel(
          pos      {:.1} {:.1} {:.1}\n\
          chunk    {} {}\n\
          mode     {}\n\
+         gamemode {}\n\
          chunks   {meshed} meshed / {generated} generated\n\
          jobs     gen {}  mesh {}",
         p.pos.x, p.pos.y, p.pos.z,
         (p.pos.x.floor() as i32).div_euclid(16),
         (p.pos.z.floor() as i32).div_euclid(16),
         if p.fly { "fly" } else if p.on_ground { "ground" } else { "air" },
+        match *game_mode { GameMode::Survival => "survival", GameMode::Creative => "creative" },
         map.gen_in_flight, map.mesh_in_flight,
     );
 }

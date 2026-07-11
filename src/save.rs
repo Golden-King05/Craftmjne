@@ -4,7 +4,8 @@
 //! scoped to the OS user account, matching how most desktop games do it.
 //!
 //! Layout: `<app_data_dir>/saves/<slug>/{meta.json, data.json}`
-//!   - `meta.json` — name, seed, timestamps. Cheap to read for the world list.
+//!   - `meta.json` — name, seed, game mode, timestamps. Cheap to read for
+//!     the world list.
 //!   - `data.json` — player position + block edits. Only touched when a
 //!     world is actually entered or left (autosave included).
 //!
@@ -50,10 +51,24 @@ fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Chosen when a world is created and fixed for its lifetime. For now the
+/// only behavioural difference is flying (see `player.rs`); more will hang
+/// off this as the framework grows (block breaking speed, hunger, etc).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Resource, Default)]
+pub enum GameMode {
+    #[default]
+    Survival,
+    Creative,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct WorldMeta {
     pub name: String,
     pub seed: u32,
+    /// `#[serde(default)]` so worlds saved before game modes existed still
+    /// load - they come back as `Survival`, the more restrictive default.
+    #[serde(default)]
+    pub mode: GameMode,
     pub created_at: u64,
     pub last_played_at: u64,
 }
@@ -177,13 +192,14 @@ impl SaveStore {
         out
     }
 
-    pub fn create_world(&self, name: &str, seed: u32) -> io::Result<(String, WorldMeta)> {
+    pub fn create_world(&self, name: &str, seed: u32, mode: GameMode) -> io::Result<(String, WorldMeta)> {
         let slug = self.unique_slug(&slugify(name));
         fs::create_dir_all(self.saves_dir().join(&slug))?;
         let now = now_unix();
         let meta = WorldMeta {
             name: if name.trim().is_empty() { "New World".to_string() } else { name.trim().to_string() },
             seed,
+            mode,
             created_at: now,
             last_played_at: now,
         };
@@ -268,9 +284,10 @@ mod tests {
     #[test]
     fn create_list_and_load_round_trip() {
         let store = temp_store();
-        let (slug, meta) = store.create_world("My World", 42).unwrap();
+        let (slug, meta) = store.create_world("My World", 42, GameMode::Survival).unwrap();
         assert_eq!(meta.name, "My World");
         assert_eq!(meta.seed, 42);
+        assert_eq!(meta.mode, GameMode::Survival);
 
         let listed = store.list_worlds();
         assert_eq!(listed.len(), 1);
@@ -284,8 +301,8 @@ mod tests {
     #[test]
     fn duplicate_names_get_distinct_slugs() {
         let store = temp_store();
-        let (slug_a, _) = store.create_world("Home", 1).unwrap();
-        let (slug_b, _) = store.create_world("Home", 2).unwrap();
+        let (slug_a, _) = store.create_world("Home", 1, GameMode::Survival).unwrap();
+        let (slug_b, _) = store.create_world("Home", 2, GameMode::Survival).unwrap();
         assert_ne!(slug_a, slug_b);
         assert_eq!(store.list_worlds().len(), 2);
     }
@@ -293,7 +310,7 @@ mod tests {
     #[test]
     fn unsafe_characters_are_sanitized_out_of_the_slug() {
         let store = temp_store();
-        let (slug, _) = store.create_world("../../etc/passwd", 1).unwrap();
+        let (slug, _) = store.create_world("../../etc/passwd", 1, GameMode::Survival).unwrap();
         assert!(!slug.contains('/'));
         assert!(!slug.contains(".."));
     }
@@ -301,14 +318,14 @@ mod tests {
     #[test]
     fn blank_name_falls_back_to_a_default() {
         let store = temp_store();
-        let (_, meta) = store.create_world("   ", 1).unwrap();
+        let (_, meta) = store.create_world("   ", 1, GameMode::Survival).unwrap();
         assert_eq!(meta.name, "New World");
     }
 
     #[test]
     fn world_data_round_trips_player_and_edits() {
         let store = temp_store();
-        let (slug, _) = store.create_world("Edits", 7).unwrap();
+        let (slug, _) = store.create_world("Edits", 7, GameMode::Survival).unwrap();
 
         assert!(store.load_data(&slug).player.is_none()); // fresh world: no save yet
 
@@ -327,7 +344,7 @@ mod tests {
     #[test]
     fn touch_last_played_bumps_the_timestamp_forward() {
         let store = temp_store();
-        let (slug, meta) = store.create_world("Timestamps", 1).unwrap();
+        let (slug, meta) = store.create_world("Timestamps", 1, GameMode::Survival).unwrap();
         let mut earlier = meta.clone();
         earlier.last_played_at = 0;
         store.save_meta(&slug, &earlier).unwrap();
@@ -342,5 +359,28 @@ mod tests {
         assert_eq!(store.load_graphics_settings().render_distance, 8);
         store.save_graphics_settings(&GraphicsSettings { render_distance: 12 }).unwrap();
         assert_eq!(store.load_graphics_settings().render_distance, 12);
+    }
+
+    #[test]
+    fn creative_mode_round_trips() {
+        let store = temp_store();
+        let (slug, meta) = store.create_world("Creative", 1, GameMode::Creative).unwrap();
+        assert_eq!(meta.mode, GameMode::Creative);
+        let reloaded = store.load_meta(&slug).unwrap();
+        assert_eq!(reloaded.mode, GameMode::Creative);
+    }
+
+    #[test]
+    fn missing_mode_field_in_old_saves_defaults_to_survival() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("Old", 1, GameMode::Creative).unwrap();
+        // Simulate a meta.json written before `mode` existed.
+        fs::write(
+            store.meta_path(&slug),
+            r#"{"name":"Old","seed":1,"created_at":0,"last_played_at":0}"#,
+        )
+        .unwrap();
+        let meta = store.load_meta(&slug).unwrap();
+        assert_eq!(meta.mode, GameMode::Survival);
     }
 }

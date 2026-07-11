@@ -6,10 +6,11 @@
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::config::WorldSettings;
-use crate::save::{GraphicsSettings, SaveStore};
-use crate::state::{ActiveWorld, AppState};
+use crate::save::{GameMode, GraphicsSettings, SaveStore};
+use crate::state::{ActiveWorld, AppState, PauseState};
 
 const PANEL_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.82);
 const BUTTON_IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
@@ -30,6 +31,9 @@ enum MenuButton {
     LoadWorld(String),
     FocusField(TextField),
     RenderDistanceDelta(i32),
+    SetGameMode(GameMode),
+    Resume,
+    QuitToMenu,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -51,10 +55,14 @@ struct CreateWorldForm {
     name: String,
     seed_text: String,
     focus: TextField,
+    mode: GameMode,
 }
 
 #[derive(Component)]
 struct TextInputDisplay(TextField);
+
+#[derive(Component)]
+struct GameModeOption(GameMode);
 
 #[derive(Component)]
 struct MainMenuRoot;
@@ -68,6 +76,8 @@ struct SettingsRoot;
 struct ModsRoot;
 #[derive(Component)]
 struct RenderDistanceLabel;
+#[derive(Component)]
+struct PauseRoot;
 
 fn despawn_all<T: Component>(mut commands: Commands, q: Query<Entity, With<T>>) {
     for e in &q {
@@ -128,6 +138,31 @@ fn spawn_button(parent: &mut ChildSpawnerCommands, label: &str, action: MenuButt
         });
 }
 
+/// Like `spawn_button`, but keeps a border so a separate "selected" state
+/// (see `sync_mode_buttons`) can be shown without fighting `button_visuals`,
+/// which only ever touches `BackgroundColor`.
+fn spawn_mode_button(parent: &mut ChildSpawnerCommands, label: &str, mode: GameMode) {
+    parent
+        .spawn((
+            Button,
+            MenuButton::SetGameMode(mode),
+            GameModeOption(mode),
+            Node {
+                width: Val::Px(134.0),
+                height: Val::Px(36.0),
+                border: UiRect::all(Val::Px(2.0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.35)),
+            BackgroundColor(BUTTON_IDLE),
+        ))
+        .with_children(|p| {
+            p.spawn((Text::new(label), TextFont { font_size: 15.0, ..default() }, TextColor(Color::WHITE)));
+        });
+}
+
 fn button_visuals(
     mut buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<MenuButton>)>,
 ) {
@@ -171,6 +206,13 @@ fn setup_worlds(mut commands: Commands, mut mode: ResMut<WorldsScreenMode>, mut 
     });
 }
 
+fn mode_label(mode: GameMode) -> &'static str {
+    match mode {
+        GameMode::Survival => "Survival",
+        GameMode::Creative => "Creative",
+    }
+}
+
 fn rebuild_worlds_content(
     mut commands: Commands,
     mode: Res<WorldsScreenMode>,
@@ -209,7 +251,12 @@ fn rebuild_worlds_content(
                     .with_children(|row| {
                         row.spawn((Text::new(meta.name.clone()), TextFont { font_size: 17.0, ..default() }, TextColor(Color::WHITE)));
                         row.spawn((
-                            Text::new(format!("seed {}  -  {}", meta.seed, relative_time(meta.last_played_at))),
+                            Text::new(format!(
+                                "seed {}  -  {}  -  {}",
+                                meta.seed,
+                                mode_label(meta.mode),
+                                relative_time(meta.last_played_at)
+                            )),
                             TextFont { font_size: 12.0, ..default() },
                             TextColor(TEXT_DIM),
                         ));
@@ -223,6 +270,20 @@ fn rebuild_worlds_content(
             commands.entity(content).with_children(|p| {
                 spawn_text_field(p, "World name", TextField::Name);
                 spawn_text_field(p, "Seed (blank = random)", TextField::Seed);
+                p.spawn((
+                    Text::new("Game mode"),
+                    TextFont { font_size: 13.0, ..default() },
+                    TextColor(TEXT_DIM),
+                ));
+                p.spawn(Node {
+                    column_gap: Val::Px(8.0),
+                    margin: UiRect::bottom(Val::Px(8.0)),
+                    ..default()
+                })
+                .with_children(|row| {
+                    spawn_mode_button(row, "Survival", GameMode::Survival);
+                    spawn_mode_button(row, "Creative", GameMode::Creative);
+                });
                 spawn_button(p, "Create", MenuButton::SubmitCreate);
                 spawn_button(p, "Cancel", MenuButton::CancelCreate);
             });
@@ -272,6 +333,19 @@ fn sync_text_inputs(form: Res<CreateWorldForm>, mut texts: Query<(&mut Text, &Te
         } else {
             buf.clone()
         };
+    }
+}
+
+fn sync_mode_buttons(form: Res<CreateWorldForm>, mut options: Query<(&GameModeOption, &mut BorderColor)>) {
+    if !form.is_changed() {
+        return;
+    }
+    for (opt, mut border) in &mut options {
+        *border = BorderColor(if opt.0 == form.mode {
+            Color::WHITE
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.35)
+        });
     }
 }
 
@@ -423,6 +497,47 @@ fn setup_mods(mut commands: Commands) {
 }
 
 // ---------------------------------------------------------------------------
+// Pause screen (shown over the still-rendering world; see `PauseState`)
+// ---------------------------------------------------------------------------
+
+fn spawn_pause_screen(commands: &mut Commands) {
+    commands.spawn((PauseRoot, full_screen_root())).with_children(|root| {
+        root.spawn(panel()).with_children(|p| {
+            p.spawn(title("Paused"));
+            spawn_button(p, "Resume", MenuButton::Resume);
+            spawn_button(p, "Quit to Menu", MenuButton::QuitToMenu);
+            spawn_button(p, "Quit Game", MenuButton::Quit);
+        });
+    });
+}
+
+/// Spawns/despawns the pause overlay in step with `PauseState`, which is
+/// toggled by `player::cursor_grab` on Escape (and by the Resume/Quit
+/// buttons here, via `handle_menu_buttons`).
+fn sync_pause_screen(mut commands: Commands, paused: Res<PauseState>, roots: Query<Entity, With<PauseRoot>>) {
+    if !paused.is_changed() {
+        return;
+    }
+    if paused.open {
+        if roots.is_empty() {
+            spawn_pause_screen(&mut commands);
+        }
+    } else {
+        for e in &roots {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Safety net for leaving `InGame` (e.g. via "Quit to Menu") while paused,
+/// so the overlay never lingers into the main menu.
+fn despawn_pause(mut commands: Commands, roots: Query<Entity, With<PauseRoot>>) {
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Button action dispatch
 // ---------------------------------------------------------------------------
 
@@ -434,6 +549,8 @@ fn handle_menu_buttons(
     mut mode: ResMut<WorldsScreenMode>,
     mut form: ResMut<CreateWorldForm>,
     mut settings: ResMut<WorldSettings>,
+    mut paused: ResMut<PauseState>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
     store: Res<SaveStore>,
     mut exit: EventWriter<AppExit>,
 ) {
@@ -452,9 +569,10 @@ fn handle_menu_buttons(
             MenuButton::ShowCreateForm => *mode = WorldsScreenMode::Create,
             MenuButton::CancelCreate => *mode = WorldsScreenMode::List,
             MenuButton::FocusField(field) => form.focus = field,
+            MenuButton::SetGameMode(game_mode) => form.mode = game_mode,
             MenuButton::SubmitCreate => {
                 let seed = form.seed_text.trim().parse().unwrap_or_else(|_| random_seed());
-                if let Ok((slug, meta)) = store.create_world(&form.name, seed) {
+                if let Ok((slug, meta)) = store.create_world(&form.name, seed, form.mode) {
                     store.touch_last_played(&slug);
                     commands.insert_resource(ActiveWorld { slug, meta });
                     next_state.set(AppState::InGame);
@@ -470,6 +588,17 @@ fn handle_menu_buttons(
             MenuButton::RenderDistanceDelta(d) => {
                 settings.render_distance = (settings.render_distance + d).clamp(2, 16);
                 let _ = store.save_graphics_settings(&GraphicsSettings { render_distance: settings.render_distance });
+            }
+            MenuButton::Resume => {
+                paused.open = false;
+                if let Ok(mut window) = windows.single_mut() {
+                    window.cursor_options.grab_mode = CursorGrabMode::Locked;
+                    window.cursor_options.visible = false;
+                }
+            }
+            MenuButton::QuitToMenu => {
+                paused.open = false;
+                next_state.set(AppState::MainMenu);
             }
         }
     }
@@ -489,6 +618,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(AppState::Settings), despawn_all::<SettingsRoot>)
             .add_systems(OnEnter(AppState::Mods), setup_mods)
             .add_systems(OnExit(AppState::Mods), despawn_all::<ModsRoot>)
+            .add_systems(OnExit(AppState::InGame), despawn_pause)
             .add_systems(
                 Update,
                 (
@@ -497,7 +627,9 @@ impl Plugin for MenuPlugin {
                     rebuild_worlds_content.run_if(in_state(AppState::Worlds)),
                     handle_text_input.run_if(in_state(AppState::Worlds)),
                     sync_text_inputs.run_if(in_state(AppState::Worlds)),
+                    sync_mode_buttons.run_if(in_state(AppState::Worlds)),
                     sync_render_distance_label.run_if(in_state(AppState::Settings)),
+                    sync_pause_screen.run_if(in_state(AppState::InGame)),
                 ),
             );
     }

@@ -9,10 +9,10 @@
 use bevy::prelude::*;
 
 use craftmjne::config::WorldSettings;
-use craftmjne::save::SaveStore;
+use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::updater::UpdateCheckEnabled;
-use craftmjne::{interact, menu, player, render, ui, updater, world};
+use craftmjne::{chat, interact, menu, player, render, ui, updater, world};
 
 struct Args {
     seed: u32,
@@ -87,6 +87,7 @@ fn main() {
             render::RenderSetupPlugin,
             player::PlayerPlugin,
             interact::InteractPlugin,
+            chat::ChatPlugin,
             ui::UiPlugin,
             updater::UpdaterPlugin,
             menu::MenuPlugin,
@@ -111,7 +112,9 @@ fn enter_smoke_world(
     store: Res<SaveStore>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
-    let (slug, meta) = store.create_world("smoke-test", settings.seed).expect("create smoke-test world");
+    let (slug, meta) = store
+        .create_world("smoke-test", settings.seed, GameMode::default())
+        .expect("create smoke-test world");
     commands.insert_resource(ActiveWorld { slug, meta });
     next_state.set(AppState::InGame);
 }
