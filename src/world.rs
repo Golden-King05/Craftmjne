@@ -317,6 +317,18 @@ struct FluidQueue(VecDeque<IVec3>);
 /// A source/falling cell's neighbours to touch when it changes.
 const FLUID_NEIGHBORS: [IVec3; 6] =
     [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z, IVec3::Y, IVec3::NEG_Y];
+/// The 4 side neighbours a fluid spreads through / checks for the
+/// infinite-source rule (unlike `FLUID_NEIGHBORS`, no up/down).
+const FLUID_SIDES: [IVec3; 4] = [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z];
+
+/// How "far from a source" a level counts as for comparison purposes —
+/// source and falling cells both rank `0` (best), a plain flowing level
+/// ranks as itself. Used both to pick the best neighbour to spread from and
+/// to decide whether a candidate is actually an improvement (see
+/// `recompute_cell`'s never-downgrade rule).
+fn fluid_rank(level: u8) -> u8 {
+    if level == FLUID_SOURCE || level == FLUID_FALLING { 0 } else { level }
+}
 
 /// Queues the position of every `BlockSetEvent` plus its 6 neighbours for a
 /// fluid recompute — covers both "a fluid was placed/removed here" and "a
@@ -366,9 +378,21 @@ fn process_fluid_updates(
 ///  - Otherwise, look at the 4 lateral neighbours: among whichever fluid
 ///    reaches this cell at the lowest effective level (sources/falling count
 ///    as 0), spread one level further out, capped by that fluid's
-///    `flow_distance`.
+///    `flow_distance`. A falling neighbour only counts as a lateral supply
+///    once it's landed (blocked below) — otherwise every height along an
+///    open shaft would bleed sideways and flood far more than
+///    `flow_distance` would suggest (a waterfall should pool at the
+///    bottom, not leak out its whole length).
+///  - "Infinite water" source-conversion: if at least 2 of the 4 lateral
+///    neighbours are permanent sources of the fluid this cell would host,
+///    it becomes a source itself instead of a flowing/falling cell (the
+///    classic "two sources either side of a gap" trick).
 ///  - If neither applies and this cell currently holds a non-source fluid,
 ///    it dries up (back to air).
+///  - An already-fluid cell only ever *improves* (lower level) or dries —
+///    never adopts a worse level than it already has. Without this a
+///    removed source's former network can thrash forever, each cell
+///    re-deriving a slightly-worse level from a neighbour doing the same.
 /// A fluid can only occupy air, a `replaceable` block, or itself — anything
 /// else blocks it outright, matching the existing placement rule in
 /// `interact.rs`.
@@ -387,15 +411,29 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
         tables.fluid[above_id as usize].then_some((above_id, FLUID_FALLING));
 
     if candidate.is_none() {
-        const LATERAL: [IVec3; 4] = [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z];
-        for d in LATERAL {
+        for d in FLUID_SIDES {
             let npos = pos + d;
             let nid = map.get_block(npos);
             if !tables.fluid[nid as usize] {
                 continue;
             }
             let nlevel = map.get_fluid_level(npos);
-            let eff = if nlevel == FLUID_SOURCE || nlevel == FLUID_FALLING { 0 } else { nlevel };
+            if nlevel == FLUID_FALLING {
+                // A waterfall segment only spreads sideways once it lands
+                // (the cell below it is blocked). While it still has open
+                // space to keep falling into, it isn't a lateral supply —
+                // otherwise every height along an open shaft would bleed
+                // sideways and flood volumes far larger than flow_distance.
+                let below = npos.y - 1;
+                let below_open = below >= 0 && {
+                    let below_id = map.get_block(IVec3::new(npos.x, below, npos.z));
+                    below_id == AIR || tables.replaceable[below_id as usize]
+                };
+                if below_open {
+                    continue;
+                }
+            }
+            let eff = fluid_rank(nlevel);
             let fd = tables.flow_distance[nid as usize].max(1);
             if eff >= fd {
                 continue; // already at max range, can't spread further
@@ -407,10 +445,48 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
         }
     }
 
+    // "Infinite water": 2+ side neighbours that are already permanent
+    // sources of the same fluid upgrade this cell straight to a source too,
+    // regardless of whether it got here via falling or lateral spread.
+    if let Some((cid, clevel)) = candidate {
+        if clevel != FLUID_SOURCE {
+            let source_sides = FLUID_SIDES
+                .iter()
+                .filter(|&&d| {
+                    let npos = pos + d;
+                    map.get_block(npos) == cid && map.get_fluid_level(npos) == FLUID_SOURCE
+                })
+                .count();
+            if source_sides >= 2 {
+                candidate = Some((cid, FLUID_SOURCE));
+            }
+        }
+    }
+
     match candidate {
         Some((cid, clevel)) => {
-            if id == cid && map.get_fluid_level(pos) == clevel {
-                return; // already correct
+            if id == cid {
+                let cur_rank = fluid_rank(map.get_fluid_level(pos));
+                let cand_rank = fluid_rank(clevel);
+                if cand_rank == cur_rank {
+                    return; // already correct
+                }
+                if cand_rank > cur_rank {
+                    // The best supply currently visible is *worse* than what
+                    // this cell already has — its real supply chain was cut.
+                    // Dry instead of drifting to a worse-but-still-wet
+                    // level: accepting a worse candidate here can thrash
+                    // indefinitely as a removed source's former network
+                    // keeps "downgrading" through itself (cells feeding
+                    // each other slightly-worse levels forever). Drying is
+                    // monotonic — a cell only ever dries once — and any
+                    // neighbour with a genuinely still-valid path simply
+                    // re-floods it on a later recompute.
+                    if map.set_fluid_cell(pos, AIR, FLUID_SOURCE) {
+                        queue.extend(FLUID_NEIGHBORS.iter().map(|&d| pos + d));
+                    }
+                    return;
+                }
             }
             let can_host = id == AIR || tables.replaceable[id as usize] || id == cid;
             if !can_host {
@@ -781,5 +857,126 @@ impl Plugin for WorldPlugin {
                     .after(collect_mesh_tasks)
                     .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::BlockRegistry;
+    use crate::config::CS;
+
+    fn empty_chunk() -> Chunk {
+        Chunk {
+            blocks: Some(vec![AIR; CS * CS * H]),
+            fluid_level: Some(vec![FLUID_SOURCE; CS * CS * H]),
+            ..Chunk::default()
+        }
+    }
+
+    fn setup() -> (BlockId, BlockId, Arc<Tables>, ChunkMap) {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let water = reg.id("water");
+        let stone = reg.id("stone");
+        let tables = reg.compile(&atlas.indices);
+        let map = ChunkMap { chunks: HashMap::from([(IVec2::ZERO, empty_chunk())]), ..ChunkMap::default() };
+        (water, stone, tables, map)
+    }
+
+    /// Fills an entire horizontal layer solid, so lateral-spread tests
+    /// aren't accidentally also exercising the (separately tested) falling
+    /// behaviour just because the synthetic chunk has no ground.
+    fn fill_floor(map: &mut ChunkMap, y: i32, id: BlockId) {
+        let blocks = map.chunks.get_mut(&IVec2::ZERO).unwrap().blocks.as_mut().unwrap();
+        for z in 0..CS {
+            for x in 0..CS {
+                blocks[block_index(x, y as usize, z)] = id;
+            }
+        }
+    }
+
+    /// Drives the same relaxation `process_fluid_updates` runs, until the
+    /// queue empties, bailing out instead of hanging if something regresses
+    /// into an infinite oscillation.
+    fn drain(map: &mut ChunkMap, tables: &Tables, seed: IVec3) {
+        let mut queue = VecDeque::from([seed]);
+        let mut guard = 0;
+        while let Some(pos) = queue.pop_front() {
+            recompute_cell(map, tables, pos, &mut queue);
+            guard += 1;
+            assert!(guard < 50_000, "fluid recompute did not converge");
+        }
+    }
+
+    #[test]
+    fn two_sources_either_side_of_a_gap_makes_the_gap_a_source() {
+        let (water, stone, tables, mut map) = setup();
+        fill_floor(&mut map, 9, stone);
+        let a = IVec3::new(4, 10, 4);
+        let gap = IVec3::new(5, 10, 4);
+        let b = IVec3::new(6, 10, 4);
+        map.set_fluid_cell(a, water, FLUID_SOURCE);
+        map.set_fluid_cell(b, water, FLUID_SOURCE);
+
+        drain(&mut map, &tables, gap);
+
+        assert_eq!(map.get_block(gap), water);
+        assert_eq!(map.get_fluid_level(gap), FLUID_SOURCE);
+    }
+
+    #[test]
+    fn a_single_source_neighbour_stays_flowing_not_a_source() {
+        let (water, stone, tables, mut map) = setup();
+        fill_floor(&mut map, 9, stone);
+        let a = IVec3::new(4, 10, 4);
+        let next = IVec3::new(5, 10, 4);
+        map.set_fluid_cell(a, water, FLUID_SOURCE);
+
+        drain(&mut map, &tables, next);
+
+        assert_eq!(map.get_block(next), water);
+        assert_eq!(map.get_fluid_level(next), 1);
+    }
+
+    #[test]
+    fn waterfall_over_open_space_lands_before_spreading_sideways() {
+        let (water, _stone, tables, mut map) = setup();
+        let source = IVec3::new(5, 10, 4);
+        map.set_fluid_cell(source, water, FLUID_SOURCE);
+
+        drain(&mut map, &tables, source + IVec3::NEG_Y);
+
+        // Straight down to the floor: fully fluid.
+        for y in 0..10 {
+            assert_eq!(map.get_block(IVec3::new(5, y, 4)), water, "column not fluid at y={y}");
+        }
+        // Mid-fall, one block sideways: must stay dry — a falling segment
+        // over open space is not a lateral supply until it lands, or this
+        // would flood a whole sheet instead of a narrow waterfall.
+        for y in 1..9 {
+            assert_eq!(map.get_block(IVec3::new(6, y, 4)), AIR, "unexpected sideways leak at y={y}");
+        }
+        // Only at the floor does it spread outward.
+        assert_eq!(map.get_block(IVec3::new(6, 0, 4)), water);
+    }
+
+    #[test]
+    fn flowing_water_dries_up_once_its_source_is_removed() {
+        let (water, stone, tables, mut map) = setup();
+        fill_floor(&mut map, 9, stone);
+        let source = IVec3::new(4, 10, 4);
+        let next = IVec3::new(5, 10, 4);
+        map.set_fluid_cell(source, water, FLUID_SOURCE);
+        drain(&mut map, &tables, next);
+        assert_eq!(map.get_block(next), water);
+
+        // Remove the source directly (bypassing set_block/BlockSetEvent, the
+        // same way the simulation itself writes) and re-run the relaxation
+        // the way `enqueue_fluid_updates` would after a real break event.
+        map.set_fluid_cell(source, AIR, FLUID_SOURCE);
+        drain(&mut map, &tables, next);
+
+        assert_eq!(map.get_block(next), AIR);
     }
 }

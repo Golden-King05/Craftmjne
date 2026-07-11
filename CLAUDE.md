@@ -179,6 +179,33 @@ etc.) instead of inventing a new approach:
   moment generation finishes, both copied together in `build_padded`). Reuse
   this shape for any future per-block runtime state (growth stage, charge
   level, etc.) rather than inventing a `HashMap<IVec3, T>` side-channel.
+- **A pull-based relaxation ("what's the best value my neighbours currently
+  offer me") must never let an already-filled cell adopt a *worse* value
+  than it already has — only improve, or reset to empty.** `world.rs`'s
+  `recompute_cell` first allowed a flowing fluid cell to fall back to a
+  worse-but-still-wet level when its real supply was cut, reasoning
+  "closest neighbour's level + 1" fresh each time. That's fine for filling
+  empty cells, but for an *already-fluid* cell it lets a removed source's
+  former network "downgrade through itself" indefinitely — cell A relaxes
+  to a worse level derived from B, which enqueues B, which relaxes to a
+  worse level derived from A's new value, forever (this is the classic
+  "Dijkstra doesn't handle edge/source removal" problem: relaxation only
+  has a termination proof when values monotonically improve). Fix: compare
+  the candidate against the cell's current value via a rank function
+  (`fluid_rank`, source/falling both rank `0`, best); accept only if it's
+  a genuine improvement, otherwise drop straight to empty instead of the
+  worse value. Emptying is monotonic (a cell only empties once) and a
+  neighbour with a real remaining path simply re-fills it on a later pass.
+  Apply this to *any* future pull-based propagating sim, not just fluids.
+- **When a "does this converge" test times out, don't assume it's a true
+  infinite loop before measuring.** The fix above was first diagnosed as a
+  hang from a 10k-iteration guard tripping; instrumenting the loop (a
+  `guard % N == 0` print) showed it was actually converging correctly at
+  ~15-20k iterations in under the same test run — the *test's* synthetic
+  chunk had no floor, so an unrelated waterfall fell through open space and
+  flooded a much bigger volume than the scenario needed. The real fix was
+  giving the test a floor (`fill_floor` in `world.rs`'s test module) so it
+  only exercises what it's actually testing, not raising the guard blindly.
 - **Rendering variable per-block height needs the "step wall," not just a
   lower cap.** Culling a face just because the neighbour is the same block
   id (`mesher.rs`'s original `nid == id` skip) is only correct when every

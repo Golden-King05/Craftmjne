@@ -272,6 +272,12 @@ automatically — no fluid-specific code required. `world.rs` keeps a per-cell
 - **`FLUID_FALLING`** — a full-height column fed from directly above (a
   waterfall); renders like a source but dries up if its supply is cut.
 
+**Infinite water**: a flowing/falling cell with 2 or more of its 4 side
+neighbours already permanent sources of the same fluid is promoted to a
+source itself — the classic "two water source blocks either side of a gap"
+trick, so a bounded pool built from placed sources doesn't dry up like a
+transient flow would.
+
 A budgeted queue (`FluidQueue`/`recompute_cell`) reacts to `BlockSetEvent`
 and relaxes affected cells a few hundred at a time per tick, so a large
 spread is visibly gradual rather than resolving in one frame. The mesher
