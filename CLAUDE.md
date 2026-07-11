@@ -225,16 +225,33 @@ etc.) instead of inventing a new approach:
   origin <branch> && git checkout -B <branch> origin/<branch>` if stale.
   Don't assume a clean `cargo check` means the tree is what you last left it.
 - **`git push` works for branches but 403s on tags** (both creating and
-  deleting) with the credentials available in this environment. Tag/release
-  creation has to be done by the human user — give them the exact `git tag
-  vX.Y.Z && git push origin vX.Y.Z` command, or point them at GitHub's
-  "Draft a new release" UI.
-- **GitHub Actions matrix jobs can starve for a runner** (seen repeatedly
-  with `macos-13`) and auto-cancel after sitting queued for 24h. A
-  downstream job with a plain `needs: build` is **skipped** if *any* matrix
-  leg fails or is cancelled — `release.yml`'s `release` job uses `if: ${{
-  !cancelled() }}` specifically so a flaky/unavailable platform doesn't
-  block publishing the platforms that did succeed.
+  deleting) with the credentials available in this environment — but this no
+  longer blocks releases. `.github/workflows/auto-tag.yml` watches for
+  `Cargo.toml`'s `version` changing on a push to `main` and creates+pushes
+  the matching `vX.Y.Z` tag itself (via the Actions bot's own `GITHUB_TOKEN`,
+  which *can* push tags), then explicitly dispatches `release.yml` against
+  it. **To cut a release, just bump `version` in `Cargo.toml` (and the
+  matching entry in `Cargo.lock`) and push to `main` — don't hand the user a
+  manual `git tag` command anymore**, that's only a fallback for if
+  `auto-tag.yml` itself breaks.
+- **A GitHub Actions matrix job can get zero hosted-runner capacity and sit
+  "queued" forever** (`runner_id: 0`, never assigned) — this happened to
+  `macos-13` for the `v1.1.1` release, which sat stuck for hours and
+  produced a GitHub Release with **no assets at all**, breaking the in-game
+  auto-updater for everyone until it was diagnosed (`macos-13` was removed
+  from `release.yml`'s matrix as a result — Apple Silicon (`macos-14`)
+  covers current Macs; re-add an Intel leg if GitHub ships a working runner
+  image for it again). This is a *different* failure mode than a leg merely
+  failing or getting cancelled: `release.yml`'s `release` job uses `if: ${{
+  !cancelled() }}` so a matrix leg that fails/cancels doesn't block
+  publishing the platforms that did succeed, but that guard only helps once
+  every leg reaches *some* terminal state — a job that never gets scheduled
+  at all keeps `needs: build` unsatisfied indefinitely, and GitHub only
+  force-cancels a queued-forever job after 24h. If a release is suspiciously
+  slow or an in-game update check keeps finding nothing new, check
+  `actions_list`/`list_workflow_jobs` for the latest release run for a leg
+  stuck at `status: queued` with no `runner_id` — don't assume the workflow
+  is just being slow.
 - **NSIS (`makensis`) resolves relative `File` paths against the `.nsi`
   script's own directory**, not the invoking working directory. `SRC_EXE`
   in `installer/craftmjne.nsi` must be absolute or the build silently

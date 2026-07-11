@@ -38,8 +38,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
+          # Intel Mac (x86_64-apple-darwin) used to build here on macos-13,
+          # but that runner label has zero available hosted-runner capacity
+          # as of the v1.1.1 release attempt - the job sat "queued" with no
+          # runner assigned at all (not just slow/flaky) and, because
+          # `release` below needs *every* matrix leg to reach a terminal
+          # state, blocked the whole release indefinitely (`!cancelled()`
+          # only helps once a run actually finishes; it can't rescue a job
+          # that never gets scheduled). Re-add an Intel Mac leg if GitHub
+          # brings back a working runner image for it - Apple Silicon
+          # (macos-14 above) covers all Macs sold since 2020 in the
+          # meantime, and Rosetta 2 runs the aarch64 build on Intel Macs too.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -106,10 +115,13 @@ jobs:
 
   release:
     needs: build
-    # Publish whatever platforms did build even if one leg failed or got
-    # stuck without a runner (macos-13 has been flaky) - previously a
-    # single failed/cancelled matrix leg silently skipped this job and the
-    # release. `!cancelled()` still skips if the whole run was cancelled.
+    # Publish whatever platforms did build even if one leg failed - a
+    # single failed/cancelled matrix leg would otherwise silently skip this
+    # job and the whole release. `!cancelled()` still skips if the whole
+    # run was cancelled. Note this only helps once every leg reaches a
+    # terminal state; a leg that never gets a runner at all (stuck
+    # "queued" forever) still blocks `needs: build` indefinitely - that's
+    # why the matrix above no longer requests macos-13.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:

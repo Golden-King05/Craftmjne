@@ -176,11 +176,20 @@ gap.
 
 ## Releasing a new version
 
-1. Bump `version` in `Cargo.toml`.
-2. `git tag v0.3.0 && git push origin v0.3.0`.
-3. CI builds Windows/Linux/macOS binaries, packages the Windows installer,
-   and publishes everything to a GitHub Release — installed copies of the
-   game will pick it up automatically within one restart.
+Bump `version` in `Cargo.toml` (and the matching `craftmjne` entry near the
+top of `Cargo.lock`) and push to `main` — that's it. `.github/workflows/
+auto-tag.yml` notices the version changed, creates and pushes the matching
+`vX.Y.Z` tag, and dispatches `release.yml` against it, which builds
+Windows/Linux/macOS binaries, packages the Windows installer, and publishes
+everything to a GitHub Release. Installed copies of the game pick it up
+automatically within one restart (see "Auto-updating" above).
+
+If you ever need to cut a release by hand instead (e.g. `auto-tag.yml`
+itself is broken), the manual path still works: `git tag vX.Y.Z && git push
+origin vX.Y.Z`. Note that some environments — including Claude sessions
+working in this repo — get an HTTP 403 pushing tags even though branch
+pushes work fine; that's exactly the gap `auto-tag.yml` exists to close,
+since the Actions bot's own `GITHUB_TOKEN` *can* push tags within this repo.
 
 ## Performance design
 
@@ -239,7 +248,8 @@ blocks/
 installer/
 └── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
 .github/workflows/
-└── release.yml           # tag push -> cross-platform build + GitHub Release
+├── auto-tag.yml          # Cargo.toml version bump on main -> tags + dispatches release.yml
+└── release.yml           # tag push (or auto-tag.yml's dispatch) -> cross-platform build + release
 ```
 
 Data flow for a chunk: `stream_chunks` → generation task → blocks arrive →
