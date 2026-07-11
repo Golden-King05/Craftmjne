@@ -180,6 +180,7 @@ pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> Chunk
                     let nid = padded[n_cell];
                     let is_side = matches!(f, 0 | 1 | 4 | 5);
                     let mut bottom = 0.0f32;
+                    let mut stepped = false;
                     if nid != 0 {
                         if tables.opaque[nid as usize] {
                             continue;
@@ -201,10 +202,22 @@ pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> Chunk
                                     continue;
                                 }
                                 bottom = n_cap;
+                                stepped = true;
                             } else {
                                 continue;
                             }
                         }
+                    }
+                    // A falling (waterfall) segment's exposed walls taper
+                    // from full height at the top - touching whatever feeds
+                    // it from directly above - down to a one-pixel sliver at
+                    // the bottom, instead of a flat rectangular wall. Chained
+                    // down a multi-block drop this reads as one continuous
+                    // cascade rather than a stack of solid cubes. Doesn't
+                    // apply where the step-wall case above already set a
+                    // (different) partial bottom.
+                    if is_fluid && is_side && level == FLUID_FALLING && !stepped {
+                        bottom = 1.0 / TILE_SIZE as f32;
                     }
 
                     let tile = tables.tiles[id as usize * 6 + f] as usize;
@@ -344,6 +357,30 @@ mod tests {
         fluid[padded_index(5, 10, 4)] = 1;
         let level_mesh = mesh_chunk(&padded, &fluid, &tables);
         assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
+    }
+
+    #[test]
+    fn falling_water_tapers_its_side_walls_to_a_sliver() {
+        let (reg, tables) = tables();
+        let water = reg.id("water");
+        let mut padded = empty_padded();
+        let mut fluid = empty_fluid();
+        // A falling segment fed from a source directly above it, open air on
+        // every side and below - the classic mid-air waterfall shaft.
+        padded[padded_index(4, 11, 4)] = water;
+        fluid[padded_index(4, 11, 4)] = FLUID_SOURCE;
+        padded[padded_index(4, 10, 4)] = water;
+        fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
+        let mesh = mesh_chunk(&padded, &fluid, &tables);
+
+        let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
+        let sliver = 10.0 + 1.0 / TILE_SIZE as f32;
+        // The side walls' tapered bottom edge (the one-pixel sliver)...
+        assert!(ys.iter().any(|&y| (y - sliver).abs() < 1e-4), "no tapered sliver in {ys:?}");
+        // ...the side walls' top edge, still touching the source above...
+        assert!(ys.iter().any(|&y| (y - 11.0).abs() < 1e-4), "no full-height top in {ys:?}");
+        // ...and the true floor (the bottom face, unaffected by the taper).
+        assert!(ys.iter().any(|&y| (y - 10.0).abs() < 1e-4), "no untouched floor in {ys:?}");
     }
 
     #[test]

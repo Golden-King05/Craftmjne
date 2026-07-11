@@ -623,15 +623,35 @@ fn autosave(
     write_save(&store, &active, &log, &registry, players.single().ok());
 }
 
-/// `OnExit(AppState::InGame)`: persist this session's edits and player pose.
+/// `OnExit(AppState::InGame)`: persist this session's edits and player pose,
+/// then despawn the chunk world's render entities. Without this, whatever
+/// shows after leaving (the main menu, most commonly, since its own UI is
+/// intentionally semi-transparent/not full-bleed) kept rendering a frozen
+/// snapshot of the world just left instead of the plain sky-colour backdrop
+/// menus are supposed to have — `enter_world` only ever cleaned this up on
+/// the *next* world load, leaving a gap for however long the player sat at
+/// the menu in between.
 fn exit_world(
+    mut commands: Commands,
     store: Res<SaveStore>,
     active: Res<ActiveWorld>,
     log: Res<EditLog>,
     registry: Res<BlockRegistry>,
     players: Query<&Player>,
+    mut map: ResMut<ChunkMap>,
+    tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
 ) {
     write_save(&store, &active, &log, &registry, players.single().ok());
+
+    for e in &tasks {
+        commands.entity(e).despawn();
+    }
+    for chunk in map.chunks.values_mut() {
+        for e in [chunk.solid_entity.take(), chunk.water_entity.take()].into_iter().flatten() {
+            commands.entity(e).despawn();
+        }
+    }
+    *map = ChunkMap::default();
 }
 
 /// Figures out what to generate/mesh/unload. Cheap (a few hundred map hits)
