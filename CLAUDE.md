@@ -118,7 +118,29 @@ etc.) instead of inventing a new approach:
   `.id(name)` (panics if unknown, fine for hardcoded names), `.by_name(name)
   -> Result<..., UnknownBlock>` (non-panicking, use when loading untrusted
   save data), `.defs: Vec<BlockDef>` (iterate `.enumerate().skip(1)` to
-  skip `AIR = 0`).
+  skip `AIR = 0`). Block content itself is data, not code — one JSON file
+  per block in `blocks/`, loaded by `BlockRegistry::with_defaults` at
+  startup (`blocks.rs`'s module docs have the full schema). Programmatic
+  `.register(BlockDef {..})` from a plugin still works too, for content
+  that's easier to generate than to hand-write as JSON.
+- **Finding a shipped data directory at runtime** (`blocks.rs`'s
+  `find_blocks_dir`): try `std::env::current_exe()`'s parent dir first (how
+  an installed/distributed build finds files shipped next to it), fall back
+  to a plain relative path (how `cargo run`/`cargo test` find one at the
+  repo root — Cargo runs both with the package root as cwd). Never resolve
+  via `CARGO_MANIFEST_DIR`/other compile-time env vars for this — that path
+  only exists on the machine that *built* the binary, not the end user's.
+  Reuse this pattern for any future shipped-data-folder feature.
+- **Separate "how it renders" from "what it does."** When generalizing a
+  special-cased block (water) into a data-driven flag, don't let a single
+  boolean/field control two unrelated things just because the one existing
+  example (water) happens to want both. `mesher.rs`'s fluid-surface-height
+  cap is driven by `tables.fluid[id]`, independent of `tables.translucent
+  [id]` (which drives solid-vs-blend bucket routing) — a hypothetical
+  non-fluid translucent block, or a future non-translucent fluid, both stay
+  representable. If you catch yourself reusing one flag to gate two
+  behaviors "because that's what the current content needs," that's the
+  moment to split it, before more content ossifies the coupling.
 - **`ChildSpawnerCommands`** is the parameter type for small reusable
   `fn spawn_thing(parent: &mut ChildSpawnerCommands, ...)` helpers called
   from inside `.with_children(|parent| ...)` closures (see `menu::
