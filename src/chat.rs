@@ -1,9 +1,8 @@
 //! In-world chat: press T to open a one-line input box, Enter to send
 //! (appended to a local scrollback that fades out after a few seconds),
-//! Escape to cancel. There's no multiplayer and no command dispatcher yet -
-//! this is scaffolding: `/`-prefixed messages are already routed separately
-//! from plain chat (see `chat_text_input`), so a future command handler can
-//! hook in there without touching the input/UI plumbing.
+//! Escape to cancel. There's no multiplayer yet, but `/`-prefixed messages
+//! are routed to `commands::execute` (see that module for the dispatcher
+//! and the list of commands).
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
@@ -11,7 +10,9 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::collections::VecDeque;
 
-use crate::state::{AppState, PauseState};
+use crate::commands;
+use crate::save::{GameMode, SaveStore};
+use crate::state::{ActiveWorld, AppState, PauseState};
 
 const MAX_MESSAGES: usize = 50;
 const VISIBLE_MESSAGES: usize = 8;
@@ -139,10 +140,14 @@ fn restore_grab(chat: &ChatState, windows: &mut Query<&mut Window, With<PrimaryW
 /// Runs after `toggle_chat`. Reads raw `KeyboardInput` events (rather than
 /// `ButtonInput`) so it sees the actual typed characters, same approach as
 /// the create-world text fields in `menu.rs`.
+#[allow(clippy::too_many_arguments)]
 fn chat_text_input(
     mut events: EventReader<KeyboardInput>,
     mut chat: ResMut<ChatState>,
     mut log: ResMut<ChatLog>,
+    mut mode: ResMut<GameMode>,
+    mut active: ResMut<ActiveWorld>,
+    store: Res<SaveStore>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     if !chat.open {
@@ -172,8 +177,8 @@ fn chat_text_input(
                 let text = chat.input.trim().to_string();
                 if !text.is_empty() {
                     if let Some(rest) = text.strip_prefix('/') {
-                        // No command dispatcher yet - just acknowledge it was heard.
-                        log.push(format!("Unknown command: /{rest}"));
+                        let outcome = commands::execute(rest, &mut mode, &mut active, &store);
+                        log.push(outcome.message());
                     } else {
                         log.push(text);
                     }

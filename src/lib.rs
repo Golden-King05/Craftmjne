@@ -5,6 +5,7 @@
 pub mod atlas;
 pub mod blocks;
 pub mod chat;
+pub mod commands;
 pub mod config;
 pub mod interact;
 pub mod menu;

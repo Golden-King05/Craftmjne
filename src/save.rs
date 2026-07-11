@@ -69,6 +69,13 @@ pub struct WorldMeta {
     /// load - they come back as `Survival`, the more restrictive default.
     #[serde(default)]
     pub mode: GameMode,
+    /// Set permanently the first time any chat command is used in this
+    /// world (see `commands.rs`) and never cleared again - mirrors
+    /// Minecraft's own "cheats" world flag, which exists so a save that's
+    /// had commands run in it can be disqualified from future achievements.
+    /// Not surfaced anywhere in the UI on purpose.
+    #[serde(default)]
+    pub cheats: bool,
     pub created_at: u64,
     pub last_played_at: u64,
 }
@@ -200,6 +207,7 @@ impl SaveStore {
             name: if name.trim().is_empty() { "New World".to_string() } else { name.trim().to_string() },
             seed,
             mode,
+            cheats: false,
             created_at: now,
             last_played_at: now,
         };
@@ -382,5 +390,22 @@ mod tests {
         .unwrap();
         let meta = store.load_meta(&slug).unwrap();
         assert_eq!(meta.mode, GameMode::Survival);
+        assert!(!meta.cheats); // missing `cheats` also defaults sanely
+    }
+
+    #[test]
+    fn new_worlds_start_without_cheats() {
+        let store = temp_store();
+        let (_, meta) = store.create_world("Fresh", 1, GameMode::Survival).unwrap();
+        assert!(!meta.cheats);
+    }
+
+    #[test]
+    fn cheats_flag_round_trips_once_set() {
+        let store = temp_store();
+        let (slug, mut meta) = store.create_world("Cheated", 1, GameMode::Survival).unwrap();
+        meta.cheats = true;
+        store.save_meta(&slug, &meta).unwrap();
+        assert!(store.load_meta(&slug).unwrap().cheats);
     }
 }
