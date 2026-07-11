@@ -43,9 +43,9 @@
 //! - `fluid: true` blocks default to `solid: false`, `selectable: false`,
 //!   `replaceable: true` (matching how a fluid actually behaves) unless a
 //!   field is explicitly set in the file to override that. `flow_distance`
-//!   is stored on the block def for a future flow-simulation system to use;
-//!   nothing reads it yet (see `mesher.rs`'s fluid-surface-height handling
-//!   for what *is* implemented today).
+//!   controls how far the fluid spreads from a source before drying up (see
+//!   `world.rs`'s `FluidQueue`/`recompute_cell` for the spread sim and
+//!   `mesher.rs`'s `fluid_height` for the resulting slope).
 //! - `textures` defaults to a single texture named after `id` on every face
 //!   if omitted entirely.
 
@@ -56,6 +56,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub type BlockId = u16;
+
+/// A fluid cell's stored level, meaningful only while that cell's block id is
+/// a fluid (see `Chunk::fluid_level` in `world.rs`). `0` is a permanent
+/// source (never dries, always full height); `1..=flow_distance` is a
+/// flowing cell that many blocks from its supply; `FLUID_FALLING` is a full
+/// -height column fed from directly above (a waterfall), which — unlike a
+/// source — dries up if its supply is cut.
+pub const FLUID_SOURCE: u8 = 0;
+pub const FLUID_FALLING: u8 = 255;
 
 #[derive(Debug)]
 pub struct UnknownBlock;
@@ -147,7 +156,9 @@ pub struct BlockDef {
     /// water-style look.
     pub fluid: bool,
     /// How far (in blocks) this fluid should flow from a source before
-    /// drying up. Stored for a future flow-simulation system; unused today.
+    /// drying up. Drives both the spread simulation (`world.rs`'s fluid
+    /// queue) and the mesher's per-level surface height, so a long distance
+    /// slopes gently and a short one drops off steeply.
     pub flow_distance: u32,
     /// Can be targeted by the crosshair raycast.
     pub selectable: bool,
@@ -247,6 +258,14 @@ pub struct Tables {
     pub opaque: Vec<bool>,
     pub translucent: Vec<bool>,
     pub fluid: Vec<bool>,
+    /// Placing a block into this cell overwrites it (mirrors
+    /// `BlockDef::replaceable`) — the fluid spread sim (`world.rs`) uses this
+    /// to know which cells it's allowed to flow into.
+    pub replaceable: Vec<bool>,
+    /// How many blocks a fluid flows from its source before drying up,
+    /// clamped to `u8`. Drives both the spread sim and the mesher's per-level
+    /// surface height.
+    pub flow_distance: Vec<u8>,
     /// Atlas tile per face: `tiles[id as usize * 6 + face]`.
     pub tiles: Vec<u16>,
 }
@@ -366,6 +385,8 @@ impl BlockRegistry {
             opaque: vec![false; n],
             translucent: vec![false; n],
             fluid: vec![false; n],
+            replaceable: vec![false; n],
+            flow_distance: vec![0; n],
             tiles: vec![0; n * 6],
         };
         for (id, def) in self.defs.iter().enumerate().skip(1) {
@@ -373,6 +394,8 @@ impl BlockRegistry {
             tables.opaque[id] = def.transparency == Transparency::No;
             tables.translucent[id] = def.transparency == Transparency::Full;
             tables.fluid[id] = def.fluid;
+            tables.replaceable[id] = def.replaceable;
+            tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
             for face in 0..6 {
                 let tex = def.textures.resolve(&def.id, face);
                 let tile = atlas_index.get(tex).unwrap_or_else(|| {
@@ -403,6 +426,8 @@ mod tests {
         assert!(!tables.opaque[water as usize]);
         assert!(tables.translucent[water as usize]);
         assert!(tables.fluid[water as usize]);
+        assert!(tables.replaceable[water as usize]);
+        assert_eq!(tables.flow_distance[water as usize], 7);
         assert!(!tables.opaque[leaves as usize]);
         assert!(!tables.translucent[leaves as usize]);
         // grass has distinct top/bottom/side tiles

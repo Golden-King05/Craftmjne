@@ -14,7 +14,7 @@
 
 use std::sync::LazyLock;
 
-use crate::blocks::Tables;
+use crate::blocks::{Tables, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{ATLAS_TILES, CHUNK_SIZE, CS, H, TILE_SIZE, WORLD_HEIGHT};
 
 // Padded array layout: x,z in [-1, CHUNK_SIZE], y in [-1, WORLD_HEIGHT].
@@ -36,6 +36,21 @@ const AO_BRIGHT: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
 
 /// Fluid tops sit one pixel below the block top (16x16 textures -> 1/16).
 const FLUID_SURFACE: f32 = 1.0 - 1.0 / TILE_SIZE as f32;
+
+/// Surface height for a fluid cell at `level` blocks from its source, given
+/// that fluid's configured `flow_distance`. Level 0 (a permanent source) and
+/// `FLUID_FALLING` (a waterfall column) both render full-height; everything
+/// else steps down linearly from `FLUID_SURFACE` at level 1 to a thin film at
+/// `level == flow_distance` — so a long `flow_distance` slopes gently and a
+/// short one drops off steeply, with no per-fluid special-casing needed.
+fn fluid_height(level: u8, flow_distance: u8) -> f32 {
+    if level == FLUID_SOURCE || level == FLUID_FALLING {
+        return FLUID_SURFACE;
+    }
+    let fd = flow_distance.max(1) as f32;
+    let l = (level as f32).min(fd);
+    FLUID_SURFACE * (fd - l + 1.0) / (fd + 1.0)
+}
 
 struct FaceCorner {
     pos: [f32; 3],
@@ -125,8 +140,9 @@ pub struct ChunkMeshData {
     pub water: MeshBucket,
 }
 
-pub fn mesh_chunk(padded: &[u16], tables: &Tables) -> ChunkMeshData {
+pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> ChunkMeshData {
     debug_assert_eq!(padded.len(), PAD_XZ * PAD_XZ * PAD_Y);
+    debug_assert_eq!(padded_fluid.len(), padded.len());
     let mut solid = MeshBucket::default();
     let mut water = MeshBucket::default();
 
@@ -149,17 +165,46 @@ pub fn mesh_chunk(padded: &[u16], tables: &Tables) -> ChunkMeshData {
                 let is_translucent = tables.translucent[id as usize];
                 let bucket = if is_translucent { &mut water } else { &mut solid };
                 let is_fluid = tables.fluid[id as usize];
-                let cap = if is_fluid && padded[cell + SY as usize] != id {
-                    FLUID_SURFACE
+                let level = padded_fluid[cell];
+                let flow_dist = tables.flow_distance[id as usize];
+                // Covered by more of the same fluid above -> render full
+                // height (it's not this stack's exposed surface).
+                let cap = if is_fluid {
+                    if padded[cell + SY as usize] == id { 1.0 } else { fluid_height(level, flow_dist) }
                 } else {
                     1.0
                 };
 
                 for (f, face) in FACES.iter().enumerate() {
-                    let nid = padded[(cell as i32 + face.neighbor_ofs) as usize];
-                    // A face is hidden behind opaque blocks and its own kind.
-                    if nid != 0 && (tables.opaque[nid as usize] || nid == id) {
-                        continue;
+                    let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
+                    let nid = padded[n_cell];
+                    let is_side = matches!(f, 0 | 1 | 4 | 5);
+                    let mut bottom = 0.0f32;
+                    if nid != 0 {
+                        if tables.opaque[nid as usize] {
+                            continue;
+                        }
+                        if nid == id {
+                            if is_fluid && is_side {
+                                // Same fluid next door at a different level:
+                                // draw a partial "step" wall from its surface
+                                // up to ours instead of culling the face
+                                // outright (a flat cull would leave a visible
+                                // gap between two different-height cells).
+                                let n_level = padded_fluid[n_cell];
+                                let n_cap = if padded[n_cell + SY as usize] == id {
+                                    1.0
+                                } else {
+                                    fluid_height(n_level, flow_dist)
+                                };
+                                if n_cap + 1e-4 >= cap {
+                                    continue;
+                                }
+                                bottom = n_cap;
+                            } else {
+                                continue;
+                            }
+                        }
                     }
 
                     let tile = tables.tiles[id as usize * 6 + f] as usize;
@@ -182,7 +227,7 @@ pub fn mesh_chunk(padded: &[u16], tables: &Tables) -> ChunkMeshData {
 
                         bucket.positions.push([
                             x as f32 + c.pos[0],
-                            y as f32 + if c.pos[1] == 1.0 { cap } else { 0.0 },
+                            y as f32 + if c.pos[1] == 1.0 { cap } else { bottom },
                             z as f32 + c.pos[2],
                         ]);
                         bucket.uvs.push([
@@ -223,12 +268,16 @@ mod tests {
         vec![0u16; PAD_XZ * PAD_XZ * PAD_Y]
     }
 
+    fn empty_fluid() -> Vec<u8> {
+        vec![0u8; PAD_XZ * PAD_XZ * PAD_Y]
+    }
+
     #[test]
     fn lone_block_emits_six_faces() {
         let (reg, tables) = tables();
         let mut padded = empty_padded();
         padded[padded_index(8, 30, 8)] = reg.id("stone");
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
         assert_eq!(mesh.solid.positions.len(), 6 * 4);
         assert_eq!(mesh.solid.indices.len(), 6 * 6);
         assert!(mesh.water.is_empty());
@@ -242,11 +291,11 @@ mod tests {
         // one exposed face at the top only for the interior column we check:
         // actually fully solid volume -> zero faces inside; boundary faces
         // depend on the shell, which is also stone here.
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
         assert!(mesh.solid.is_empty());
         // poke a hole: the neighbouring block gains exactly one face
         padded[padded_index(8, 30, 8)] = 0;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
         assert_eq!(mesh.solid.positions.len(), 6 * 4); // 6 cavity walls
     }
 
@@ -255,11 +304,46 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = empty_padded();
         padded[padded_index(4, 10, 4)] = reg.id("water");
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
         assert!(mesh.solid.is_empty());
         assert_eq!(mesh.water.positions.len(), 6 * 4);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
         assert_eq!(max_y, 10.0 + FLUID_SURFACE);
+    }
+
+    #[test]
+    fn flowing_water_is_shallower_than_a_source() {
+        let (reg, tables) = tables();
+        let water = reg.id("water");
+        let mut padded = empty_padded();
+        let mut fluid = empty_fluid();
+        padded[padded_index(4, 10, 4)] = water;
+        fluid[padded_index(4, 10, 4)] = 3; // 3 blocks from a source
+        let mesh = mesh_chunk(&padded, &fluid, &tables);
+        let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
+        assert!(max_y < 10.0 + FLUID_SURFACE);
+        assert!(max_y > 10.0);
+    }
+
+    #[test]
+    fn adjacent_water_at_different_levels_gets_a_step_wall() {
+        let (reg, tables) = tables();
+        let water = reg.id("water");
+        let mut padded = empty_padded();
+        let mut fluid = empty_fluid();
+        padded[padded_index(4, 10, 4)] = water;
+        padded[padded_index(5, 10, 4)] = water;
+        fluid[padded_index(4, 10, 4)] = 1;
+        fluid[padded_index(5, 10, 4)] = 4; // shallower neighbour
+        let mesh = mesh_chunk(&padded, &fluid, &tables);
+        // the boundary between them must render a wall face instead of being
+        // fully culled (same-id neighbours at equal height cull completely).
+        assert!(!mesh.water.is_empty());
+
+        // sanity: identical levels on both sides fully cull that face.
+        fluid[padded_index(5, 10, 4)] = 1;
+        let level_mesh = mesh_chunk(&padded, &fluid, &tables);
+        assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
     }
 
     #[test]
@@ -269,7 +353,7 @@ mod tests {
         let mut padded = empty_padded();
         padded[padded_index(8, 30, 8)] = stone;
         padded[padded_index(9, 31, 8)] = stone; // occluder above the +x neighbour
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
         // some top-face vertex of the base block must now be darker than shade 1.0
         let top_lights: Vec<f32> = mesh
             .solid
@@ -290,9 +374,10 @@ mod tests {
         let gen = crate::terrain::TerrainGenerator::new(1337, &reg);
         // build padded from 3x3 generated chunks
         let mut padded = empty_padded();
+        let mut fluid = empty_fluid();
         for ncz in -1..=1i32 {
             for ncx in -1..=1i32 {
-                let blocks = gen.generate(ncx, ncz);
+                let chunk = gen.generate(ncx, ncz);
                 for lz in 0..CS {
                     for lx in 0..CS {
                         let px = ncx * CHUNK_SIZE + lx as i32;
@@ -302,13 +387,15 @@ mod tests {
                         }
                         for y in 0..H {
                             padded[padded_index(px, y as i32, pz)] =
-                                blocks[block_index(lx, y, lz)];
+                                chunk.blocks[block_index(lx, y, lz)];
+                            fluid[padded_index(px, y as i32, pz)] =
+                                chunk.fluid[block_index(lx, y, lz)];
                         }
                     }
                 }
             }
         }
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &fluid, &tables);
         assert!(mesh.solid.positions.len() > 1000);
         assert_eq!(mesh.solid.positions.len() % 4, 0);
         assert_eq!(mesh.solid.indices.len() / 6, mesh.solid.positions.len() / 4);

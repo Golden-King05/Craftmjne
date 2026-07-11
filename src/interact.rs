@@ -4,7 +4,7 @@
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
-use crate::blocks::{BlockId, BlockRegistry, AIR};
+use crate::blocks::{BlockId, BlockRegistry, AIR, FLUID_SOURCE};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::inventory::InventoryState;
@@ -203,6 +203,12 @@ fn interact(
             let blocked = registry.def(id).solid && player.intersects_block(place_pos);
             if replaceable && !blocked {
                 if let Some(prev) = map.set_block(place_pos, id) {
+                    if registry.def(id).fluid {
+                        // A player-placed fluid always starts as a
+                        // permanent source, not whatever level that cell's
+                        // fluid array last held (e.g. a dried flowing cell).
+                        map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
+                    }
                     block_events.write(BlockSetEvent { pos: place_pos, id, prev });
                 }
             }

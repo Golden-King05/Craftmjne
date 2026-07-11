@@ -11,18 +11,18 @@
 
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
-use crate::blocks::{BlockId, BlockRegistry, BlockTables, Tables, AIR};
+use crate::blocks::{BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, H, WORLD_HEIGHT};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, GameMode, PlayerSave, SaveStore, WorldData};
 use crate::state::{ActiveWorld, AppState};
-use crate::terrain::TerrainGenerator;
+use crate::terrain::{GeneratedChunk, TerrainGenerator};
 
 const MAX_GEN_TASKS: usize = 12;
 const MAX_MESH_TASKS: usize = 8;
@@ -48,6 +48,10 @@ pub struct ChunkMeshedEvent(pub IVec2);
 #[derive(Default)]
 pub struct Chunk {
     pub blocks: Option<Vec<BlockId>>,
+    /// Parallel to `blocks`; meaningful only where the corresponding block id
+    /// is a fluid (see `blocks::FLUID_SOURCE`/`FLUID_FALLING`). Always
+    /// `Some` whenever `blocks` is.
+    pub fluid_level: Option<Vec<u8>>,
     pub version: u32,
     pub dirty: bool,
     pub meshing: bool,
@@ -105,6 +109,24 @@ impl ChunkMap {
         )] as usize]
     }
 
+    /// Border edits affect neighbouring chunks' culling/AO shells too, so a
+    /// write on a chunk-edge cell also bumps up to 3 neighbouring chunks.
+    fn touch_borders(&mut self, coord: IVec2, lx: i32, lz: i32) {
+        let dxs: &[i32] = if lx == 0 { &[-1, 0] } else if lx == CHUNK_SIZE - 1 { &[0, 1] } else { &[0] };
+        let dzs: &[i32] = if lz == 0 { &[-1, 0] } else if lz == CHUNK_SIZE - 1 { &[0, 1] } else { &[0] };
+        for &dx in dxs {
+            for &dz in dzs {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                if let Some(n) = self.chunks.get_mut(&(coord + IVec2::new(dx, dz))) {
+                    n.version += 1;
+                    n.dirty = true;
+                }
+            }
+        }
+    }
+
     /// Writes a block, marks the chunk (and border neighbours) for remeshing.
     /// Returns the previous block id, or None if the chunk isn't loaded.
     pub fn set_block(&mut self, pos: IVec3, id: BlockId) -> Option<BlockId> {
@@ -126,23 +148,74 @@ impl ChunkMap {
         chunk.version += 1;
         chunk.dirty = true;
 
-        // Border edits affect neighbouring chunks' culling/AO shells too.
-        let dxs: &[i32] = if lx == 0 { &[-1, 0] } else if lx == CHUNK_SIZE - 1 { &[0, 1] } else { &[0] };
-        let dzs: &[i32] = if lz == 0 { &[-1, 0] } else if lz == CHUNK_SIZE - 1 { &[0, 1] } else { &[0] };
-        for &dx in dxs {
-            for &dz in dzs {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                if let Some(n) = self.chunks.get_mut(&(coord + IVec2::new(dx, dz))) {
-                    n.version += 1;
-                    n.dirty = true;
-                }
-            }
-        }
-
+        self.touch_borders(coord, lx, lz);
         self.needs_scan = true;
         Some(prev)
+    }
+
+    /// Directly overwrites a cell's stored fluid level without touching its
+    /// block id (used right after placing a fluid block, so it starts as a
+    /// permanent source rather than whatever level that cell last held).
+    /// No-op if the chunk isn't loaded.
+    pub fn set_fluid_level_raw(&mut self, pos: IVec3, level: u8) {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        if let Some(levels) = self.chunks.get_mut(&coord).and_then(|c| c.fluid_level.as_mut()) {
+            levels[idx] = level;
+        }
+    }
+
+    /// Reads a cell's stored fluid level. Only meaningful when `get_block`
+    /// for the same position is a fluid id; returns `FLUID_SOURCE` for
+    /// unloaded chunks (harmless, since callers gate on the block id first).
+    fn get_fluid_level(&self, pos: IVec3) -> u8 {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return FLUID_SOURCE;
+        }
+        let Some(chunk) = self.chunks.get(&Self::chunk_coord(pos.x, pos.z)) else {
+            return FLUID_SOURCE;
+        };
+        let Some(levels) = &chunk.fluid_level else { return FLUID_SOURCE };
+        levels[block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        )]
+    }
+
+    /// Sets both a cell's block id and fluid level in one write, used by the
+    /// spread/dry-up simulation (`recompute_cell`). Unlike `set_block`, this
+    /// does *not* fire a `BlockSetEvent` — simulated flow isn't a player
+    /// edit and shouldn't bloat the save file. Returns false if the chunk
+    /// isn't loaded.
+    fn set_fluid_cell(&mut self, pos: IVec3, id: BlockId, level: u8) -> bool {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return false;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let lx = pos.x.rem_euclid(CHUNK_SIZE);
+        let lz = pos.z.rem_euclid(CHUNK_SIZE);
+        let Some(chunk) = self.chunks.get_mut(&coord) else { return false };
+        let (Some(blocks), Some(levels)) = (chunk.blocks.as_mut(), chunk.fluid_level.as_mut())
+        else {
+            return false;
+        };
+        let idx = block_index(lx as usize, pos.y as usize, lz as usize);
+        blocks[idx] = id;
+        levels[idx] = level;
+        chunk.version += 1;
+        chunk.dirty = true;
+
+        self.touch_borders(coord, lx, lz);
+        self.needs_scan = true;
+        true
     }
 
     /// Topmost solid block in a column, or None if the chunk isn't generated.
@@ -172,25 +245,31 @@ impl ChunkMap {
         true
     }
 
-    /// Copies chunk blocks plus a 1-block shell from the 8 neighbours into a
-    /// padded array. Y-major layout keeps this a series of column copies.
-    fn build_padded(&self, coord: IVec2) -> Vec<BlockId> {
+    /// Copies chunk blocks (+fluid levels) plus a 1-block shell from the 8
+    /// neighbours into padded arrays. Y-major layout keeps this a series of
+    /// column copies.
+    fn build_padded(&self, coord: IVec2) -> (Vec<BlockId>, Vec<u8>) {
         let mut padded = vec![AIR; PAD_XZ * PAD_XZ * PAD_Y];
+        let mut padded_fluid = vec![FLUID_SOURCE; PAD_XZ * PAD_XZ * PAD_Y];
         for pz in -1..=CHUNK_SIZE {
             let ncz = coord.y + if pz < 0 { -1 } else if pz >= CHUNK_SIZE { 1 } else { 0 };
             let lz = pz.rem_euclid(CHUNK_SIZE) as usize;
             for px in -1..=CHUNK_SIZE {
                 let ncx = coord.x + if px < 0 { -1 } else if px >= CHUNK_SIZE { 1 } else { 0 };
                 let lx = px.rem_euclid(CHUNK_SIZE) as usize;
-                let src = self.chunks[&IVec2::new(ncx, ncz)].blocks.as_ref().unwrap();
+                let chunk = &self.chunks[&IVec2::new(ncx, ncz)];
+                let src = chunk.blocks.as_ref().unwrap();
+                let src_fluid = chunk.fluid_level.as_ref().unwrap();
                 let src_base = block_index(lx, 0, lz);
                 let dst_base = padded_index(px, 0, pz);
                 padded[dst_base..dst_base + H].copy_from_slice(&src[src_base..src_base + H]);
+                padded_fluid[dst_base..dst_base + H]
+                    .copy_from_slice(&src_fluid[src_base..src_base + H]);
                 padded[dst_base - 1] = 1; // below the world: solid, culls bottom faces
                 // above the world stays 0 (air)
             }
         }
-        padded
+        (padded, padded_fluid)
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -203,7 +282,7 @@ impl ChunkMap {
 #[derive(Component)]
 struct GenTask {
     coord: IVec2,
-    task: Task<Vec<BlockId>>,
+    task: Task<GeneratedChunk>,
 }
 
 #[derive(Component)]
@@ -226,6 +305,128 @@ struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId)>>);
 
 #[derive(Resource, Default)]
 struct AutosaveTimer(f32);
+
+/// Positions needing a fluid spread/dry-up recompute, fed by `BlockSetEvent`
+/// and by cells whose neighbours just changed. See `recompute_cell` for the
+/// actual relaxation rule; this is deliberately id-agnostic (keyed only on
+/// `Tables::fluid`/`flow_distance`) so a future second fluid (lava, say)
+/// needs zero changes here.
+#[derive(Resource, Default)]
+struct FluidQueue(VecDeque<IVec3>);
+
+/// A source/falling cell's neighbours to touch when it changes.
+const FLUID_NEIGHBORS: [IVec3; 6] =
+    [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z, IVec3::Y, IVec3::NEG_Y];
+
+/// Queues the position of every `BlockSetEvent` plus its 6 neighbours for a
+/// fluid recompute — covers both "a fluid was placed/removed here" and "a
+/// solid obstruction just appeared/disappeared next to a fluid".
+fn enqueue_fluid_updates(mut events: EventReader<BlockSetEvent>, mut queue: ResMut<FluidQueue>) {
+    for e in events.read() {
+        queue.0.push_back(e.pos);
+        for d in FLUID_NEIGHBORS {
+            queue.0.push_back(e.pos + d);
+        }
+    }
+}
+
+const FLUID_TICK: f32 = 1.0 / 12.0;
+const FLUID_TICKS_PER_FRAME: u32 = 4;
+const FLUID_BUDGET_PER_TICK: usize = 512;
+
+/// Budgeted, ticked relaxation so a big spread is visibly gradual (like
+/// Minecraft's own fluid ticks) instead of resolving in a single frame.
+fn process_fluid_updates(
+    mut map: ResMut<ChunkMap>,
+    tables: Res<BlockTables>,
+    mut queue: ResMut<FluidQueue>,
+    time: Res<Time>,
+    mut acc: Local<f32>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    *acc += time.delta_secs();
+    let mut ticks = 0;
+    while *acc >= FLUID_TICK && ticks < FLUID_TICKS_PER_FRAME {
+        *acc -= FLUID_TICK;
+        ticks += 1;
+        for _ in 0..FLUID_BUDGET_PER_TICK {
+            let Some(pos) = queue.0.pop_front() else { break };
+            recompute_cell(&mut map, &tables.0, pos, &mut queue.0);
+        }
+    }
+}
+
+/// The core "write once, works for any fluid" spread/dry-up rule for one
+/// cell:
+///  - A permanent source (level `FLUID_SOURCE`) never changes.
+///  - If the cell directly above is any fluid, this cell becomes a
+///    full-height `FLUID_FALLING` column of that same fluid (a waterfall).
+///  - Otherwise, look at the 4 lateral neighbours: among whichever fluid
+///    reaches this cell at the lowest effective level (sources/falling count
+///    as 0), spread one level further out, capped by that fluid's
+///    `flow_distance`.
+///  - If neither applies and this cell currently holds a non-source fluid,
+///    it dries up (back to air).
+/// A fluid can only occupy air, a `replaceable` block, or itself — anything
+/// else blocks it outright, matching the existing placement rule in
+/// `interact.rs`.
+fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut VecDeque<IVec3>) {
+    if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+        return;
+    }
+    let id = map.get_block(pos);
+    let is_fluid_here = tables.fluid[id as usize];
+    if is_fluid_here && map.get_fluid_level(pos) == FLUID_SOURCE {
+        return; // permanent source
+    }
+
+    let above_id = map.get_block(pos + IVec3::Y);
+    let mut candidate: Option<(BlockId, u8)> =
+        tables.fluid[above_id as usize].then_some((above_id, FLUID_FALLING));
+
+    if candidate.is_none() {
+        const LATERAL: [IVec3; 4] = [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z];
+        for d in LATERAL {
+            let npos = pos + d;
+            let nid = map.get_block(npos);
+            if !tables.fluid[nid as usize] {
+                continue;
+            }
+            let nlevel = map.get_fluid_level(npos);
+            let eff = if nlevel == FLUID_SOURCE || nlevel == FLUID_FALLING { 0 } else { nlevel };
+            let fd = tables.flow_distance[nid as usize].max(1);
+            if eff >= fd {
+                continue; // already at max range, can't spread further
+            }
+            let level = eff + 1;
+            if candidate.as_ref().is_none_or(|&(_, best)| level < best) {
+                candidate = Some((nid, level));
+            }
+        }
+    }
+
+    match candidate {
+        Some((cid, clevel)) => {
+            if id == cid && map.get_fluid_level(pos) == clevel {
+                return; // already correct
+            }
+            let can_host = id == AIR || tables.replaceable[id as usize] || id == cid;
+            if !can_host {
+                return; // obstructed
+            }
+            if map.set_fluid_cell(pos, cid, clevel) {
+                queue.extend(FLUID_NEIGHBORS.iter().map(|&d| pos + d));
+            }
+        }
+        None => {
+            if is_fluid_here && map.set_fluid_cell(pos, AIR, FLUID_SOURCE) {
+                queue.extend(FLUID_NEIGHBORS.iter().map(|&d| pos + d));
+            }
+        }
+    }
+}
 
 /// Startup: build the atlas and compile the registry's flat lookup tables.
 /// Runs before any render/UI setup that needs atlas indices. Does not touch
@@ -284,6 +485,7 @@ fn enter_world(
     commands.insert_resource(PendingEdits(grouped));
     commands.insert_resource(EditLog::default());
     commands.insert_resource(AutosaveTimer::default());
+    commands.insert_resource(FluidQueue::default());
 
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
@@ -422,14 +624,14 @@ fn stream_chunks(
         if map.mesh_in_flight >= MAX_MESH_TASKS {
             break;
         }
-        let padded = map.build_padded(coord);
+        let (padded, padded_fluid) = map.build_padded(coord);
         let chunk = map.chunks.get_mut(&coord).unwrap();
         chunk.meshing = true;
         chunk.dirty = false;
         let version = chunk.version;
         map.mesh_in_flight += 1;
         let tables = tables.0.clone();
-        let task = pool.spawn(async move { mesh_chunk(&padded, &tables) });
+        let task = pool.spawn(async move { mesh_chunk(&padded, &padded_fluid, &tables) });
         commands.spawn(MeshTask { coord, version, task });
     }
 
@@ -459,7 +661,7 @@ fn collect_gen_tasks(
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
     for (entity, mut gen_task) in &mut tasks {
-        let Some(blocks) = block_on(future::poll_once(&mut gen_task.task)) else {
+        let Some(generated) = block_on(future::poll_once(&mut gen_task.task)) else {
             continue;
         };
         commands.entity(entity).despawn();
@@ -468,7 +670,9 @@ fn collect_gen_tasks(
         if map.chunks.get_mut(&gen_task.coord).is_none() {
             continue; // world was exited/switched while this chunk was generating
         }
-        map.chunks.get_mut(&gen_task.coord).unwrap().blocks = Some(blocks);
+        let chunk = map.chunks.get_mut(&gen_task.coord).unwrap();
+        chunk.blocks = Some(generated.blocks);
+        chunk.fluid_level = Some(generated.fluid);
         // Re-apply any saved edits for this chunk on top of the fresh terrain.
         if let Some(edits) = pending.0.remove(&gen_task.coord) {
             for (pos, id) in edits {
@@ -547,6 +751,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<EditLog>()
             .init_resource::<PendingEdits>()
             .init_resource::<AutosaveTimer>()
+            .init_resource::<FluidQueue>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)
@@ -568,6 +773,13 @@ impl Plugin for WorldPlugin {
                 Update,
                 (record_edits, autosave)
                     .run_if(in_state(AppState::InGame)),
+            )
+            .add_systems(
+                Update,
+                (enqueue_fluid_updates, process_fluid_updates)
+                    .chain()
+                    .after(collect_mesh_tasks)
+                    .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
             );
     }
 }

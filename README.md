@@ -256,6 +256,29 @@ restores the player's saved position — or leaves them unspawned so the usual
 (`world::exit_world`, on `OnExit`) and the periodic autosave both write the
 session's accumulated block edits and current player pose back out.
 
+## Fluid flow
+
+Any block with `fluid: true` (water today) spreads and dries up
+automatically — no fluid-specific code required. `world.rs` keeps a per-cell
+`fluid_level` byte alongside the block grid:
+
+- **`0` (source)** — permanent, full height, never recomputed. Ocean water
+  generated at sea level and any fluid block a player places both start here.
+- **`1..=flow_distance`** — a flowing cell that many blocks from its supply,
+  capped by that fluid's `flow_distance`. Height steps down linearly from
+  `flow_distance` levels, so a long `flow_distance` slopes gently and a short
+  one drops off steeply — a single formula (`mesher::fluid_height`), no
+  per-fluid tuning.
+- **`FLUID_FALLING`** — a full-height column fed from directly above (a
+  waterfall); renders like a source but dries up if its supply is cut.
+
+A budgeted queue (`FluidQueue`/`recompute_cell`) reacts to `BlockSetEvent`
+and relaxes affected cells a few hundred at a time per tick, so a large
+spread is visibly gradual rather than resolving in one frame. The mesher
+draws a partial "step" wall between same-fluid neighbours at different
+levels instead of culling that face outright, so adjacent flow heights never
+show a gap. See the "Known gaps" note in Roadmap ideas for what's simplified.
+
 ## Extending the framework
 
 Write a Bevy plugin and add it in `main.rs`. Content registration happens in
@@ -283,8 +306,8 @@ by) is required. Everything else defaults sanely:
 |---|---|---|
 | `name` | title-cased `id` | display name, shown in inventory tooltips |
 | `transparent` | `"no"` | `"no"` \| `"partial"` \| `"full"` — see below |
-| `fluid` | `false` | swimmable liquid with a lowered top surface (water) |
-| `flow_distance` | `0` | how far a fluid should flow before drying up — stored for a future flow-simulation system, not simulated yet |
+| `fluid` | `false` | swimmable liquid with a lowered top surface (water) that spreads/dries via the fluid sim |
+| `flow_distance` | `0` | how far (in blocks) this fluid spreads from a source before drying up; also controls the slope — long distances step down gently, short ones drop off steeply |
 | `solid` | `true` (`false` if `fluid`) | collides with entities |
 | `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |
 | `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
@@ -387,11 +410,17 @@ plugins, day/night cycle (shader uniforms already in place), biome-driven
 generation parameters, audio (enable Bevy's `bevy_audio` feature), more chat
 commands (`commands::execute`'s match is the extension point), an
 achievements system that reads `WorldMeta::cheats` to exclude worlds that
-have had commands used in them, block-pickup-on-break (to actually let
-Survival fill its inventory), and fluid flow simulation: a per-block fluid
-"level" layer plus a spread/dry-up update system driven by each fluid
-block's `flow_distance`, with the mesher averaging neighbouring levels into
-smooth sloped tops instead of the flat lowered surface it draws today.
+have had commands used in them, and block-pickup-on-break (to actually let
+Survival fill its inventory).
+
+Known gaps in the fluid sim (`world.rs`'s `FluidQueue`/`recompute_cell`):
+fluid levels aren't persisted across save/load (a reload snaps flowing water
+back to whatever the ocean/edit log encodes — only sourced cells and
+generated sea water survive as-is), two different fluids meeting has no
+special interaction (a more "sourced" fluid just overwrites a less-sourced
+one, since fluids default `replaceable: true`), and per-cell heights are flat
+(a stepped wall renders between different-height neighbours rather than a
+fully smooth, per-vertex-averaged Minecraft-style corner blend).
 
 ## License
 

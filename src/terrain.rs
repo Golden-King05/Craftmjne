@@ -6,11 +6,20 @@
 //! To customize generation, swap the generator constructed in
 //! `world::compile_content` for your own.
 
-use crate::blocks::{BlockId, BlockRegistry, AIR};
+use crate::blocks::{BlockId, BlockRegistry, AIR, FLUID_SOURCE};
 use crate::config::{block_index, CHUNK_SIZE, CS, H, SEA_LEVEL, WORLD_HEIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
 
 const SNOW_LINE: i32 = 45;
+
+/// A freshly generated chunk's block ids plus its fluid levels. Every
+/// generated fluid cell (currently just sea-level flooding) starts as a
+/// permanent source (`FLUID_SOURCE`) — the ocean is static, not simulated;
+/// only player-placed/spread water flows (see `world.rs`'s `FluidQueue`).
+pub struct GeneratedChunk {
+    pub blocks: Vec<BlockId>,
+    pub fluid: Vec<u8>,
+}
 
 struct TerrainIds {
     stone: BlockId,
@@ -70,7 +79,7 @@ impl TerrainGenerator {
         (h.floor() as i32).clamp(2, WORLD_HEIGHT - 8)
     }
 
-    pub fn generate(&self, cx: i32, cz: i32) -> Vec<BlockId> {
+    pub fn generate(&self, cx: i32, cz: i32) -> GeneratedChunk {
         let ids = &self.ids;
         let seed = self.seed;
         let mut blocks = vec![AIR; CS * CS * H];
@@ -198,7 +207,7 @@ impl TerrainGenerator {
             }
         }
 
-        blocks
+        GeneratedChunk { fluid: vec![FLUID_SOURCE; blocks.len()], blocks }
     }
 }
 
@@ -211,8 +220,8 @@ mod tests {
     fn generation_is_deterministic_and_sane() {
         let reg = BlockRegistry::with_defaults();
         let gen = TerrainGenerator::new(7, &reg);
-        let a = gen.generate(3, -2);
-        let b = gen.generate(3, -2);
+        let a = gen.generate(3, -2).blocks;
+        let b = gen.generate(3, -2).blocks;
         assert_eq!(a, b);
         assert_eq!(a.len(), CS * CS * H);
 
@@ -231,8 +240,8 @@ mod tests {
     #[test]
     fn different_seeds_differ() {
         let reg = BlockRegistry::with_defaults();
-        let a = TerrainGenerator::new(1, &reg).generate(0, 0);
-        let b = TerrainGenerator::new(2, &reg).generate(0, 0);
+        let a = TerrainGenerator::new(1, &reg).generate(0, 0).blocks;
+        let b = TerrainGenerator::new(2, &reg).generate(0, 0).blocks;
         assert_ne!(a, b);
     }
 }

@@ -151,6 +151,44 @@ etc.) instead of inventing a new approach:
   pure helper functions inside them (parsers, name formatting, round-trips)
   the way `commands.rs` and `inventory.rs::display_name` do.
 
+## This project's simulation patterns
+
+- **Generic per-cell simulations use a budgeted queue + a single pure
+  "recompute this cell" function, never a full-grid scan.** The fluid sim
+  (`world.rs`'s `FluidQueue`/`recompute_cell`, driven by `blocks.rs`'s
+  `FLUID_SOURCE`/`FLUID_FALLING` + `Tables::fluid`/`flow_distance`/
+  `replaceable`) is the template: `BlockSetEvent` seeds the queue with the
+  changed cell + its 6 neighbours, a `Local<f32>` accumulator ticks a fixed
+  number of times per frame, and each tick pops a bounded budget and calls
+  the pure recompute fn, which itself re-enqueues neighbours only when it
+  actually changed something. This makes spread visibly gradual instead of
+  resolving in one frame, and keeps the algorithm keyed only on `Tables`
+  data (never a hardcoded block id) so it needs zero changes for a second
+  fluid. Reuse this shape for any future propagating simulation (light,
+  fire spread, etc.) instead of writing a fresh scan-the-world system.
+- **Simulated state changes must not go through the same path as player
+  edits.** `ChunkMap::set_block` fires a `BlockSetEvent` (which `record_edits`
+  persists to the save file) — a per-tick simulation writing through it would
+  bloat every save with thousands of transient cells. Simulated writes get
+  their own setter (`ChunkMap::set_fluid_cell`) that updates the grid + marks
+  chunks dirty for remeshing, same as `set_block`, but skips the event.
+- **A block's per-cell dynamic state (beyond its id) lives in a second
+  `Vec` parallel to `Chunk::blocks`**, not packed into the `BlockId` or a
+  separate side-table keyed by position. `Chunk::fluid_level: Option<Vec<u8>>`
+  mirrors `blocks` exactly (same index, same lifecycle — both `Some` the
+  moment generation finishes, both copied together in `build_padded`). Reuse
+  this shape for any future per-block runtime state (growth stage, charge
+  level, etc.) rather than inventing a `HashMap<IVec3, T>` side-channel.
+- **Rendering variable per-block height needs the "step wall," not just a
+  lower cap.** Culling a face just because the neighbour is the same block
+  id (`mesher.rs`'s original `nid == id` skip) is only correct when every
+  instance of that id renders at the same height. Once instances can differ
+  (flowing water at different levels), same-id neighbours need a corner-level
+  check: fully cull only if the neighbour's rendered top is >= this cell's,
+  otherwise emit a partial quad from the neighbour's height up to this
+  cell's. See `mesh_chunk`'s `is_side`/`bottom` handling — the same pattern
+  generalizes to any future variable-height content (snow layers, etc.).
+
 ## Environment gotchas (this remote session, not Bevy)
 
 - **Local disk can silently reset between conversation turns** — the git
