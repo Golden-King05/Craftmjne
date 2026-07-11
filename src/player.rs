@@ -9,8 +9,10 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::blocks::{BlockTables, Tables};
+use crate::chat::ChatState;
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
-use crate::state::AppState;
+use crate::save::GameMode;
+use crate::state::{AppState, PauseState};
 use crate::world::ChunkMap;
 
 pub const HALF_W: f32 = 0.3;
@@ -231,28 +233,57 @@ fn spawn_camera(mut commands: Commands, settings: Res<WorldSettings>) {
     ));
 }
 
-/// Click captures the mouse; Escape releases it; pressing Escape again while
-/// already released saves and returns to the main menu (the actual save
-/// happens in `world::exit_world`, run on `OnExit(AppState::InGame)`).
+/// `OnEnter(AppState::InGame)`: grabs the mouse immediately (no "click to
+/// play" step) and makes sure a stale pause flag from a previous session
+/// can't leave the game start paused.
+fn enter_game_grab(mut paused: ResMut<PauseState>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    paused.open = false;
+    let Ok(mut window) = windows.single_mut() else { return };
+    window.cursor_options.grab_mode = CursorGrabMode::Locked;
+    window.cursor_options.visible = false;
+}
+
+/// Escape toggles the pause menu (see `menu::sync_pause_screen` for the
+/// overlay itself): first press frees the cursor and pauses, second press
+/// re-grabs and resumes. `menu::handle_menu_buttons` does the same re-grab
+/// when "Resume" is clicked instead of pressed via Escape.
+///
+/// Also carries a click-to-regrab fallback for the rare case the OS steals
+/// the pointer lock (e.g. alt-tab) without going through our own pause flow.
+///
+/// Skips entirely while chat is open — `chat::chat_text_input` owns cursor
+/// grab and Escape in that state (closing chat, not opening the pause menu).
 fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    chat: Res<ChatState>,
+    mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut next_state: ResMut<NextState<AppState>>,
 ) {
+    if chat.open {
+        return;
+    }
     let Ok(mut window) = windows.single_mut() else { return };
-    if mouse.just_pressed(MouseButton::Left) && window.cursor_options.grab_mode == CursorGrabMode::None {
+
+    if keys.just_pressed(KeyCode::Escape) {
+        paused.open = !paused.open;
+        if paused.open {
+            window.cursor_options.grab_mode = CursorGrabMode::None;
+            window.cursor_options.visible = true;
+        } else {
+            window.cursor_options.grab_mode = CursorGrabMode::Locked;
+            window.cursor_options.visible = false;
+        }
+        return;
+    }
+
+    if !paused.open
+        && mouse.just_pressed(MouseButton::Left)
+        && window.cursor_options.grab_mode == CursorGrabMode::None
+    {
         // Locked is ideal; X11 only supports Confined, so fall back.
         window.cursor_options.grab_mode = CursorGrabMode::Locked;
         window.cursor_options.visible = false;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
-        if window.cursor_options.grab_mode == CursorGrabMode::None {
-            next_state.set(AppState::MainMenu);
-        } else {
-            window.cursor_options.grab_mode = CursorGrabMode::None;
-            window.cursor_options.visible = true;
-        }
     }
 }
 
@@ -288,24 +319,38 @@ fn player_update(
     map: Res<ChunkMap>,
     tables: Option<Res<BlockTables>>,
     registry: Res<crate::blocks::BlockRegistry>,
+    mode: Res<GameMode>,
+    chat: Res<ChatState>,
+    paused: Res<PauseState>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
     let Some(tables) = tables else { return };
     let Ok((mut player, mut transform)) = players.single_mut() else { return };
 
-    if keys.just_pressed(KeyCode::KeyF) {
-        player.fly = !player.fly;
-        player.vel.y = 0.0;
-    }
+    // While chat is open or the game is paused, WASD/Space/etc shouldn't
+    // drive movement (they're either being typed, or the menu is up) -
+    // freeze physics entirely rather than let input leak through.
+    if !chat.open && !paused.open {
+        // Flying is a creative-only convenience; survival always keeps both
+        // feet (eventually) on the ground.
+        if *mode == GameMode::Creative {
+            if keys.just_pressed(KeyCode::KeyF) {
+                player.fly = !player.fly;
+                player.vel.y = 0.0;
+            }
+        } else if player.fly {
+            player.fly = false;
+        }
 
-    if !player.spawned {
-        player.try_spawn(&map, &tables.0);
-    } else {
-        let water_id = registry.id("water");
-        player.accumulator = (player.accumulator + time.delta_secs()).min(0.25);
-        while player.accumulator >= STEP {
-            player.accumulator -= STEP;
-            player.step(STEP, &keys, &map, &tables.0, water_id);
+        if !player.spawned {
+            player.try_spawn(&map, &tables.0);
+        } else {
+            let water_id = registry.id("water");
+            player.accumulator = (player.accumulator + time.delta_secs()).min(0.25);
+            while player.accumulator >= STEP {
+                player.accumulator -= STEP;
+                player.step(STEP, &keys, &map, &tables.0, water_id);
+            }
         }
     }
 
@@ -321,7 +366,9 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
+        app.init_resource::<PauseState>()
+            .add_systems(Startup, spawn_camera)
+            .add_systems(OnEnter(AppState::InGame), enter_game_grab)
             .add_systems(
                 Update,
                 (cursor_grab, mouse_look, player_update)

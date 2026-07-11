@@ -12,7 +12,7 @@ use std::time::Duration;
 use craftmjne::config::WorldSettings;
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
-use craftmjne::save::SaveStore;
+use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::world::{ChunkMap, WorldPlugin};
 
@@ -50,7 +50,7 @@ fn headless_app(temp: &TempSaves) -> App {
     app.add_plugins(WorldPlugin);
     app.world_mut().spawn(Player::default());
 
-    let (slug, meta) = app.world().resource::<SaveStore>().create_world("Test World", 7).unwrap();
+    let (slug, meta) = app.world().resource::<SaveStore>().create_world("Test World", 7, GameMode::Survival).unwrap();
     app.world_mut().insert_resource(ActiveWorld { slug, meta });
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
     app.update(); // process the MainMenu -> InGame transition (runs `enter_world`)

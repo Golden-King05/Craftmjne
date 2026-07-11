@@ -50,40 +50,73 @@ makensis -DAPP_VERSION=0.2.0 \
 
 ### Controls
 
+The mouse locks automatically the moment you enter a world — no click needed.
+
 | Input | Action |
 |---|---|
-| Click | capture mouse |
-| Esc | release mouse |
 | W A S D | move |
-| Space | jump / swim up / fly up |
-| Shift | fly down |
+| Space | jump / swim up / fly up (Creative only) |
+| Shift | fly down (Creative only) |
 | Ctrl | sprint |
-| F | toggle fly mode |
+| F | toggle fly mode (Creative only) |
 | Left / right click | break / place block |
 | Middle click | pick targeted block |
 | 1–9 / mouse wheel | hotbar selection |
+| T | open chat |
 | F3 | debug overlay |
-| Esc (again, once released) | save and return to the main menu |
+| Esc | pause (Resume / Quit to Menu / Quit Game); Esc again resumes |
 
 ## Menus and saved worlds
 
 The game boots into a main menu (**Worlds**, **Settings**, **Mods**, **Quit
 Game**) rather than straight into a world. **Worlds** lists your saves and has
-a **Create World** button (name + optional seed) at the bottom, Minecraft-
-style; clicking a saved world loads it. **Settings** currently exposes render
-distance (persisted, applied on next launch); **Mods** is a placeholder for
-future mod support.
+a **Create World** button (name, optional seed, and a **Survival / Creative**
+game mode picker) at the bottom, Minecraft-style; clicking a saved world loads
+it. **Settings** currently exposes render distance (persisted, applied on next
+launch); **Mods** is a placeholder for future mod support.
 
 Worlds save to the same per-user app-data directory the installer and
 auto-updater use (`%LOCALAPPDATA%\Craftmjne\saves\<name>` on Windows,
 `~/.local/share/craftmjne/saves/<name>` on Linux, `~/Library/Application
 Support/Craftmjne/saves/<name>` on macOS) — naturally scoped to the OS user
-account. Each world is a small `meta.json` (name, seed, timestamps) plus a
-`data.json` recording the player's position and every block edit (by block
-*name*, not numeric id, so saves survive block-registry changes). Terrain
-itself is never saved — it's deterministic from the seed, so only the diff
-from procedural generation needs to persist. Autosaves every 30s and on
+account. Each world is a small `meta.json` (name, seed, game mode, timestamps)
+plus a `data.json` recording the player's position and every block edit (by
+block *name*, not numeric id, so saves survive block-registry changes).
+Terrain itself is never saved — it's deterministic from the seed, so only the
+diff from procedural generation needs to persist. Autosaves every 30s and on
 returning to the menu.
+
+### Game modes
+
+Chosen once, at world creation (`save::GameMode`, in `meta.json`). For now the
+only behavioral difference is flying: Creative can toggle it with `F`;
+Survival can't, and any stale `fly: true` from an older save is cleared on
+load. More differences (mining speed, hunger, PvP damage, etc.) are natural
+follow-ups — see `player::player_update` for where mode is checked.
+
+The mode can also be changed mid-game with `/mode <survival|creative>` (see
+"Chat and commands" below).
+
+## Chat and commands
+
+Press `T` to open a one-line chat box; `Enter` sends, `Escape` cancels. Sent
+lines land in a local scrollback that fades out a few seconds after the box
+closes — there's no multiplayer, so this exists mainly as a place to type
+`/`-prefixed commands.
+
+`src/commands.rs` is the dispatcher. The first (and so far only) command is:
+
+- `/mode <survival|creative>` — also accepts `s`/`c` or `1`/`2`. Changes the
+  running world's game mode immediately and persists it to `meta.json`.
+
+Running *any* recognized command — even one that fails with a usage error —
+permanently sets a `cheats: true` flag on the world's `meta.json`
+(`save::WorldMeta::cheats`). This mirrors Minecraft's own "cheats" world flag:
+it's never shown in the UI and never cleared, and exists so a future
+achievements system can check it and skip a world that's had commands used in
+it. An unrecognized command name (a typo, not a real command) does not set it.
+
+Add a command by extending the match in `commands::execute`.
 
 ## Auto-update
 
@@ -147,7 +180,7 @@ src/
 ├── main.rs      # binary: CLI args + plugin assembly
 ├── lib.rs       # library surface (used by tests and downstream crates)
 ├── config.rs    # chunk size, world height, atlas layout, WorldSettings
-├── state.rs     # AppState (menu <-> in-game) and the ActiveWorld resource
+├── state.rs     # AppState (menu <-> in-game), ActiveWorld and PauseState resources
 ├── save.rs      # SaveStore: per-user world/settings persistence (serde)
 ├── menu.rs      # MenuPlugin: main menu, worlds list + create form, settings, mods
 ├── noise.rs     # seeded simplex noise, fBm, integer hashes
@@ -158,8 +191,10 @@ src/
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
 ├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas image, fog
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
-├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, camera
+├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, pause/cursor, camera
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
+├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
+├── commands.rs  # chat command dispatcher (/mode ...) + the cheats-flag rule
 ├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
 └── updater.rs   # UpdaterPlugin: background GitHub-release check + self-swap
 installer/
@@ -255,9 +290,10 @@ cargo test
 ```
 
 Unit tests cover the noise, atlas, registry, terrain, mesher (face counts, AO,
-water bucket), physics (falling, landing, wall collision), raycasting, and
+water bucket), physics (falling, landing, wall collision), raycasting,
 save/load (slugging, sanitization, round-tripping worlds and settings against
-a throwaway temp directory — never a real user profile).
+a throwaway temp directory — never a real user profile), and the command
+dispatcher (`/mode`'s alias forms, persistence, and the cheats-flag rule).
 `tests/headless.rs` boots the real ECS app **without a window or GPU** and
 drives the full streaming pipeline through the actual `AppState` machine:
 menu → `InGame` → generation tasks → meshing tasks → chunk entities, plus
@@ -272,7 +308,10 @@ alternative mesher, block light propagation (extra vertex-color channel),
 multiple save slots per world / world deletion and rename in the Worlds
 screen, real mod loading (the Mods screen is a placeholder), entities/mobs as
 plugins, day/night cycle (shader uniforms already in place), biome-driven
-generation parameters, and audio (enable Bevy's `bevy_audio` feature).
+generation parameters, audio (enable Bevy's `bevy_audio` feature), more chat
+commands (`commands::execute`'s match is the extension point), and an
+achievements system that reads `WorldMeta::cheats` to exclude worlds that
+have had commands used in them.
 
 ## License
 
