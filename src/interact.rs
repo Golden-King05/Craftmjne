@@ -7,7 +7,9 @@ use bevy::prelude::*;
 use crate::blocks::{BlockId, BlockRegistry, AIR};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
+use crate::inventory::InventoryState;
 use crate::player::{cursor_grabbed, Player};
+use crate::save::GameMode;
 use crate::state::{AppState, PauseState};
 use crate::world::{BlockSetEvent, ChunkMap};
 
@@ -91,26 +93,26 @@ struct ActionTimers {
     place_t: f32,
 }
 
-fn setup_hotbar(mut commands: Commands, registry: Res<BlockRegistry>) {
-    let slots = [
-        "grass", "dirt", "stone", "cobblestone", "planks", "log", "leaves", "glass", "bricks",
-    ]
-    .iter()
-    .map(|n| registry.id(n))
-    .collect();
-    commands.insert_resource(Hotbar { slots, selected: 0 });
+/// Starts completely empty in both modes (Minecraft-style: you drag/collect
+/// blocks onto the hotbar yourself, nothing is pre-filled). There's no
+/// block-pickup-on-break yet, so Survival can't fill it; Creative fills it
+/// via the inventory screen's block list (`inventory::handle_creative_click`).
+fn setup_hotbar(mut commands: Commands) {
+    commands.insert_resource(Hotbar { slots: vec![AIR; 9], selected: 0 });
 }
 
-/// Skips entirely while chat or the pause menu is open, so typing a digit
-/// or scrolling doesn't also swap the selected hotbar slot.
+/// Skips entirely while chat, the pause menu, or the inventory screen is
+/// open, so typing a digit or scrolling doesn't also swap the selected
+/// hotbar slot (or, with the inventory open, scroll its block list instead).
 fn select_slot(
     keys: Res<ButtonInput<KeyCode>>,
     mut wheel: EventReader<MouseWheel>,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
+    inventory: Res<InventoryState>,
     mut hotbar: ResMut<Hotbar>,
 ) {
-    if chat.open || paused.open {
+    if chat.open || paused.open || inventory.open {
         wheel.clear();
         return;
     }
@@ -138,6 +140,7 @@ fn interact(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut map: ResMut<ChunkMap>,
     registry: Res<BlockRegistry>,
+    mode: Res<GameMode>,
     mut hotbar: ResMut<Hotbar>,
     mut target: ResMut<Target>,
     mut timers: Local<ActionTimers>,
@@ -208,7 +211,9 @@ fn interact(
     }
 
     // Pick block (middle click): put the targeted block in the current slot.
-    if mouse.just_pressed(MouseButton::Middle) {
+    // Creative-only for now - Survival has no free items, and picking a
+    // block you don't already have would defeat starting with nothing.
+    if *mode == GameMode::Creative && mouse.just_pressed(MouseButton::Middle) {
         let id = map.get_block(hit.pos);
         if id != AIR {
             if let Some(existing) = hotbar.slots.iter().position(|&s| s == id) {

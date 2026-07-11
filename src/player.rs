@@ -11,6 +11,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::blocks::{BlockTables, Tables};
 use crate::chat::ChatState;
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
+use crate::inventory::InventoryState;
 use crate::save::GameMode;
 use crate::state::{AppState, PauseState};
 use crate::world::ChunkMap;
@@ -251,16 +252,18 @@ fn enter_game_grab(mut paused: ResMut<PauseState>, mut windows: Query<&mut Windo
 /// Also carries a click-to-regrab fallback for the rare case the OS steals
 /// the pointer lock (e.g. alt-tab) without going through our own pause flow.
 ///
-/// Skips entirely while chat is open — `chat::chat_text_input` owns cursor
-/// grab and Escape in that state (closing chat, not opening the pause menu).
+/// Skips entirely while chat or the inventory screen is open — those own
+/// cursor grab and Escape in their own state (closing themselves, not
+/// opening the pause menu).
 fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     chat: Res<ChatState>,
+    inventory: Res<InventoryState>,
     mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open {
+    if chat.open || inventory.open {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
@@ -322,15 +325,16 @@ fn player_update(
     mode: Res<GameMode>,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
+    inventory: Res<InventoryState>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
     let Some(tables) = tables else { return };
     let Ok((mut player, mut transform)) = players.single_mut() else { return };
 
-    // While chat is open or the game is paused, WASD/Space/etc shouldn't
-    // drive movement (they're either being typed, or the menu is up) -
-    // freeze physics entirely rather than let input leak through.
-    if !chat.open && !paused.open {
+    // While chat is open, the game is paused, or the inventory is open,
+    // WASD/Space/etc shouldn't drive movement - freeze physics entirely
+    // rather than let input leak through.
+    if !chat.open && !paused.open && !inventory.open {
         // Flying is a creative-only convenience; survival always keeps both
         // feet (eventually) on the ground.
         if *mode == GameMode::Creative {

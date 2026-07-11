@@ -60,11 +60,12 @@ The mouse locks automatically the moment you enter a world — no click needed.
 | Ctrl | sprint |
 | F | toggle fly mode (Creative only) |
 | Left / right click | break / place block |
-| Middle click | pick targeted block |
+| Middle click | pick targeted block (Creative only) |
 | 1–9 / mouse wheel | hotbar selection |
+| E | open/close inventory |
 | T | open chat |
 | F3 | debug overlay |
-| Esc | pause (Resume / Quit to Menu / Quit Game); Esc again resumes |
+| Esc | pause (Resume / Quit to Menu / Quit Game); Esc again resumes; also closes the inventory/chat if one is open |
 
 ## Menus and saved worlds
 
@@ -96,6 +97,29 @@ follow-ups — see `player::player_update` for where mode is checked.
 
 The mode can also be changed mid-game with `/mode <survival|creative>` (see
 "Chat and commands" below).
+
+## Inventory
+
+Press `E` to open/close it (`src/inventory.rs`). The hotbar and the
+inventory screen both start **completely empty** in every mode — nothing is
+pre-filled — matching Minecraft's own behavior.
+
+- **Survival** shows the hotbar plus a second row of personal storage
+  (`inventory::Inventory`, `INVENTORY_SIZE` slots — a constant, deliberately
+  easy to make configurable later). There's no block-pickup-on-break yet, so
+  Survival currently has no way to fill either row; that's a natural next
+  step. Middle-click "pick block" is Creative-only for the same reason —
+  Survival has no free items.
+- **Creative** shows one scrollable grid of every registered block instead
+  of personal storage. Clicking a block puts it in the currently selected
+  hotbar slot.
+- Hovering any occupied slot (in either mode) shows the block's name in a
+  cursor-following tooltip, Minecraft-style.
+
+Opening the inventory frees the cursor and freezes player movement/hotbar
+shortcuts/block interaction, the same way chat and the pause menu do — all
+three overlays are mutually exclusive (only one can be open at a time) and
+Escape closes whichever one is open before it would open the pause menu.
 
 ## Chat and commands
 
@@ -193,6 +217,7 @@ src/
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, pause/cursor, camera
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
+├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
 ├── commands.rs  # chat command dispatcher (/mode ...) + the cheats-flag rule
 ├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner

@@ -11,6 +11,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::collections::VecDeque;
 
 use crate::commands;
+use crate::inventory::InventoryState;
 use crate::save::{GameMode, SaveStore};
 use crate::state::{ActiveWorld, AppState, PauseState};
 
@@ -105,17 +106,18 @@ fn despawn_chat(mut commands: Commands, roots: Query<Entity, With<ChatRoot>>) {
     }
 }
 
-/// T opens the box (unless it's already open, or the pause menu is up) and
-/// frees the cursor so it can be clicked into; the prior grab state is
-/// remembered so closing restores it exactly, whether the mouse was locked
-/// or already released.
+/// T opens the box (unless it's already open, or the pause menu / inventory
+/// screen is up) and frees the cursor so it can be clicked into; the prior
+/// grab state is remembered so closing restores it exactly, whether the
+/// mouse was locked or already released.
 fn toggle_chat(
     keys: Res<ButtonInput<KeyCode>>,
     paused: Res<PauseState>,
+    inventory: Res<InventoryState>,
     mut chat: ResMut<ChatState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || paused.open || !keys.just_pressed(KeyCode::KeyT) {
+    if chat.open || paused.open || inventory.open || !keys.just_pressed(KeyCode::KeyT) {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };

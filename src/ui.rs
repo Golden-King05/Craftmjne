@@ -37,7 +37,7 @@ struct DebugState {
     timer: f32,
 }
 
-fn tile_rect(tile: u16) -> Rect {
+pub(crate) fn tile_rect(tile: u16) -> Rect {
     let x = (tile as usize % ATLAS_TILES * TILE_SIZE) as f32;
     let y = (tile as usize / ATLAS_TILES * TILE_SIZE) as f32;
     Rect::new(x, y, x + TILE_SIZE as f32, y + TILE_SIZE as f32)
@@ -92,14 +92,14 @@ fn setup_hud(mut commands: Commands) {
 
             root.spawn((
                 HintText,
-                Text::new("WASD move  Space jump  F fly (creative)  T chat  1-9 blocks  F3 debug  Esc pause"),
+                Text::new("WASD move  Space jump  F fly (creative)  T chat  E inventory  1-9 blocks  F3 debug  Esc pause"),
                 TextFont { font_size: 14.0, ..default() },
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
                 Node {
                     position_type: PositionType::Absolute,
                     top: Val::Px(10.0),
                     left: Val::Percent(50.0),
-                    margin: UiRect { left: Val::Px(-310.0), ..default() },
+                    margin: UiRect { left: Val::Px(-360.0), ..default() },
                     ..default()
                 },
             ));

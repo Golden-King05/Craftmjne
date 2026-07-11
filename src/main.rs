@@ -12,7 +12,7 @@ use craftmjne::config::WorldSettings;
 use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::updater::UpdateCheckEnabled;
-use craftmjne::{chat, interact, menu, player, render, ui, updater, world};
+use craftmjne::{chat, interact, inventory, menu, player, render, ui, updater, world};
 
 struct Args {
     seed: u32,
@@ -87,6 +87,7 @@ fn main() {
             render::RenderSetupPlugin,
             player::PlayerPlugin,
             interact::InteractPlugin,
+            inventory::InventoryPlugin,
             chat::ChatPlugin,
             ui::UiPlugin,
             updater::UpdaterPlugin,
