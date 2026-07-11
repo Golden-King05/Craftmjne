@@ -4,11 +4,19 @@ name: Release
 # binaries for Windows/Linux/macOS and publish them as a GitHub Release.
 #
 # Two things read these release assets:
-#  - CraftmjneSetup.exe: the first-time installer end users download.
+#  - CraftmjneSetup.exe: the first-time installer end users download. Bundles
+#    the blocks/ directory (installer/craftmjne.nsi) - the game requires it
+#    next to the exe at startup (see src/blocks.rs's find_blocks_dir).
 #  - craftmjne-<target-triple>.<zip|tar.gz>: what the in-game auto-updater
 #    (src/updater.rs, via the `self_update` crate) downloads on later runs.
 #    Keep the archive naming (`craftmjne-<target-triple>`) in sync with any
-#    target added to the matrix below — self_update matches on it.
+#    target added to the matrix below — self_update matches on it. NOTE:
+#    self_update only ever extracts and swaps the named binary out of this
+#    archive, never other files - so even though the Linux/macOS tar.gz
+#    bundles blocks/ too (for a fresh manual download), an in-place
+#    auto-update does NOT refresh an existing install's blocks/ folder.
+#    A block-definition change needs a fresh install until something
+#    fills that gap.
 
 on:
   push:
@@ -57,8 +65,9 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          cp -r blocks target/${{ matrix.target }}/release/blocks
           cd target/${{ matrix.target }}/release
-          tar czf "$GITHUB_WORKSPACE/craftmjne-${{ matrix.target }}.tar.gz" craftmjne
+          tar czf "$GITHUB_WORKSPACE/craftmjne-${{ matrix.target }}.tar.gz" craftmjne blocks
 
       - name: Package (Windows, for the auto-updater)
         if: runner.os == 'Windows'

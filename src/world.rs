@@ -315,7 +315,7 @@ fn write_save(
     let edits = log
         .0
         .iter()
-        .map(|(pos, &id)| BlockEdit { x: pos.x, y: pos.y, z: pos.z, block: registry.def(id).name.clone() })
+        .map(|(pos, &id)| BlockEdit { x: pos.x, y: pos.y, z: pos.z, block: registry.def(id).id.clone() })
         .collect();
     let player = player.map(|p| PlayerSave {
         x: p.pos.x,

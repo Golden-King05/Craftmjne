@@ -33,6 +33,11 @@ cargo run --release -- --seed 42 --render-distance 10 --no-update-check
 Dev builds are configured for fast iteration (`opt-level = 1` for the game,
 `opt-level = 3` for dependencies), so plain `cargo run` is playable too.
 
+The game reads its block definitions from the `blocks/` directory at
+startup and won't run without it (see "Add a block" below) — `cargo run`
+finds the one committed at the repo root automatically since Cargo runs
+with the package root as the working directory; nothing extra to set up.
+
 ### Building the Windows installer yourself
 
 Cross-compiles fine from Linux/macOS with `mingw-w64` + NSIS installed
@@ -162,6 +167,13 @@ Turn it off with `--no-update-check` or `CRAFTMJNE_NO_UPDATE_CHECK=1` (it's
 also auto-disabled under `CRAFT_SMOKE`, so CI screenshots never depend on
 network access).
 
+**Known gap:** `self_update` only ever extracts and swaps the named binary
+out of the downloaded archive — it never touches other files. That means an
+in-place auto-update does **not** refresh an existing install's `blocks/`
+folder, only the `.exe`. A release that changes block definitions needs a
+fresh install (or manually replacing `blocks/`) until something closes that
+gap.
+
 ## Releasing a new version
 
 1. Bump `version` in `Cargo.toml`.
@@ -208,7 +220,7 @@ src/
 ├── save.rs      # SaveStore: per-user world/settings persistence (serde)
 ├── menu.rs      # MenuPlugin: main menu, worlds list + create form, settings, mods
 ├── noise.rs     # seeded simplex noise, fBm, integer hashes
-├── blocks.rs    # BlockRegistry: defs -> compiled flat lookup Tables
+├── blocks.rs    # BlockRegistry: loads blocks/*.json -> compiled flat lookup Tables
 ├── atlas.rs     # Painters resource: 16x16 procedural tiles -> RGBA atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
@@ -222,8 +234,10 @@ src/
 ├── commands.rs  # chat command dispatcher (/mode ...) + the cheats-flag rule
 ├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
 └── updater.rs   # UpdaterPlugin: background GitHub-release check + self-swap
+blocks/
+└── *.json                # one block definition per file - see "Add a block" below
 installer/
-└── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe
+└── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
 .github/workflows/
 └── release.yml           # tag push -> cross-platform build + GitHub Release
 ```
@@ -247,19 +261,60 @@ session's accumulated block edits and current player pose back out.
 Write a Bevy plugin and add it in `main.rs`. Content registration happens in
 `Plugin::build` (before startup); game logic is ordinary Bevy systems.
 
-### Add a block with a custom 16×16 texture
+### Add a block
+
+Drop a new `*.json` file in `blocks/` — no recompile needed. This is how all
+16 built-in blocks are defined; `src/blocks.rs` loads every file in that
+directory at startup (next to the exe once installed, the repo root for
+`cargo run`/tests — see `find_blocks_dir`).
+
+```json
+{
+  "id": "ruby_block",
+  "name": "Ruby Block",
+  "textures": { "all": "ruby" }
+}
+```
+
+Only `id` (a no-spaces registry key — also what saves reference block edits
+by) is required. Everything else defaults sanely:
+
+| Field | Default | Notes |
+|---|---|---|
+| `name` | title-cased `id` | display name, shown in inventory tooltips |
+| `transparent` | `"no"` | `"no"` \| `"partial"` \| `"full"` — see below |
+| `fluid` | `false` | swimmable liquid with a lowered top surface (water) |
+| `flow_distance` | `0` | how far a fluid should flow before drying up — stored for a future flow-simulation system, not simulated yet |
+| `solid` | `true` (`false` if `fluid`) | collides with entities |
+| `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |
+| `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
+| `breakable` | `true` | bedrock sets this `false` |
+| `textures` | tile named after `id` on every face | `{ "all": "..." }` or `{ "top": "...", "bottom": "...", "side": "..." }` |
+
+`transparent`'s three options all still respect the block's own texture
+alpha (a `partial` block with a fully-opaque texture just looks solid):
+
+- `"no"` — fully opaque, occludes neighbours, no blending.
+- `"partial"` — like glass/leaves today: doesn't occlude neighbours, and
+  texture pixels below the alpha-cutoff threshold are punched out entirely
+  ("see the back geometry of the block from the front").
+- `"full"` — like water: the whole face renders at reduced opacity, so you
+  only ever see what you're actually looking at (nothing punched out), but
+  everything behind it shows through.
+
+New texture painters (referenced by a block's `textures`) are still
+registered from Rust — see `atlas::default_painters` for examples, or
+register your own via `Painters` in a plugin's `build()`:
 
 ```rust
 use bevy::prelude::*;
 use craftmjne::atlas::Painters;
-use craftmjne::blocks::{BlockDef, BlockRegistry, FaceTextures};
 
-pub struct RubyPlugin;
+pub struct RubyPaintPlugin;
 
-impl Plugin for RubyPlugin {
+impl Plugin for RubyPaintPlugin {
     fn build(&self, app: &mut App) {
-        let world = app.world_mut();
-        world.resource_mut::<Painters>().register("ruby", |tile, rng| {
+        app.world_mut().resource_mut::<Painters>().register("ruby", |tile, rng| {
             for y in 0..16 {
                 for x in 0..16 {
                     let j = (rng() - 0.5) * 60.0;
@@ -267,18 +322,14 @@ impl Plugin for RubyPlugin {
                 }
             }
         });
-        world.resource_mut::<BlockRegistry>().register(BlockDef {
-            name: "ruby_block".into(),
-            textures: FaceTextures::all("ruby"),
-            ..BlockDef::default()
-        });
     }
 }
 ```
 
-`BlockDef` flags (defaults shown): `solid: true`, `transparent: false`
-(doesn't occlude neighbours — glass/leaves), `translucent: false` (water
-pass), `selectable: true`, `replaceable: false`, `breakable: true`.
+Blocks can also still be registered straight from Rust (useful for a mod
+that wants to generate variants programmatically) via
+`BlockRegistry::register(BlockDef { .. })` in a plugin's `build()` — same
+struct, same fields, just constructed in code instead of parsed from JSON.
 
 ### React to game events
 
@@ -334,9 +385,13 @@ multiple save slots per world / world deletion and rename in the Worlds
 screen, real mod loading (the Mods screen is a placeholder), entities/mobs as
 plugins, day/night cycle (shader uniforms already in place), biome-driven
 generation parameters, audio (enable Bevy's `bevy_audio` feature), more chat
-commands (`commands::execute`'s match is the extension point), and an
+commands (`commands::execute`'s match is the extension point), an
 achievements system that reads `WorldMeta::cheats` to exclude worlds that
-have had commands used in them.
+have had commands used in them, block-pickup-on-break (to actually let
+Survival fill its inventory), and fluid flow simulation: a per-block fluid
+"level" layer plus a spread/dry-up update system driven by each fluid
+block's `flow_distance`, with the mesher averaging neighbouring levels into
+smooth sloped tops instead of the flat lowered surface it draws today.
 
 ## License
 

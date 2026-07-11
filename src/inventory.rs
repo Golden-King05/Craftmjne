@@ -50,20 +50,6 @@ fn close(inv: &mut InventoryState, window: &mut Window) {
     }
 }
 
-/// "coal_ore" -> "Coal Ore".
-fn display_name(raw: &str) -> String {
-    raw.split('_')
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[derive(Component)]
 struct InventoryRoot;
 #[derive(Component)]
@@ -175,7 +161,7 @@ fn track_hovered_block(
     }
     let hovered = slots.iter().find_map(|(interaction, slot)| {
         if slot.0 != AIR && matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
-            Some(display_name(&registry.def(slot.0).name))
+            Some(registry.def(slot.0).name.clone())
         } else {
             None
         }
@@ -395,13 +381,6 @@ impl Plugin for InventoryPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn display_name_title_cases_and_replaces_underscores() {
-        assert_eq!(display_name("coal_ore"), "Coal Ore");
-        assert_eq!(display_name("grass"), "Grass");
-        assert_eq!(display_name("iron_ore"), "Iron Ore");
-    }
 
     #[test]
     fn default_inventory_is_empty() {

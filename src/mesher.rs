@@ -34,7 +34,8 @@ pub fn padded_index(x: i32, y: i32, z: i32) -> usize {
 /// AO brightness for 0..3 occluders touching a vertex.
 const AO_BRIGHT: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
 
-const WATER_SURFACE: f32 = 0.875; // water tops sit slightly below the block top
+/// Fluid tops sit one pixel below the block top (16x16 textures -> 1/16).
+const FLUID_SURFACE: f32 = 1.0 - 1.0 / TILE_SIZE as f32;
 
 struct FaceCorner {
     pos: [f32; 3],
@@ -140,10 +141,16 @@ pub fn mesh_chunk(padded: &[u16], tables: &Tables) -> ChunkMeshData {
                 }
                 let cell = idx - 1;
 
-                let is_water = tables.translucent[id as usize];
-                let bucket = if is_water { &mut water } else { &mut solid };
-                let cap = if is_water && padded[cell + SY as usize] != id {
-                    WATER_SURFACE
+                // Bucket routing follows the rendering mode (`transparency:
+                // full` -> alpha-blended); the lowered top surface follows
+                // `fluid` instead, so a non-fluid `full`-transparency block
+                // (fancy translucent glass, say) doesn't get a fluid top,
+                // and a future non-`full` fluid still would.
+                let is_translucent = tables.translucent[id as usize];
+                let bucket = if is_translucent { &mut water } else { &mut solid };
+                let is_fluid = tables.fluid[id as usize];
+                let cap = if is_fluid && padded[cell + SY as usize] != id {
+                    FLUID_SURFACE
                 } else {
                     1.0
                 };
@@ -163,7 +170,7 @@ pub fn mesh_chunk(padded: &[u16], tables: &Tables) -> ChunkMeshData {
 
                     for (ci, c) in face.corners.iter().enumerate() {
                         let mut bright = 1.0;
-                        if !is_water {
+                        if !is_translucent {
                             let occ = |o: i32| {
                                 tables.opaque[padded[(cell as i32 + o) as usize] as usize] as u32
                             };
@@ -252,7 +259,7 @@ mod tests {
         assert!(mesh.solid.is_empty());
         assert_eq!(mesh.water.positions.len(), 6 * 4);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
-        assert_eq!(max_y, 10.0 + WATER_SURFACE);
+        assert_eq!(max_y, 10.0 + FLUID_SURFACE);
     }
 
     #[test]

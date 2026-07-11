@@ -134,7 +134,6 @@ impl Player {
         keys: &ButtonInput<KeyCode>,
         map: &ChunkMap,
         tables: &Tables,
-        water_id: u16,
     ) {
         // Wish direction from WASD, rotated by yaw.
         let f = keys.pressed(KeyCode::KeyW) as i32 - keys.pressed(KeyCode::KeyS) as i32;
@@ -158,7 +157,7 @@ impl Player {
                 * speed;
         } else {
             let body = self.pos + Vec3::Y * 0.6;
-            let in_water = map.get_block(body.floor().as_ivec3()) == water_id;
+            let in_water = tables.fluid[map.get_block(body.floor().as_ivec3()) as usize];
             let speed = WALK_SPEED
                 * if sprint { SPRINT_MULT } else { 1.0 }
                 * if in_water { 0.55 } else { 1.0 };
@@ -321,7 +320,6 @@ fn player_update(
     keys: Res<ButtonInput<KeyCode>>,
     map: Res<ChunkMap>,
     tables: Option<Res<BlockTables>>,
-    registry: Res<crate::blocks::BlockRegistry>,
     mode: Res<GameMode>,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
@@ -349,11 +347,10 @@ fn player_update(
         if !player.spawned {
             player.try_spawn(&map, &tables.0);
         } else {
-            let water_id = registry.id("water");
             player.accumulator = (player.accumulator + time.delta_secs()).min(0.25);
             while player.accumulator >= STEP {
                 player.accumulator -= STEP;
-                player.step(STEP, &keys, &map, &tables.0, water_id);
+                player.step(STEP, &keys, &map, &tables.0);
             }
         }
     }
@@ -426,7 +423,7 @@ mod tests {
             ..Player::default()
         };
         for _ in 0..600 {
-            player.step(STEP, &keys, &map, &tables, 9999);
+            player.step(STEP, &keys, &map, &tables);
         }
         assert!(player.on_ground);
         assert!((player.pos.y - 11.0).abs() < 0.01, "y = {}", player.pos.y);
@@ -455,7 +452,7 @@ mod tests {
             ..Player::default()
         };
         for _ in 0..600 {
-            player.step(STEP, &keys, &map, &tables, 9999);
+            player.step(STEP, &keys, &map, &tables);
         }
         // stopped just before the wall (wall face at x=12, half width 0.3)
         assert!(player.pos.x > 11.0 && player.pos.x <= 12.0 - HALF_W + 0.01,

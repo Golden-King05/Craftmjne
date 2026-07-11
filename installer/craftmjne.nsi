@@ -51,6 +51,14 @@ Section "Craftmjne" SEC_APP
   SetOutPath "$INSTDIR"
   File "/oname=craftmjne.exe" "${SRC_EXE}"
 
+  ; Block definitions (one *.json per block - see src/blocks.rs). The game
+  ; looks for this folder next to its own exe at startup and won't run
+  ; without it. Relative to this script's own directory (installer/), same
+  ; as everything else here except SRC_EXE.
+  SetOutPath "$INSTDIR\blocks"
+  File /r "..\blocks\*.json"
+  SetOutPath "$INSTDIR"
+
   WriteRegStr HKCU "Software\Craftmjne" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -81,6 +89,7 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\craftmjne.exe"
   Delete "$INSTDIR\Uninstall.exe"
+  RMDir /r "$INSTDIR\blocks"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Craftmjne\Craftmjne.lnk"

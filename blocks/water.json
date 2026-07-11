@@ -1,0 +1,7 @@
+{
+  "id": "water",
+  "name": "Water",
+  "transparent": "full",
+  "fluid": true,
+  "flow_distance": 7
+}
