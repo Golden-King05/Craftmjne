@@ -1633,6 +1633,7 @@ name = "craftmjne"
 version = "1.2.2"
 dependencies = [
  "bevy",
+ "image",
  "self_update",
  "serde",
  "serde_json",

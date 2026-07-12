@@ -29,9 +29,10 @@ bevy = { version = "0.16", default-features = false, features = [
   "default_font",
   "tonemapping_luts",
   "x11",
-  "png", # only needed for the CRAFT_SMOKE=1 screenshot; the atlas is generated in-memory, not loaded from PNG
+  "png", # the CRAFT_SMOKE=1 screenshot, and decoding hand-supplied textures/blocks/*.png (see atlas.rs)
 ] }
 self_update = { version = "0.44.0", default-features = false, features = ["reqwest", "rustls", "archive-zip", "archive-tar", "compression-flate2", "compression-zip-deflate"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

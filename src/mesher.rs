@@ -263,12 +263,23 @@ pub fn mesh_chunk(
                     // down a multi-block drop this reads as one continuous
                     // cascade rather than a stack of solid cubes. Doesn't
                     // apply where the step-wall case above already set a
-                    // (different) partial bottom, or under `Blocky` style.
+                    // (different) partial bottom, or under `Blocky` style -
+                    // and, critically, only applies to the *last* segment of
+                    // a fall (nothing but the same fluid continuing below).
+                    // Every segment used to taper unconditionally, which
+                    // left a real gap: segment N's wall stopped a sixteenth
+                    // short of its own floor while segment N-1 below it (if
+                    // also "covered above" and hence full-height on top)
+                    // started exactly at its own ceiling - a periodic
+                    // sixteenth-of-a-block notch at every internal block
+                    // boundary down a multi-block waterfall, not the single
+                    // continuous slope the cascade was supposed to read as.
                     if is_fluid
                         && is_side
                         && level == FLUID_FALLING
                         && !stepped
                         && FALLING_WATER_STYLE == FallingWaterStyle::Sloped
+                        && padded[cell - SY as usize] != id
                     {
                         bottom = 1.0 / TILE_SIZE as f32;
                     }
@@ -438,6 +449,38 @@ mod tests {
         assert!(ys.iter().any(|&y| (y - 11.0).abs() < 1e-4), "no full-height top in {ys:?}");
         // ...and the true floor (the bottom face, unaffected by the taper).
         assert!(ys.iter().any(|&y| (y - 10.0).abs() < 1e-4), "no untouched floor in {ys:?}");
+    }
+
+    #[test]
+    fn a_multi_block_fall_only_tapers_its_last_segment() {
+        let (reg, tables) = tables();
+        let water = reg.id("water");
+        let mut padded = empty_padded();
+        let mut fluid = empty_fluid();
+        // Source -> two falling segments -> open air: the classic multi-
+        // block waterfall shaft. Only the last segment (y=10, nothing but
+        // air below it) should taper; the internal boundary between the two
+        // falling segments (y=11/y=10) must connect with no gap at all.
+        padded[padded_index(4, 12, 4)] = water;
+        fluid[padded_index(4, 12, 4)] = FLUID_SOURCE;
+        padded[padded_index(4, 11, 4)] = water;
+        fluid[padded_index(4, 11, 4)] = FLUID_FALLING;
+        padded[padded_index(4, 10, 4)] = water;
+        fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
+        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+
+        let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
+        let sliver = 10.0 + 1.0 / TILE_SIZE as f32;
+        // The internal segment (y=11) must NOT show a tapered edge partway
+        // up its own height - it should run the full block, connecting flush
+        // to y=10's ceiling at exactly y=11.0.
+        assert!(!ys.iter().any(|&y| (y - (11.0 + 1.0 / TILE_SIZE as f32)).abs() < 1e-4),
+            "internal segment shows a tapered edge (the gap bug) in {ys:?}");
+        assert!(ys.iter().any(|&y| (y - 11.0).abs() < 1e-4),
+            "no seam at the internal boundary (y=11.0) in {ys:?}");
+        // Only the true last segment (y=10) tapers to the sliver.
+        assert!(ys.iter().any(|&y| (y - sliver).abs() < 1e-4),
+            "no tapered sliver on the last segment in {ys:?}");
     }
 
     #[test]

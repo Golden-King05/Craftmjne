@@ -1,6 +1,11 @@
-//! Texture atlas: packs procedurally painted 16x16 tiles into one RGBA image,
-//! so every chunk renders with a single material. All art is generated —
-//! no image assets in the project.
+//! Texture atlas: packs 16x16 tiles into one RGBA image, so every chunk
+//! renders with a single material. Every tile is procedurally painted by
+//! default (no image assets required to run the project) - but any tile
+//! can be overridden by dropping a real `textures/blocks/<name>.png` next
+//! to the executable (or the repo root, for `cargo run`/tests): exactly
+//! `TILE_SIZE`x`TILE_SIZE`, checked before the procedural painter for that
+//! name ever runs. See `textures/blocks/README.md` for the full list of
+//! names the built-in blocks look for.
 //!
 //! Extension point: push your own painter into the [`Painters`] resource from
 //! your plugin's `build()`:
@@ -10,6 +15,7 @@
 
 use bevy::prelude::*;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::config::{ATLAS_TILES, TILE_SIZE};
 use crate::noise::{hash_str, mulberry32};
@@ -76,6 +82,52 @@ pub struct AtlasData {
     pub indices: HashMap<String, u16>,
 }
 
+/// Where to look for `textures/blocks/`: next to the running executable
+/// first (how an installed/shipped build finds files shipped next to it),
+/// falling back to the current working directory (how `cargo run`/tests
+/// find the one at the repo root - Cargo runs both with the package root
+/// as cwd). Mirrors `blocks::find_blocks_dir` exactly. Not finding this
+/// directory at all is fine - it just means every tile falls back to its
+/// procedural painter, same as before this existed.
+fn find_textures_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("textures").join("blocks");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("textures").join("blocks")
+}
+
+/// Loads a hand-supplied tile for `name` from `<dir>/<name>.png`, decoded
+/// to raw `TILE_SIZE`x`TILE_SIZE` RGBA8 - `None` (not an error) if the file
+/// just isn't there, since falling back to the procedural painter for
+/// anything not yet supplied is the whole point. Panics on a *malformed*
+/// file (wrong dimensions, unreadable/corrupt PNG) instead of silently
+/// falling back - a broken file sitting in `textures/blocks/` is far more
+/// likely a mistake worth surfacing loudly than something to paper over
+/// with a procedural placeholder nobody asked for, matching how
+/// `blocks::load_from_dir` treats a malformed block file.
+fn load_custom_tile(dir: &Path, name: &str) -> Option<Vec<u8>> {
+    let path = dir.join(format!("{name}.png"));
+    if !path.is_file() {
+        return None;
+    }
+    let img = image::open(&path)
+        .unwrap_or_else(|err| panic!("failed to read texture {path:?}: {err}"))
+        .into_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w != TILE_SIZE || h != TILE_SIZE {
+        panic!(
+            "texture {path:?} is {w}x{h}, but every block texture must be exactly \
+             {TILE_SIZE}x{TILE_SIZE}"
+        );
+    }
+    Some(img.into_raw())
+}
+
 pub fn build_atlas(painters: &Painters) -> AtlasData {
     assert!(
         painters.0.len() <= ATLAS_TILES * ATLAS_TILES,
@@ -83,14 +135,21 @@ pub fn build_atlas(painters: &Painters) -> AtlasData {
     );
     let mut pixels = vec![0u8; ATLAS_PX * ATLAS_PX * 4];
     let mut indices = HashMap::new();
+    let textures_dir = find_textures_dir();
     for (i, (name, paint)) in painters.0.iter().enumerate() {
-        let mut tile = TilePainter {
-            buf: &mut pixels,
-            x0: (i % ATLAS_TILES) * TILE_SIZE,
-            y0: (i / ATLAS_TILES) * TILE_SIZE,
-        };
-        let mut rng = mulberry32(hash_str(name));
-        paint(&mut tile, &mut rng);
+        let x0 = (i % ATLAS_TILES) * TILE_SIZE;
+        let y0 = (i / ATLAS_TILES) * TILE_SIZE;
+        if let Some(custom) = load_custom_tile(&textures_dir, name) {
+            for y in 0..TILE_SIZE {
+                let src = y * TILE_SIZE * 4;
+                let dst = ((y0 + y) * ATLAS_PX + x0) * 4;
+                pixels[dst..dst + TILE_SIZE * 4].copy_from_slice(&custom[src..src + TILE_SIZE * 4]);
+            }
+        } else {
+            let mut tile = TilePainter { buf: &mut pixels, x0, y0 };
+            let mut rng = mulberry32(hash_str(name));
+            paint(&mut tile, &mut rng);
+        }
         indices.insert(name.clone(), i as u16);
     }
     AtlasData { pixels, indices }
@@ -142,12 +201,18 @@ pub fn default_painters() -> Painters {
     });
 
     p.register("water", |t, rng| {
-        t.noisy_fill(rng, [50.0, 108.0, 190.0], 16.0);
-        for _ in 0..6 {
+        t.noisy_fill(rng, [50.0, 108.0, 190.0], 14.0);
+        // A few soft, low-contrast, narrow highlights - not the bold, wide
+        // streaks this used to have. Every water block samples this exact
+        // same baked tile, so anything bold/distinctive here repeats
+        // identically at every block boundary across a big lake, which the
+        // eye reads as an obvious tiled stamp (a "grid") rather than one
+        // continuous surface. Subtle and close to the base color instead.
+        for _ in 0..3 {
             let y = (rng() * 16.0) as i32;
-            let x = (rng() * 12.0) as i32;
-            for dx in 0..4 {
-                t.px(x + dx, y, [92.0, 148.0, 216.0]);
+            let x = (rng() * 14.0) as i32;
+            for dx in 0..2 {
+                t.px(x + dx, y, [68.0, 124.0, 200.0]);
             }
         }
     });
@@ -302,5 +367,50 @@ mod tests {
         };
         assert!(tile_alpha(stone).iter().all(|&a| a == 255));
         assert!(tile_alpha(leaves).iter().any(|&a| a == 0));
+    }
+
+    /// A throwaway scratch directory, removed when the guard drops.
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn temp_dir() -> TempDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("craftmjne-atlas-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    fn write_png(path: &Path, w: u32, h: u32, pixel: [u8; 4]) {
+        let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba(pixel));
+        img.save(path).unwrap();
+    }
+
+    #[test]
+    fn load_custom_tile_returns_none_when_the_file_is_missing() {
+        let dir = temp_dir();
+        assert!(load_custom_tile(&dir.0, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn load_custom_tile_reads_a_correctly_sized_png() {
+        let dir = temp_dir();
+        let pixel = [10, 20, 30, 255];
+        write_png(&dir.0.join("ruby.png"), TILE_SIZE as u32, TILE_SIZE as u32, pixel);
+        let pixels = load_custom_tile(&dir.0, "ruby").expect("file exists and is the right size");
+        assert_eq!(pixels.len(), TILE_SIZE * TILE_SIZE * 4);
+        assert_eq!(&pixels[0..4], &pixel);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be exactly")]
+    fn load_custom_tile_rejects_the_wrong_dimensions() {
+        let dir = temp_dir();
+        write_png(&dir.0.join("ruby.png"), 32, 32, [10, 20, 30, 255]);
+        load_custom_tile(&dir.0, "ruby");
     }
 }
