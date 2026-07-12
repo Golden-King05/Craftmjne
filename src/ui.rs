@@ -6,11 +6,12 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::blocks::{BlockRegistry, BlockTables};
+use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemModel};
 use crate::config::{TILE_SIZE, ATLAS_TILES};
+use crate::icons::ICON_SIZE;
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
-use crate::render::AtlasImage;
+use crate::render::{AtlasImage, IconAtlasImage};
 use crate::save::GameMode;
 use crate::state::AppState;
 use crate::updater::UpdateState;
@@ -54,6 +55,41 @@ pub(crate) fn tile_rect(tile: u16) -> Rect {
     let x = (tile as usize % ATLAS_TILES * TILE_SIZE) as f32;
     let y = (tile as usize / ATLAS_TILES * TILE_SIZE) as f32;
     Rect::new(x, y, x + TILE_SIZE as f32, y + TILE_SIZE as f32)
+}
+
+pub(crate) fn icon_tile_rect(tile: u16) -> Rect {
+    let x = (tile as usize % ATLAS_TILES * ICON_SIZE) as f32;
+    let y = (tile as usize / ATLAS_TILES * ICON_SIZE) as f32;
+    Rect::new(x, y, x + ICON_SIZE as f32, y + ICON_SIZE as f32)
+}
+
+/// Picks the right `ImageNode` for a block's inventory/hotbar icon,
+/// honoring its `item_model` (see `blocks::ItemModel`): `Default` uses the
+/// baked isometric icon (`icons.rs`) if one exists for it; `Face` and
+/// `Custom` (no model loader exists yet, so it renders the same as `Face`
+/// for now) fall back to the plain single-face crop already used for
+/// in-world rendering. Every call site that draws a block icon (the hotbar,
+/// the inventory screen's slots, Creative's block grid) should go through
+/// this instead of constructing an `ImageNode` by hand, so they all stay
+/// consistent as `ItemModel` grows more variants.
+pub(crate) fn block_icon(
+    id: BlockId,
+    registry: &BlockRegistry,
+    tables: &BlockTables,
+    atlas: &AtlasImage,
+    icon_atlas: &IconAtlasImage,
+) -> ImageNode {
+    if registry.def(id).item_model == ItemModel::Default {
+        if let Some(&tile) = icon_atlas.index.get(&id) {
+            return ImageNode {
+                image: icon_atlas.image.clone(),
+                rect: Some(icon_tile_rect(tile)),
+                ..default()
+            };
+        }
+    }
+    let tile = tables.0.tiles[id as usize * 6];
+    ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() }
 }
 
 fn setup_hud(mut commands: Commands) {
@@ -208,14 +244,21 @@ fn update_banner(state: Res<UpdateState>, mut banners: Query<(&mut Text, &mut Vi
 }
 
 /// Rebuilds hotbar slots whenever the hotbar changes (selection or contents).
+#[allow(clippy::too_many_arguments)]
 fn rebuild_hotbar(
     mut commands: Commands,
     hotbar: Res<Hotbar>,
+    registry: Option<Res<BlockRegistry>>,
     tables: Option<Res<BlockTables>>,
     atlas: Option<Res<AtlasImage>>,
+    icon_atlas: Option<Res<IconAtlasImage>>,
     roots: Query<Entity, With<HotbarRoot>>,
 ) {
-    let (Some(tables), Some(atlas)) = (tables, atlas) else { return };
+    let (Some(registry), Some(tables), Some(atlas), Some(icon_atlas)) =
+        (registry, tables, atlas, icon_atlas)
+    else {
+        return;
+    };
     if !hotbar.is_changed() {
         return;
     }
@@ -224,7 +267,6 @@ fn rebuild_hotbar(
 
     for (i, &stack) in hotbar.slots.iter().enumerate() {
         let selected = i == hotbar.selected;
-        let tile = tables.0.tiles[stack.id as usize * 6]; // east face as the icon
         let slot = commands
             .spawn((
                 Node {
@@ -249,11 +291,7 @@ fn rebuild_hotbar(
             .with_children(|parent| {
                 if !stack.is_empty() {
                     parent.spawn((
-                        ImageNode {
-                            image: atlas.0.clone(),
-                            rect: Some(tile_rect(tile)),
-                            ..default()
-                        },
+                        block_icon(stack.id, &registry, &tables, &atlas, &icon_atlas),
                         Node {
                             width: Val::Px(34.0),
                             height: Val::Px(34.0),

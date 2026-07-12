@@ -16,10 +16,10 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemStack, AIR};
 use crate::chat::ChatState;
 use crate::interact::Hotbar;
-use crate::render::AtlasImage;
+use crate::render::{AtlasImage, IconAtlasImage};
 use crate::save::GameMode;
 use crate::state::{AppState, PauseState};
-use crate::ui::tile_rect;
+use crate::ui::block_icon;
 
 /// Personal storage beyond the hotbar: three rows of `STORAGE_ROW_WIDTH`,
 /// Minecraft's classic layout. Just constants for now - "how much inventory
@@ -220,7 +220,15 @@ fn track_hovered_block(
     }
 }
 
-fn spawn_slot_row(parent: &mut ChildSpawnerCommands, tables: &BlockTables, atlas: &AtlasImage, slots: impl Iterator<Item = ItemStack>) {
+#[allow(clippy::too_many_arguments)]
+fn spawn_slot_row(
+    parent: &mut ChildSpawnerCommands,
+    registry: &BlockRegistry,
+    tables: &BlockTables,
+    atlas: &AtlasImage,
+    icon_atlas: &IconAtlasImage,
+    slots: impl Iterator<Item = ItemStack>,
+) {
     parent
         .spawn(Node { column_gap: Val::Px(4.0), ..default() })
         .with_children(|row| {
@@ -241,9 +249,8 @@ fn spawn_slot_row(parent: &mut ChildSpawnerCommands, tables: &BlockTables, atlas
                 ))
                 .with_children(|cell| {
                     if !stack.is_empty() {
-                        let tile = tables.0.tiles[stack.id as usize * 6];
                         cell.spawn((
-                            ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() },
+                            block_icon(stack.id, registry, tables, atlas, icon_atlas),
                             Node { width: Val::Px(34.0), height: Val::Px(34.0), ..default() },
                         ));
                         if stack.count > 1 {
@@ -268,10 +275,13 @@ fn spawn_slot_row(parent: &mut ChildSpawnerCommands, tables: &BlockTables, atlas
 /// The hotbar+storage view shared by Survival (its only screen) and
 /// Creative's "Inventory" tab - one `Inventory` resource either way, so
 /// contents survive a mode switch untouched.
+#[allow(clippy::too_many_arguments)]
 fn spawn_hotbar_and_storage(
     panel: &mut ChildSpawnerCommands,
+    registry: &BlockRegistry,
     tables: &BlockTables,
     atlas: &AtlasImage,
+    icon_atlas: &IconAtlasImage,
     hotbar: &Hotbar,
     inventory: &Inventory,
 ) {
@@ -280,14 +290,14 @@ fn spawn_hotbar_and_storage(
         TextFont { font_size: 12.0, ..default() },
         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
     ));
-    spawn_slot_row(panel, tables, atlas, hotbar.slots.iter().copied());
+    spawn_slot_row(panel, registry, tables, atlas, icon_atlas, hotbar.slots.iter().copied());
     panel.spawn((
         Text::new("Storage"),
         TextFont { font_size: 12.0, ..default() },
         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
     ));
     for row in inventory.slots.chunks(STORAGE_ROW_WIDTH) {
-        spawn_slot_row(panel, tables, atlas, row.iter().copied());
+        spawn_slot_row(panel, registry, tables, atlas, icon_atlas, row.iter().copied());
     }
 }
 
@@ -301,6 +311,7 @@ fn sync_inventory_screen(
     registry: Res<BlockRegistry>,
     tables: Option<Res<BlockTables>>,
     atlas: Option<Res<AtlasImage>>,
+    icon_atlas: Option<Res<IconAtlasImage>>,
     roots: Query<Entity, With<InventoryRoot>>,
 ) {
     if !inv.open {
@@ -309,7 +320,7 @@ fn sync_inventory_screen(
         }
         return;
     }
-    let (Some(tables), Some(atlas)) = (tables, atlas) else { return };
+    let (Some(tables), Some(atlas), Some(icon_atlas)) = (tables, atlas, icon_atlas) else { return };
     if !inv.is_changed() && !hotbar.is_changed() && !inventory.is_changed() {
         return;
     }
@@ -344,7 +355,7 @@ fn sync_inventory_screen(
             .with_children(|panel| match *mode {
                 GameMode::Survival => {
                     panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
-                    spawn_hotbar_and_storage(panel, &tables, &atlas, &hotbar, &inventory);
+                    spawn_hotbar_and_storage(panel, &registry, &tables, &atlas, &icon_atlas, &hotbar, &inventory);
                 }
                 GameMode::Creative => {
                     let title = match inv.creative_tab {
@@ -397,7 +408,6 @@ fn sync_inventory_screen(
                                             continue;
                                         }
                                         let id = id as BlockId;
-                                        let tile = tables.0.tiles[id as usize * 6];
                                         grid.spawn((
                                             Button,
                                             SlotBlock(id),
@@ -414,7 +424,7 @@ fn sync_inventory_screen(
                                         ))
                                         .with_children(|cell| {
                                             cell.spawn((
-                                                ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() },
+                                                block_icon(id, &registry, &tables, &atlas, &icon_atlas),
                                                 Node { width: Val::Px(34.0), height: Val::Px(34.0), ..default() },
                                             ));
                                         });
@@ -422,7 +432,7 @@ fn sync_inventory_screen(
                                 });
                         }
                         CreativeTab::Inventory => {
-                            spawn_hotbar_and_storage(panel, &tables, &atlas, &hotbar, &inventory);
+                            spawn_hotbar_and_storage(panel, &registry, &tables, &atlas, &icon_atlas, &hotbar, &inventory);
                         }
                     }
                 }

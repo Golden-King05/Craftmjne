@@ -144,6 +144,32 @@ already come from being able to refill a slot from the block grid at will,
 same asymmetry as middle-click pick-block. A slot's count shows as a small
 badge in its bottom-right corner once it's above 1.
 
+### Item models
+
+How a block's icon is drawn is a separate concern from how it renders
+in-world (which is always the real block mesh) — controlled by
+`item_model` (`blocks::ItemModel`), shared terminology with any future
+standalone item system:
+
+- **`"default"`** — a baked isometric icon (top + two side faces, Minecraft-
+  style), generated once at startup by `icons.rs` from the block's own top
+  and side textures. Pure CPU pixel math (inverse-mapped so the three faces
+  tile without gaps), no extra cameras or shaders — same "everything is
+  generated at runtime" approach `atlas.rs` uses for the textures
+  themselves. This is the default for every block.
+- **`"face"`** — the flat single-face 2D icon every block used before
+  `ItemModel` existed. Better for anything thin/flat (a future flower or
+  sign, say) than a forced-3D icon would read.
+- **`"custom"`** — points at `custom_item_model`, a path to an external
+  model (required when this is chosen; the loader panics on a block file
+  missing it). No model format/loader exists yet, so this renders as
+  `"face"` for now — the path still round-trips through the registry so a
+  model system can pick it up later without another schema change.
+
+`ui::block_icon` is the one place every icon-drawing call site (the hotbar,
+the inventory screen, Creative's block grid) goes through, so they all stay
+consistent as `ItemModel` grows more variants.
+
 ## Chat and commands
 
 Press `T` to open a one-line chat box; `Enter` sends, `Escape` cancels. Sent
@@ -249,10 +275,11 @@ src/
 ├── noise.rs     # seeded simplex noise, fBm, integer hashes
 ├── blocks.rs    # BlockRegistry: loads blocks/*.json -> compiled flat lookup Tables
 ├── atlas.rs     # Painters resource: 16x16 procedural tiles -> RGBA atlas
+├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
-├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas image, fog
+├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas + icon atlas images, fog
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, pause/cursor, camera
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
@@ -348,6 +375,8 @@ by) is required. Everything else defaults sanely:
 | `breakable` | `true` | bedrock sets this `false` |
 | `max_stack` | `124` (`DEFAULT_MAX_STACK`) | how many fit in one inventory/hotbar slot — see "Stacking" above |
 | `item` | `true` | `false` means this block has no inventory item at all — left out of Creative's grid, can't be middle-click picked. `air` is the built-in example; use it for a block that's only ever meant to be obtained via a separate item later (a bucket-of-water instead of a raw water block, say) |
+| `item_model` | `"default"` | `"default"` \| `"face"` \| `"custom"` — see "Item models" below |
+| `custom_item_model` | *(none)* | path to an external model, required when `item_model` is `"custom"` |
 | `textures` | tile named after `id` on every face | `{ "all": "..." }` or `{ "top": "...", "bottom": "...", "side": "..." }` |
 
 `transparent`'s three options all still respect the block's own texture

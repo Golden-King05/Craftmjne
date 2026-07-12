@@ -18,10 +18,14 @@ use bevy::render::render_resource::{
     SpecializedMeshPipelineError, TextureDimension, TextureFormat,
 };
 
+use std::collections::HashMap;
+
 use crate::atlas::ATLAS_PX;
+use crate::blocks::BlockId;
 use crate::config::{WorldSettings, CHUNK_SIZE, SKY_COLOR};
+use crate::icons::ICON_ATLAS_PX;
 use crate::mesher::MeshBucket;
-use crate::world::Atlas;
+use crate::world::{Atlas, IconAtlas};
 
 #[derive(Clone, ShaderType)]
 #[allow(dead_code)] // the ShaderType derive generates per-field check fns
@@ -78,6 +82,15 @@ pub struct ChunkMaterials {
 #[derive(Resource)]
 pub struct AtlasImage(pub Handle<Image>);
 
+/// The baked icon atlas (`icons.rs`) as a GPU image, plus which grid cell
+/// each `item_model: "default"` block landed in - `ui::block_icon` is the
+/// one place that reads this.
+#[derive(Resource)]
+pub struct IconAtlasImage {
+    pub image: Handle<Image>,
+    pub index: HashMap<BlockId, u16>,
+}
+
 pub fn bucket_to_mesh(bucket: MeshBucket) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -90,13 +103,14 @@ pub fn bucket_to_mesh(bucket: MeshBucket) -> Mesh {
     mesh
 }
 
-/// Startup (after `world::compile_content`): upload the atlas and create the
-/// two chunk materials.
+/// Startup (after `world::compile_content`): upload the atlas and icon
+/// atlas, and create the two chunk materials.
 fn setup_render(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ChunkMaterial>>,
     atlas: Res<Atlas>,
+    icon_atlas: Res<IconAtlas>,
     settings: Res<WorldSettings>,
 ) {
     let mut image = Image::new(
@@ -112,6 +126,20 @@ fn setup_render(
     );
     image.sampler = bevy::image::ImageSampler::nearest();
     let atlas_handle = images.add(image);
+
+    let mut icon_image = Image::new(
+        Extent3d {
+            width: ICON_ATLAS_PX as u32,
+            height: ICON_ATLAS_PX as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        icon_atlas.0.pixels.clone(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    icon_image.sampler = bevy::image::ImageSampler::nearest();
+    let icon_atlas_handle = images.add(icon_image);
 
     let view_dist = (settings.render_distance * CHUNK_SIZE) as f32;
     let fog_color = LinearRgba::from(SKY_COLOR);
@@ -135,6 +163,7 @@ fn setup_render(
     });
 
     commands.insert_resource(AtlasImage(atlas_handle));
+    commands.insert_resource(IconAtlasImage { image: icon_atlas_handle, index: icon_atlas.0.index.clone() });
     commands.insert_resource(ChunkMaterials { solid, water });
 }
 

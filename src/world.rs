@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
 use crate::blocks::{BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, H, WORLD_HEIGHT};
+use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
@@ -34,6 +35,11 @@ pub struct WorldGen(pub Arc<TerrainGenerator>);
 /// Non-render atlas data (pixel buffer + name->tile map), built at startup.
 #[derive(Resource)]
 pub struct Atlas(pub AtlasData);
+
+/// Non-render baked isometric icon data (see `icons.rs`), built at startup
+/// right after `Atlas` since it's derived from the same tile pixels.
+#[derive(Resource)]
+pub struct IconAtlas(pub IconAtlasData);
 
 #[derive(Event)]
 pub struct BlockSetEvent {
@@ -504,18 +510,20 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
     }
 }
 
-/// Startup: build the atlas and compile the registry's flat lookup tables.
-/// Runs before any render/UI setup that needs atlas indices. Does not touch
-/// `WorldGen` — that's constructed per-world by `enter_world`, since each
-/// world has its own seed.
+/// Startup: build the atlas, bake isometric icons for it (`icons.rs`), and
+/// compile the registry's flat lookup tables. Runs before any render/UI
+/// setup that needs atlas indices. Does not touch `WorldGen` — that's
+/// constructed per-world by `enter_world`, since each world has its own seed.
 pub fn compile_content(
     mut commands: Commands,
     mut registry: ResMut<BlockRegistry>,
     painters: Res<Painters>,
 ) {
     let atlas = build_atlas(&painters);
+    let icon_atlas = build_icon_atlas(&registry, &atlas);
     let tables = registry.compile(&atlas.indices);
     commands.insert_resource(Atlas(atlas));
+    commands.insert_resource(IconAtlas(icon_atlas));
     commands.insert_resource(BlockTables(tables));
 }
 

@@ -108,12 +108,29 @@ etc.) instead of inventing a new approach:
   backing resource(s) `.is_changed()` — don't hand-patch individual nodes.
   Pattern used by `ui::rebuild_hotbar`, `menu::rebuild_worlds_content`,
   `menu::sync_pause_screen`, `inventory::sync_inventory_screen`.
-- **Block icon rendering**: `Res<BlockTables>.0.tiles[id as usize * 6 +
-  face]` → atlas tile index → `ui::tile_rect(tile)` → `Rect` → `ImageNode {
-  image: atlas_image.0.clone(), rect: Some(rect), .. }`. Always special-case
-  `id == blocks::AIR` and skip drawing an icon — the tiles table has no
-  meaningful entry for air (defaults to 0, i.e. garbage/first-tile), it is
-  not "no texture" by convention.
+- **Block icon rendering**: always go through `ui::block_icon(id, &registry,
+  &tables, &atlas, &icon_atlas) -> ImageNode` rather than constructing an
+  `ImageNode` by hand - it's the one place that honors `ItemModel` (baked
+  isometric icon for `Default`, flat single-face crop for `Face`/`Custom`)
+  so every call site (hotbar, inventory screen, Creative's grid) stays
+  consistent as that enum grows more variants. Always special-case `id ==
+  blocks::AIR` and skip drawing an icon entirely before calling it - the
+  tiles table has no meaningful entry for air (defaults to 0, i.e. garbage/
+  first-tile), it is not "no texture" by convention.
+- **Baking a derived image from the procedural atlas at startup**:
+  `icons.rs`'s isometric icon baker is the template for "generate a second
+  texture from the first one, once, at startup" - build it as pure CPU
+  pixel math operating on `AtlasData`'s raw buffer (no GPU/shader
+  involvement), store the non-render data as one `Resource` (`world::
+  IconAtlas`, built in `world::compile_content` right after the main
+  atlas), then upload it to the GPU as a second `Image` in `render::
+  setup_render` (mirrors exactly how the main atlas itself is uploaded) and
+  expose it as its own `Resource` (`render::IconAtlasImage`). For any
+  "map every destination pixel back to a source pixel" transform
+  (shearing, projecting, tiling), inverse-map from the destination side -
+  iterating destination pixels and solving for the source coordinate is
+  gap-free by construction, where forward-mapping source pixels onto a
+  larger/differently-shaped destination is not.
 - **Block registry**: `Res<BlockRegistry>.def(id) -> &BlockDef`,
   `.id(name)` (panics if unknown, fine for hardcoded names), `.by_name(name)
   -> Result<..., UnknownBlock>` (non-panicking, use when loading untrusted

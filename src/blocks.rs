@@ -33,6 +33,7 @@
 //!   "breakable": true,
 //!   "max_stack": 124,
 //!   "item": true,
+//!   "item_model": "default",
 //!   "textures": { "all": "coal_ore" }
 //! }
 //! ```
@@ -59,6 +60,12 @@
 //!   middle-click picked. `air` is the built-in example; a future block
 //!   that's only ever obtained via a separate item (a water block once
 //!   there's a bucket-of-water item, say) is the intended general use.
+//! - `item_model` is `"default"` (a baked isometric icon showing the top and
+//!   two side faces, Minecraft-style), `"face"` (the flat single-face 2D
+//!   icon every block used before this existed), or `"custom"` (points at
+//!   `custom_item_model`, a path — required when `"custom"` is chosen, the
+//!   loader panics on a block file missing it; no model loader exists yet,
+//!   so this renders as `"face"` for now). Defaults to `"default"`.
 //! - `textures` defaults to a single texture named after `id` on every face
 //!   if omitted entirely.
 
@@ -134,6 +141,32 @@ pub enum Transparency {
     Full,
 }
 
+/// How a block draws as an inventory/hotbar icon (as opposed to in-world,
+/// which is always the real block mesh regardless of this setting). Shared
+/// terminology with a future standalone item system - a block's icon and a
+/// pure item's icon both come from the same three choices.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemModel {
+    /// A block: a baked isometric icon showing the top and two side faces,
+    /// Minecraft-style (see `icons.rs`). A future pure item (not backed by
+    /// a placeable block) would instead just show its own flat texture -
+    /// there's no "block mesh" to project for those.
+    #[default]
+    Default,
+    /// The flat, single-face 2D texture - how every block's icon looked
+    /// before `ItemModel` existed. Cheaper and reads better for thin/flat
+    /// things (a future flower or sign, say) than a forced-3D icon would.
+    Face,
+    /// Points at an external model via `BlockDef::custom_item_model`
+    /// (required when this variant is chosen - the loader panics on a
+    /// block file missing it, same as any other malformed content). No
+    /// model format/loader exists yet, so this renders as `Face` for now;
+    /// the path still round-trips through the registry so a model system
+    /// can pick it up later without another schema change.
+    Custom,
+}
+
 /// Face order used across the whole engine (mesher, tiles table):
 /// 0:+x east, 1:-x west, 2:+y top, 3:-y bottom, 4:+z south, 5:-z north
 #[derive(Clone, Default, Deserialize)]
@@ -158,7 +191,7 @@ impl FaceTextures {
         }
     }
 
-    fn resolve<'a>(&'a self, block_id: &'a str, face: usize) -> &'a str {
+    pub fn resolve<'a>(&'a self, block_id: &'a str, face: usize) -> &'a str {
         let pick = |primary: &'a Option<String>| {
             primary
                 .as_deref()
@@ -212,6 +245,12 @@ pub struct BlockDef {
     /// bucket-of-water item, say), without having to define a whole
     /// separate item system just to hide the raw block from the UI.
     pub item: bool,
+    /// How this block's inventory icon is drawn. See [`ItemModel`].
+    pub item_model: ItemModel,
+    /// External model path for `item_model: "custom"`. `resolve()`/loaders
+    /// treat this as relative to wherever a future model system decides -
+    /// for now it's just carried through the registry unread.
+    pub custom_item_model: Option<String>,
     pub textures: FaceTextures,
 }
 
@@ -229,6 +268,8 @@ impl Default for BlockDef {
             breakable: true,
             max_stack: DEFAULT_MAX_STACK,
             item: true,
+            item_model: ItemModel::default(),
+            custom_item_model: None,
             textures: FaceTextures::default(),
         }
     }
@@ -272,6 +313,9 @@ struct BlockFile {
     #[serde(default = "default_true")]
     item: bool,
     #[serde(default)]
+    item_model: ItemModel,
+    custom_item_model: Option<String>,
+    #[serde(default)]
     textures: FaceTextures,
 }
 
@@ -305,6 +349,8 @@ impl BlockFile {
             breakable: self.breakable,
             max_stack: self.max_stack,
             item: self.item,
+            item_model: self.item_model,
+            custom_item_model: self.custom_item_model,
             textures: self.textures,
         }
     }
@@ -400,6 +446,11 @@ impl BlockRegistry {
                 .unwrap_or_else(|err| panic!("failed to parse block file {path:?}: {err}"));
             if file.id.contains(char::is_whitespace) {
                 panic!("block file {path:?}: id {:?} must not contain spaces", file.id);
+            }
+            if file.item_model == ItemModel::Custom && file.custom_item_model.is_none() {
+                panic!(
+                    "block file {path:?}: item_model \"custom\" requires a custom_item_model path"
+                );
             }
             reg.register(file.into_def());
         }
@@ -522,6 +573,38 @@ mod tests {
 
         let reg = BlockRegistry::with_defaults();
         assert!(!reg.def(AIR).item, "air must not be obtainable");
+    }
+
+    #[test]
+    fn item_model_defaults_to_default_and_is_overridable() {
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "dirt"}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.item_model, ItemModel::Default);
+        assert!(def.custom_item_model.is_none());
+
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "sign", "item_model": "face"}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.item_model, ItemModel::Face);
+
+        let def: BlockDef = serde_json::from_str::<BlockFile>(
+            r#"{"id": "gizmo", "item_model": "custom", "custom_item_model": "gizmo/model.json"}"#,
+        )
+        .unwrap()
+        .into_def();
+        assert_eq!(def.item_model, ItemModel::Custom);
+        assert_eq!(def.custom_item_model.as_deref(), Some("gizmo/model.json"));
+    }
+
+    #[test]
+    fn custom_item_model_without_a_path_is_rejected() {
+        // Mirrors load_from_dir's validation (checked on BlockFile before
+        // into_def, since into_def itself can't panic with file context).
+        let file: BlockFile =
+            serde_json::from_str(r#"{"id": "gizmo", "item_model": "custom"}"#).unwrap();
+        assert_eq!(file.item_model, ItemModel::Custom);
+        assert!(file.custom_item_model.is_none());
     }
 
     #[test]

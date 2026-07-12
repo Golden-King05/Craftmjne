@@ -7,6 +7,7 @@ pub mod blocks;
 pub mod chat;
 pub mod commands;
 pub mod config;
+pub mod icons;
 pub mod interact;
 pub mod inventory;
 pub mod menu;
