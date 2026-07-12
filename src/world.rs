@@ -580,7 +580,7 @@ pub fn compile_content(
 ) {
     let atlas = build_atlas(&painters);
     let icon_atlas = build_icon_atlas(&registry, &atlas);
-    let tables = registry.compile(&atlas.indices);
+    let tables = registry.compile(&atlas.indices, atlas.tile_size);
     commands.insert_resource(Atlas(atlas));
     commands.insert_resource(IconAtlas(icon_atlas));
     commands.insert_resource(BlockTables(tables));
@@ -1073,7 +1073,7 @@ mod tests {
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
         let water = reg.id("water");
         let stone = reg.id("stone");
-        let tables = reg.compile(&atlas.indices);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let map = ChunkMap { chunks: HashMap::from([(IVec2::ZERO, empty_chunk())]), ..ChunkMap::default() };
         (water, stone, tables, map)
     }

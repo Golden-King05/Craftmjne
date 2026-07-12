@@ -20,10 +20,8 @@ use bevy::render::render_resource::{
 
 use std::collections::HashMap;
 
-use crate::atlas::ATLAS_PX;
 use crate::blocks::BlockId;
 use crate::config::{WorldSettings, CHUNK_SIZE, SKY_COLOR};
-use crate::icons::ICON_ATLAS_PX;
 use crate::mesher::MeshBucket;
 use crate::world::{Atlas, IconAtlas};
 
@@ -89,6 +87,9 @@ pub struct AtlasImage(pub Handle<Image>);
 pub struct IconAtlasImage {
     pub image: Handle<Image>,
     pub index: HashMap<BlockId, u16>,
+    /// Each icon's canvas size in pixels (`icons::IconAtlasData::icon_size`)
+    /// - `ui::icon_tile_rect` needs this to crop the right region.
+    pub icon_size: usize,
 }
 
 pub fn bucket_to_mesh(bucket: MeshBucket) -> Mesh {
@@ -113,12 +114,9 @@ fn setup_render(
     icon_atlas: Res<IconAtlas>,
     settings: Res<WorldSettings>,
 ) {
+    let atlas_px = atlas.0.atlas_px() as u32;
     let mut image = Image::new(
-        Extent3d {
-            width: ATLAS_PX as u32,
-            height: ATLAS_PX as u32,
-            depth_or_array_layers: 1,
-        },
+        Extent3d { width: atlas_px, height: atlas_px, depth_or_array_layers: 1 },
         TextureDimension::D2,
         atlas.0.pixels.clone(),
         TextureFormat::Rgba8UnormSrgb,
@@ -127,12 +125,9 @@ fn setup_render(
     image.sampler = bevy::image::ImageSampler::nearest();
     let atlas_handle = images.add(image);
 
+    let icon_atlas_px = icon_atlas.0.icon_atlas_px() as u32;
     let mut icon_image = Image::new(
-        Extent3d {
-            width: ICON_ATLAS_PX as u32,
-            height: ICON_ATLAS_PX as u32,
-            depth_or_array_layers: 1,
-        },
+        Extent3d { width: icon_atlas_px, height: icon_atlas_px, depth_or_array_layers: 1 },
         TextureDimension::D2,
         icon_atlas.0.pixels.clone(),
         TextureFormat::Rgba8UnormSrgb,
@@ -163,7 +158,11 @@ fn setup_render(
     });
 
     commands.insert_resource(AtlasImage(atlas_handle));
-    commands.insert_resource(IconAtlasImage { image: icon_atlas_handle, index: icon_atlas.0.index.clone() });
+    commands.insert_resource(IconAtlasImage {
+        image: icon_atlas_handle,
+        index: icon_atlas.0.index.clone(),
+        icon_size: icon_atlas.0.icon_size,
+    });
     commands.insert_resource(ChunkMaterials { solid, water });
 }
 

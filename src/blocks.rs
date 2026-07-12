@@ -419,6 +419,17 @@ pub struct Tables {
     pub rotates: Vec<bool>,
     /// Atlas tile per face: `tiles[id as usize * 6 + face]`.
     pub tiles: Vec<u16>,
+    /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
+    /// tile_size` at compile time) - one of `atlas::ALLOWED_TILE_SIZES`.
+    pub tile_size: usize,
+    /// Half-texel UV inset that keeps neighbouring atlas tiles from
+    /// bleeding into each other, derived from `tile_size` (a higher-
+    /// resolution atlas needs a proportionally smaller inset). See
+    /// `mesher.rs`'s UV computation.
+    pub uv_pad: f32,
+    /// `1/ATLAS_TILES - 2*uv_pad`: how much of each tile's UV span is
+    /// actually sampled once `uv_pad` insets both edges.
+    pub uv_span: f32,
 }
 
 #[derive(Resource, Clone)]
@@ -534,9 +545,14 @@ impl BlockRegistry {
         &self.defs[id as usize]
     }
 
-    /// Bakes flat lookup tables. `atlas_index` maps texture names -> tiles.
-    pub fn compile(&mut self, atlas_index: &HashMap<String, u16>) -> Arc<Tables> {
+    /// Bakes flat lookup tables. `atlas_index` maps texture names -> tiles;
+    /// `tile_size` is the atlas's actual per-tile pixel resolution
+    /// (`atlas::AtlasData::tile_size`), used to derive the UV inset that
+    /// keeps neighbouring tiles from bleeding into each other.
+    pub fn compile(&mut self, atlas_index: &HashMap<String, u16>, tile_size: usize) -> Arc<Tables> {
         let n = self.defs.len();
+        let uv_tile = 1.0 / crate::config::ATLAS_TILES as f32;
+        let uv_pad = 0.5 / (crate::config::ATLAS_TILES * tile_size) as f32;
         let mut tables = Tables {
             solid: vec![false; n],
             opaque: vec![false; n],
@@ -546,6 +562,9 @@ impl BlockRegistry {
             flow_distance: vec![0; n],
             rotates: vec![false; n],
             tiles: vec![0; n * 6],
+            tile_size,
+            uv_pad,
+            uv_span: uv_tile - 2.0 * uv_pad,
         };
         for (id, def) in self.defs.iter().enumerate().skip(1) {
             tables.solid[id] = def.solid;
@@ -576,7 +595,7 @@ mod tests {
     fn registry_compiles_with_default_atlas() {
         let mut reg = BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
-        let tables = reg.compile(&atlas.indices);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let water = reg.id("water");
         let stone = reg.id("stone");
         let leaves = reg.id("leaves");
@@ -711,7 +730,7 @@ mod tests {
 
         let mut reg = BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
-        let tables = reg.compile(&atlas.indices);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let log = reg.id("log");
         let stone = reg.id("stone");
         assert!(tables.rotates[log as usize]);

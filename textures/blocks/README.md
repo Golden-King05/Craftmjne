@@ -11,13 +11,26 @@ one specific tile with real art instead; no code changes, no recompile.
   `bottom`/`side`), or the block's own `id` if it doesn't set `textures` at
   all (most blocks: the file just falls back to a texture named after
   itself — see `blocks.rs`'s module docs for the full schema).
-- **Exactly 16×16 pixels.** Startup panics with a clear message if a file
-  is the wrong size — better than silently stretching or cropping your art.
+- **Square, and 16×16, 32×32, or 64×64 pixels.** Startup panics with a
+  clear message if a file is some other size — better than silently
+  stretching or cropping your art.
 - **PNG, with alpha.** Fully opaque (alpha 255) unless the block itself is
   meant to be transparent (glass, leaves) or translucent (water).
 - **Optional, per-tile.** Only supply the ones you actually have art for —
   anything missing keeps using its procedural painter, same as before this
   existed. You can mix hand-made and procedural tiles freely.
+
+## Resolution
+
+**The whole game runs at one resolution, picked automatically** — the
+largest size found among whatever you supply here (16×16 if you supply
+nothing, same as always). It's a single global choice, like a Minecraft
+resource pack, not a per-tile one: drop in one 64×64 texture and the *whole*
+atlas — every other tile, including every procedural one you didn't
+replace — gets rendered at 64×64, upscaled with nearest-neighbor (crisp
+pixel replication, not blur) wherever real 64×64 art isn't available yet.
+Baked inventory icons, the mesher's UVs, and the GPU texture itself all
+follow the same resolution automatically — nothing else to configure.
 
 ## Texture names the built-in blocks currently look for
 

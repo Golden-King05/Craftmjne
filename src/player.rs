@@ -449,7 +449,7 @@ mod tests {
     fn flat_world() -> (ChunkMap, std::sync::Arc<Tables>) {
         let mut reg = crate::blocks::BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
-        let tables = reg.compile(&atlas.indices);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let stone = reg.id("stone");
 
         let mut map = ChunkMap::default();
@@ -523,7 +523,7 @@ mod tests {
     fn swimming_into_a_flush_shore_climbs_out_without_pressing_space() {
         let mut reg = crate::blocks::BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
-        let tables = reg.compile(&atlas.indices);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let stone = reg.id("stone");
         let water = reg.id("water");
 

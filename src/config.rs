@@ -6,7 +6,6 @@ pub const CHUNK_SIZE: i32 = 16; // chunk footprint in blocks (X and Z)
 pub const WORLD_HEIGHT: i32 = 64; // world height in blocks (one chunk = full column)
 pub const SEA_LEVEL: i32 = 26;
 
-pub const TILE_SIZE: usize = 16; // pixels per texture tile (16x16 textures)
 pub const ATLAS_TILES: usize = 16; // atlas is ATLAS_TILES x ATLAS_TILES tiles
 
 pub const CS: usize = CHUNK_SIZE as usize;

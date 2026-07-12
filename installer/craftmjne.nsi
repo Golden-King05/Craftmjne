@@ -59,6 +59,13 @@ Section "Craftmjne" SEC_APP
   File /r "..\blocks\*.json"
   SetOutPath "$INSTDIR"
 
+  ; Optional custom-texture folder (see src/atlas.rs and textures/blocks/
+  ; README.md) - just the README, so it exists and is discoverable right
+  ; next to the exe; the game runs fine with nothing else in it.
+  SetOutPath "$INSTDIR\textures\blocks"
+  File "..\textures\blocks\README.md"
+  SetOutPath "$INSTDIR"
+
   WriteRegStr HKCU "Software\Craftmjne" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -90,6 +97,7 @@ Section "Uninstall"
   Delete "$INSTDIR\craftmjne.exe"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir /r "$INSTDIR\blocks"
+  RMDir /r "$INSTDIR\textures"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Craftmjne\Craftmjne.lnk"

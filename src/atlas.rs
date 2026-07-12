@@ -1,11 +1,21 @@
-//! Texture atlas: packs 16x16 tiles into one RGBA image, so every chunk
-//! renders with a single material. Every tile is procedurally painted by
-//! default (no image assets required to run the project) - but any tile
-//! can be overridden by dropping a real `textures/blocks/<name>.png` next
-//! to the executable (or the repo root, for `cargo run`/tests): exactly
-//! `TILE_SIZE`x`TILE_SIZE`, checked before the procedural painter for that
-//! name ever runs. See `textures/blocks/README.md` for the full list of
-//! names the built-in blocks look for.
+//! Texture atlas: packs tiles into one RGBA image, so every chunk renders
+//! with a single material. Every tile is procedurally painted at
+//! `BASE_TILE_SIZE` (16x16) by default (no image assets required to run
+//! the project) - but any tile can be overridden by dropping a real
+//! `textures/blocks/<name>.png` next to the executable (or the repo root,
+//! for `cargo run`/tests): any size in [`ALLOWED_TILE_SIZES`], checked
+//! before the procedural painter for that name ever runs. See
+//! `textures/blocks/README.md` for the full list of names the built-in
+//! blocks look for.
+//!
+//! **The whole atlas runs at one resolution, chosen automatically.** It's
+//! the largest size found among whatever custom textures are supplied
+//! (`BASE_TILE_SIZE` if none are) - like a Minecraft resource pack, not a
+//! per-tile choice. Procedural tiles and any custom tile smaller than that
+//! get nearest-neighbor upscaled to match, so pixel art stays crisp instead
+//! of blurring, and everything - the mesher's UVs, baked inventory icons,
+//! the GPU texture itself - follows the same chosen resolution
+//! (`Tables::tile_size`, threaded from `BlockRegistry::compile`).
 //!
 //! Extension point: push your own painter into the [`Painters`] resource from
 //! your plugin's `build()`:
@@ -17,17 +27,36 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::{ATLAS_TILES, TILE_SIZE};
+use crate::config::ATLAS_TILES;
 use crate::noise::{hash_str, mulberry32};
 
-pub const ATLAS_PX: usize = ATLAS_TILES * TILE_SIZE;
-const S: i32 = TILE_SIZE as i32;
+/// The resolution every procedural painter draws at natively, and the
+/// minimum/default atlas resolution when no custom textures are supplied.
+pub const BASE_TILE_SIZE: usize = 16;
+/// Every size a `textures/blocks/*.png` file is allowed to be - a plain
+/// multiple of `BASE_TILE_SIZE`, so nearest-neighbor upscaling from the
+/// base procedural resolution (or from a smaller custom tile) always lines
+/// up on exact pixel boundaries with no fractional blending.
+pub const ALLOWED_TILE_SIZES: [usize; 3] = [16, 32, 64];
 
-/// Draws one 16x16 tile. Coordinates are tile-local; out-of-range is clipped.
+const S: i32 = BASE_TILE_SIZE as i32;
+
+/// Draws one `BASE_TILE_SIZE`x`BASE_TILE_SIZE` tile into a buffer whose row
+/// stride is `stride` pixels - decoupled from the buffer's own width so
+/// the same type paints both a small native-resolution scratch tile
+/// (`stride == BASE_TILE_SIZE`, later upscaled if the atlas resolution
+/// ended up larger) and directly into the shared atlas at its final
+/// position when the atlas is running at the base resolution (`stride ==
+/// atlas row width`). Every painter is written assuming a 16x16 canvas -
+/// this never varies, regardless of the atlas's eventual resolution;
+/// upscaling happens as a separate blit step in `build_atlas`, not by
+/// asking painters to draw bigger. Coordinates are tile-local;
+/// out-of-range is clipped.
 pub struct TilePainter<'a> {
     buf: &'a mut [u8],
     x0: usize,
     y0: usize,
+    stride: usize,
 }
 
 impl TilePainter<'_> {
@@ -39,7 +68,7 @@ impl TilePainter<'_> {
         if !(0..S).contains(&x) || !(0..S).contains(&y) {
             return;
         }
-        let i = ((self.y0 + y as usize) * ATLAS_PX + self.x0 + x as usize) * 4;
+        let i = ((self.y0 + y as usize) * self.stride + self.x0 + x as usize) * 4;
         for ch in 0..4 {
             self.buf[i + ch] = c[ch].clamp(0.0, 255.0) as u8;
         }
@@ -77,9 +106,19 @@ impl Painters {
 }
 
 pub struct AtlasData {
-    /// RGBA8, ATLAS_PX x ATLAS_PX.
+    /// RGBA8, `atlas_px() x atlas_px()` (`atlas_px() == ATLAS_TILES *
+    /// tile_size`).
     pub pixels: Vec<u8>,
     pub indices: HashMap<String, u16>,
+    /// The resolution this atlas actually got built at - see the module
+    /// docs. One of [`ALLOWED_TILE_SIZES`].
+    pub tile_size: usize,
+}
+
+impl AtlasData {
+    pub fn atlas_px(&self) -> usize {
+        ATLAS_TILES * self.tile_size
+    }
 }
 
 /// Where to look for `textures/blocks/`: next to the running executable
@@ -102,15 +141,15 @@ fn find_textures_dir() -> PathBuf {
 }
 
 /// Loads a hand-supplied tile for `name` from `<dir>/<name>.png`, decoded
-/// to raw `TILE_SIZE`x`TILE_SIZE` RGBA8 - `None` (not an error) if the file
+/// to raw RGBA8 plus its native size - `None` (not an error) if the file
 /// just isn't there, since falling back to the procedural painter for
 /// anything not yet supplied is the whole point. Panics on a *malformed*
-/// file (wrong dimensions, unreadable/corrupt PNG) instead of silently
-/// falling back - a broken file sitting in `textures/blocks/` is far more
-/// likely a mistake worth surfacing loudly than something to paper over
-/// with a procedural placeholder nobody asked for, matching how
+/// file (disallowed dimensions, unreadable/corrupt PNG) instead of
+/// silently falling back - a broken file sitting in `textures/blocks/` is
+/// far more likely a mistake worth surfacing loudly than something to
+/// paper over with a procedural placeholder nobody asked for, matching how
 /// `blocks::load_from_dir` treats a malformed block file.
-fn load_custom_tile(dir: &Path, name: &str) -> Option<Vec<u8>> {
+fn load_custom_tile(dir: &Path, name: &str) -> Option<(Vec<u8>, usize)> {
     let path = dir.join(format!("{name}.png"));
     if !path.is_file() {
         return None;
@@ -119,40 +158,93 @@ fn load_custom_tile(dir: &Path, name: &str) -> Option<Vec<u8>> {
         .unwrap_or_else(|err| panic!("failed to read texture {path:?}: {err}"))
         .into_rgba8();
     let (w, h) = (img.width() as usize, img.height() as usize);
-    if w != TILE_SIZE || h != TILE_SIZE {
+    if w != h || !ALLOWED_TILE_SIZES.contains(&w) {
         panic!(
-            "texture {path:?} is {w}x{h}, but every block texture must be exactly \
-             {TILE_SIZE}x{TILE_SIZE}"
+            "texture {path:?} is {w}x{h}, but every block texture must be square and one of \
+             {ALLOWED_TILE_SIZES:?}"
         );
     }
-    Some(img.into_raw())
+    Some((img.into_raw(), w))
+}
+
+/// Nearest-neighbor upscales a square `src_size`x`src_size` RGBA8 buffer to
+/// `dst_size`x`dst_size` (a whole-number multiple of `src_size` - callers
+/// only ever scale between sizes drawn from [`ALLOWED_TILE_SIZES`], so this
+/// is always exact, no fractional sampling). Nearest-neighbor rather than
+/// any blurring filter deliberately - it replicates pixels instead of
+/// blending them, so pixel art stays crisp instead of turning to mush.
+fn upscale_nearest(src: &[u8], src_size: usize, dst_size: usize) -> Vec<u8> {
+    let factor = dst_size / src_size;
+    let mut dst = vec![0u8; dst_size * dst_size * 4];
+    for y in 0..dst_size {
+        let sy = y / factor;
+        for x in 0..dst_size {
+            let sx = x / factor;
+            let si = (sy * src_size + sx) * 4;
+            let di = (y * dst_size + x) * 4;
+            dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    dst
 }
 
 pub fn build_atlas(painters: &Painters) -> AtlasData {
+    build_atlas_from_dir(painters, &find_textures_dir())
+}
+
+/// The real logic behind `build_atlas`, taking an explicit textures
+/// directory rather than resolving one internally - split out purely so
+/// tests can point it at a controlled scratch directory instead of the
+/// real `textures/blocks/` (see `atlas_uses_a_larger_custom_texture_as_
+/// the_whole_atlas_resolution` below). `build_atlas` itself, used
+/// everywhere else, is unaffected - it always resolves the real directory.
+fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
     assert!(
         painters.0.len() <= ATLAS_TILES * ATLAS_TILES,
         "too many textures for a {ATLAS_TILES}x{ATLAS_TILES} atlas"
     );
-    let mut pixels = vec![0u8; ATLAS_PX * ATLAS_PX * 4];
+
+    // Every custom tile gets decoded once up front, both to pick the
+    // atlas's resolution (the largest one found, `BASE_TILE_SIZE` if none)
+    // and so the second pass below never re-reads a file from disk.
+    let custom: Vec<Option<(Vec<u8>, usize)>> =
+        painters.0.iter().map(|(name, _)| load_custom_tile(textures_dir, name)).collect();
+    let tile_size = custom
+        .iter()
+        .filter_map(|c| c.as_ref().map(|(_, size)| *size))
+        .max()
+        .unwrap_or(BASE_TILE_SIZE);
+
+    let atlas_px = ATLAS_TILES * tile_size;
+    let mut pixels = vec![0u8; atlas_px * atlas_px * 4];
     let mut indices = HashMap::new();
-    let textures_dir = find_textures_dir();
     for (i, (name, paint)) in painters.0.iter().enumerate() {
-        let x0 = (i % ATLAS_TILES) * TILE_SIZE;
-        let y0 = (i / ATLAS_TILES) * TILE_SIZE;
-        if let Some(custom) = load_custom_tile(&textures_dir, name) {
-            for y in 0..TILE_SIZE {
-                let src = y * TILE_SIZE * 4;
-                let dst = ((y0 + y) * ATLAS_PX + x0) * 4;
-                pixels[dst..dst + TILE_SIZE * 4].copy_from_slice(&custom[src..src + TILE_SIZE * 4]);
+        let x0 = (i % ATLAS_TILES) * tile_size;
+        let y0 = (i / ATLAS_TILES) * tile_size;
+
+        let tile_pixels: Vec<u8> = match &custom[i] {
+            Some((pixels, size)) if *size == tile_size => pixels.clone(),
+            Some((pixels, size)) => upscale_nearest(pixels, *size, tile_size),
+            None => {
+                let mut scratch = vec![0u8; BASE_TILE_SIZE * BASE_TILE_SIZE * 4];
+                let mut tile = TilePainter { buf: &mut scratch, x0: 0, y0: 0, stride: BASE_TILE_SIZE };
+                let mut rng = mulberry32(hash_str(name));
+                paint(&mut tile, &mut rng);
+                if tile_size == BASE_TILE_SIZE {
+                    scratch
+                } else {
+                    upscale_nearest(&scratch, BASE_TILE_SIZE, tile_size)
+                }
             }
-        } else {
-            let mut tile = TilePainter { buf: &mut pixels, x0, y0 };
-            let mut rng = mulberry32(hash_str(name));
-            paint(&mut tile, &mut rng);
+        };
+        for y in 0..tile_size {
+            let src = y * tile_size * 4;
+            let dst = ((y0 + y) * atlas_px + x0) * 4;
+            pixels[dst..dst + tile_size * 4].copy_from_slice(&tile_pixels[src..src + tile_size * 4]);
         }
         indices.insert(name.clone(), i as u16);
     }
-    AtlasData { pixels, indices }
+    AtlasData { pixels, indices, tile_size }
 }
 
 /// The default 16x16 pixel-art set for the built-in blocks.
@@ -356,13 +448,16 @@ mod tests {
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
         assert_eq!(a.indices.len(), 18);
+        // No custom textures are supplied in this test run, so the atlas
+        // stays at the base procedural resolution.
+        assert_eq!(a.tile_size, BASE_TILE_SIZE);
         // stone tile is fully opaque, leaves tile has holes
         let stone = *a.indices.get("stone").unwrap() as usize;
         let leaves = *a.indices.get("leaves").unwrap() as usize;
         let tile_alpha = |idx: usize| -> Vec<u8> {
-            let (tx, ty) = (idx % ATLAS_TILES * TILE_SIZE, idx / ATLAS_TILES * TILE_SIZE);
-            (0..TILE_SIZE * TILE_SIZE)
-                .map(|i| a.pixels[((ty + i / TILE_SIZE) * ATLAS_PX + tx + i % TILE_SIZE) * 4 + 3])
+            let (tx, ty) = (idx % ATLAS_TILES * a.tile_size, idx / ATLAS_TILES * a.tile_size);
+            (0..a.tile_size * a.tile_size)
+                .map(|i| a.pixels[((ty + i / a.tile_size) * a.atlas_px() + tx + i % a.tile_size) * 4 + 3])
                 .collect()
         };
         assert!(tile_alpha(stone).iter().all(|&a| a == 255));
@@ -400,17 +495,86 @@ mod tests {
     fn load_custom_tile_reads_a_correctly_sized_png() {
         let dir = temp_dir();
         let pixel = [10, 20, 30, 255];
-        write_png(&dir.0.join("ruby.png"), TILE_SIZE as u32, TILE_SIZE as u32, pixel);
-        let pixels = load_custom_tile(&dir.0, "ruby").expect("file exists and is the right size");
-        assert_eq!(pixels.len(), TILE_SIZE * TILE_SIZE * 4);
+        write_png(&dir.0.join("ruby.png"), BASE_TILE_SIZE as u32, BASE_TILE_SIZE as u32, pixel);
+        let (pixels, size) = load_custom_tile(&dir.0, "ruby").expect("file exists and is the right size");
+        assert_eq!(size, BASE_TILE_SIZE);
+        assert_eq!(pixels.len(), BASE_TILE_SIZE * BASE_TILE_SIZE * 4);
         assert_eq!(&pixels[0..4], &pixel);
     }
 
     #[test]
-    #[should_panic(expected = "must be exactly")]
-    fn load_custom_tile_rejects_the_wrong_dimensions() {
+    fn load_custom_tile_accepts_every_allowed_larger_size() {
         let dir = temp_dir();
-        write_png(&dir.0.join("ruby.png"), 32, 32, [10, 20, 30, 255]);
+        for &size in &ALLOWED_TILE_SIZES {
+            write_png(&dir.0.join("ruby.png"), size as u32, size as u32, [1, 2, 3, 255]);
+            let (_, detected) = load_custom_tile(&dir.0, "ruby").unwrap();
+            assert_eq!(detected, size);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must be square and one of")]
+    fn load_custom_tile_rejects_a_disallowed_size() {
+        let dir = temp_dir();
+        write_png(&dir.0.join("ruby.png"), 20, 20, [10, 20, 30, 255]);
         load_custom_tile(&dir.0, "ruby");
+    }
+
+    #[test]
+    fn upscale_nearest_replicates_each_source_pixel_into_a_block() {
+        // 2x2 source -> 4x4 dest (factor 2): each source pixel becomes a
+        // 2x2 block of identical pixels, not a blend of its neighbours.
+        let src = [
+            [255u8, 0, 0, 255], [0, 255, 0, 255],
+            [0, 0, 255, 255], [255, 255, 0, 255],
+        ];
+        let mut buf = vec![0u8; 2 * 2 * 4];
+        for (i, px) in src.iter().enumerate() {
+            buf[i * 4..i * 4 + 4].copy_from_slice(px);
+        }
+        let up = upscale_nearest(&buf, 2, 4);
+        assert_eq!(up.len(), 4 * 4 * 4);
+        // top-left 2x2 block all matches the original top-left pixel
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let i = (y * 4 + x) * 4;
+            assert_eq!(&up[i..i + 4], &src[0]);
+        }
+        // bottom-right 2x2 block all matches the original bottom-right pixel
+        for (x, y) in [(2, 2), (3, 2), (2, 3), (3, 3)] {
+            let i = (y * 4 + x) * 4;
+            assert_eq!(&up[i..i + 4], &src[3]);
+        }
+    }
+
+    #[test]
+    fn atlas_uses_a_larger_custom_texture_as_the_whole_atlas_resolution() {
+        let dir = temp_dir();
+        // Only "stone" gets a custom (larger) texture - everything else,
+        // including every other custom-less procedural tile, must still
+        // upscale to match, since the whole atlas runs at one resolution.
+        write_png(&dir.0.join("stone.png"), 32, 32, [200, 10, 10, 255]);
+        let atlas = build_atlas_from_dir(&default_painters(), &dir.0);
+
+        assert_eq!(atlas.tile_size, 32, "one 32x32 custom tile should raise the whole atlas to 32");
+        assert_eq!(atlas.pixels.len(), atlas.atlas_px() * atlas.atlas_px() * 4);
+
+        // The custom stone tile's corner pixel is exactly what was supplied.
+        let stone = *atlas.indices.get("stone").unwrap() as usize;
+        let (tx, ty) = (stone % ATLAS_TILES * 32, stone / ATLAS_TILES * 32);
+        let i = (ty * atlas.atlas_px() + tx) * 4;
+        assert_eq!(&atlas.pixels[i..i + 4], &[200, 10, 10, 255]);
+
+        // A procedural (non-custom) tile, e.g. "dirt", got upscaled 2x2 per
+        // source pixel rather than staying a native-resolution 16x16 block
+        // sitting in the corner of a 32x32 slot - spot-check that its
+        // (0,0) and (1,1) pixels (which a 2x nearest-neighbor upscale maps
+        // to the exact same source pixel) match exactly.
+        let dirt = *atlas.indices.get("dirt").unwrap() as usize;
+        let (dx, dy) = (dirt % ATLAS_TILES * 32, dirt / ATLAS_TILES * 32);
+        let px = |x: usize, y: usize| {
+            let i = ((dy + y) * atlas.atlas_px() + dx + x) * 4;
+            &atlas.pixels[i..i + 4]
+        };
+        assert_eq!(px(0, 0), px(1, 1), "a 2x nearest-neighbor upscale must replicate, not blend");
     }
 }

@@ -1,8 +1,11 @@
 # Craftmjne
 
 A well-optimized 3D Minecraft-style voxel game, built in **Rust + Bevy** as a
-**framework** you can expand. All block textures are procedurally generated
-**16×16 pixel art** — the project ships zero image assets.
+**framework** you can expand. Every block texture is procedurally generated
+by default — the project ships zero image assets — but any tile can be
+swapped for real art (16×16 up to 64×64) by dropping a PNG in
+`textures/blocks/`, no code changes needed (see "Use real texture files"
+below).
 
 > This is the native rewrite of the original JavaScript/Electron prototype
 > (still available in git history). Same architecture, now with real threads,
@@ -309,7 +312,7 @@ src/
 ├── menu.rs      # MenuPlugin: main menu, worlds list + create form, settings, mods
 ├── noise.rs     # seeded simplex noise, fBm, integer hashes
 ├── blocks.rs    # BlockRegistry: loads blocks/*.json -> compiled flat lookup Tables
-├── atlas.rs     # Painters resource: 16x16 procedural tiles -> RGBA atlas
+├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
@@ -325,6 +328,8 @@ src/
 └── updater.rs   # UpdaterPlugin: background GitHub-release check + self-swap
 blocks/
 └── *.json                # one block definition per file - see "Add a block" below
+textures/blocks/
+└── *.png                 # optional hand-supplied art overriding a procedural tile - see "Use real texture files" below
 installer/
 └── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
 .github/workflows/
@@ -470,6 +475,25 @@ Blocks can also still be registered straight from Rust (useful for a mod
 that wants to generate variants programmatically) via
 `BlockRegistry::register(BlockDef { .. })` in a plugin's `build()` — same
 struct, same fields, just constructed in code instead of parsed from JSON.
+
+### Use real texture files instead of procedural art
+
+Every texture is procedurally painted by default — but any tile can be
+overridden with real art by dropping a PNG in `textures/blocks/<name>.png`
+(same name-resolution rule as `blocks/`: next to the exe when installed, the
+repo root for `cargo run`/tests). No code changes, no recompile — see
+`textures/blocks/README.md` for the exact filename each built-in block looks
+for. Custom and procedural tiles freely mix; anything you don't supply just
+keeps using its painter.
+
+**Resolution is automatic, and global, not per-tile.** A texture file can be
+16×16, 32×32, or 64×64 — the *whole* atlas renders at the largest size found
+among whatever you've supplied (16×16 if none), like a single resource-pack
+resolution choice. Every other tile — every procedural one, and any custom
+one smaller than that — gets nearest-neighbor upscaled to match (crisp pixel
+replication, not blur), and everything downstream (the mesher's UVs, baked
+inventory icons, the GPU texture itself) follows automatically. Drop in one
+64×64 texture and the whole game gets sharper, not just that one block.
 
 ### React to game events
 

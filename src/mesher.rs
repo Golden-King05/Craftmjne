@@ -14,8 +14,9 @@
 
 use std::sync::LazyLock;
 
+use crate::atlas::BASE_TILE_SIZE;
 use crate::blocks::{Tables, AXIS_X, AXIS_Y, AXIS_Z, FLUID_FALLING, FLUID_SOURCE};
-use crate::config::{ATLAS_TILES, CHUNK_SIZE, CS, H, TILE_SIZE, WORLD_HEIGHT};
+use crate::config::{ATLAS_TILES, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
 
 // Padded array layout: x,z in [-1, CHUNK_SIZE], y in [-1, WORLD_HEIGHT].
 pub const PAD_XZ: usize = CS + 2;
@@ -34,8 +35,12 @@ pub fn padded_index(x: i32, y: i32, z: i32) -> usize {
 /// AO brightness for 0..3 occluders touching a vertex.
 const AO_BRIGHT: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
 
-/// Fluid tops sit one pixel below the block top (16x16 textures -> 1/16).
-const FLUID_SURFACE: f32 = 1.0 - 1.0 / TILE_SIZE as f32;
+/// Fluid tops sit one sixteenth of a block below the true top - a gameplay-
+/// geometry constant tied to the base 16x16 grid, deliberately independent
+/// of the atlas's actual resolution (`Tables::tile_size`): a hand-supplied
+/// 64x64 water texture doesn't need a proportionally smaller dip, it just
+/// needs the same "one sixteenth" visual notch a 16x16 one gets.
+const FLUID_SURFACE: f32 = 1.0 - 1.0 / BASE_TILE_SIZE as f32;
 
 /// How falling (waterfall) segments render. `Sloped` (the default) tapers
 /// each segment's exposed side walls from full height down to a one-pixel
@@ -158,9 +163,10 @@ static FACES: LazyLock<[Face; 6]> = LazyLock::new(|| {
 });
 
 const UV_TILE: f32 = 1.0 / ATLAS_TILES as f32;
-/// Half-texel inset prevents atlas bleeding at tile borders.
-const UV_PAD: f32 = 0.5 / (ATLAS_TILES * TILE_SIZE) as f32;
-const UV_SPAN: f32 = UV_TILE - 2.0 * UV_PAD;
+// The half-texel inset that prevents atlas bleeding at tile borders (and
+// the resulting sampled span) depends on the atlas's actual per-tile pixel
+// resolution, which isn't known until runtime (`Tables::uv_pad`/`uv_span`,
+// baked in by `BlockRegistry::compile` - see `atlas.rs`'s module docs).
 
 #[derive(Default)]
 pub struct MeshBucket {
@@ -281,7 +287,7 @@ pub fn mesh_chunk(
                         && FALLING_WATER_STYLE == FallingWaterStyle::Sloped
                         && padded[cell - SY as usize] != id
                     {
-                        bottom = 1.0 / TILE_SIZE as f32;
+                        bottom = 1.0 / BASE_TILE_SIZE as f32;
                     }
 
                     let tile = rotated_tile(tables, id, axis, f) as usize;
@@ -308,8 +314,8 @@ pub fn mesh_chunk(
                             z as f32 + c.pos[2],
                         ]);
                         bucket.uvs.push([
-                            tu + UV_PAD + c.uv[0] * UV_SPAN,
-                            tv + UV_PAD + (1.0 - c.uv[1]) * UV_SPAN,
+                            tu + tables.uv_pad + c.uv[0] * tables.uv_span,
+                            tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span,
                         ]);
                         let light = face.shade * bright;
                         bucket.colors.push([light, light, light, 1.0]);
@@ -337,7 +343,7 @@ mod tests {
     fn tables() -> (BlockRegistry, std::sync::Arc<Tables>) {
         let mut reg = BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
-        let tables = reg.compile(&atlas.indices);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         (reg, tables)
     }
 
@@ -442,7 +448,7 @@ mod tests {
         let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
-        let sliver = 10.0 + 1.0 / TILE_SIZE as f32;
+        let sliver = 10.0 + 1.0 / BASE_TILE_SIZE as f32;
         // The side walls' tapered bottom edge (the one-pixel sliver)...
         assert!(ys.iter().any(|&y| (y - sliver).abs() < 1e-4), "no tapered sliver in {ys:?}");
         // ...the side walls' top edge, still touching the source above...
@@ -470,11 +476,11 @@ mod tests {
         let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
-        let sliver = 10.0 + 1.0 / TILE_SIZE as f32;
+        let sliver = 10.0 + 1.0 / BASE_TILE_SIZE as f32;
         // The internal segment (y=11) must NOT show a tapered edge partway
         // up its own height - it should run the full block, connecting flush
         // to y=10's ceiling at exactly y=11.0.
-        assert!(!ys.iter().any(|&y| (y - (11.0 + 1.0 / TILE_SIZE as f32)).abs() < 1e-4),
+        assert!(!ys.iter().any(|&y| (y - (11.0 + 1.0 / BASE_TILE_SIZE as f32)).abs() < 1e-4),
             "internal segment shows a tapered edge (the gap bug) in {ys:?}");
         assert!(ys.iter().any(|&y| (y - 11.0).abs() < 1e-4),
             "no seam at the internal boundary (y=11.0) in {ys:?}");

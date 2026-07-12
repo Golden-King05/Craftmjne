@@ -7,8 +7,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemModel};
-use crate::config::{TILE_SIZE, ATLAS_TILES};
-use crate::icons::ICON_SIZE;
+use crate::config::ATLAS_TILES;
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
 use crate::render::{AtlasImage, IconAtlasImage};
@@ -51,16 +50,16 @@ struct DebugState {
     timer: f32,
 }
 
-pub(crate) fn tile_rect(tile: u16) -> Rect {
-    let x = (tile as usize % ATLAS_TILES * TILE_SIZE) as f32;
-    let y = (tile as usize / ATLAS_TILES * TILE_SIZE) as f32;
-    Rect::new(x, y, x + TILE_SIZE as f32, y + TILE_SIZE as f32)
+pub(crate) fn tile_rect(tile: u16, tile_size: usize) -> Rect {
+    let x = (tile as usize % ATLAS_TILES * tile_size) as f32;
+    let y = (tile as usize / ATLAS_TILES * tile_size) as f32;
+    Rect::new(x, y, x + tile_size as f32, y + tile_size as f32)
 }
 
-pub(crate) fn icon_tile_rect(tile: u16) -> Rect {
-    let x = (tile as usize % ATLAS_TILES * ICON_SIZE) as f32;
-    let y = (tile as usize / ATLAS_TILES * ICON_SIZE) as f32;
-    Rect::new(x, y, x + ICON_SIZE as f32, y + ICON_SIZE as f32)
+pub(crate) fn icon_tile_rect(tile: u16, icon_size: usize) -> Rect {
+    let x = (tile as usize % ATLAS_TILES * icon_size) as f32;
+    let y = (tile as usize / ATLAS_TILES * icon_size) as f32;
+    Rect::new(x, y, x + icon_size as f32, y + icon_size as f32)
 }
 
 /// Picks the right `ImageNode` for a block's inventory/hotbar icon,
@@ -83,13 +82,13 @@ pub(crate) fn block_icon(
         if let Some(&tile) = icon_atlas.index.get(&id) {
             return ImageNode {
                 image: icon_atlas.image.clone(),
-                rect: Some(icon_tile_rect(tile)),
+                rect: Some(icon_tile_rect(tile, icon_atlas.icon_size)),
                 ..default()
             };
         }
     }
     let tile = tables.0.tiles[id as usize * 6];
-    ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() }
+    ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile, tables.0.tile_size)), ..default() }
 }
 
 fn setup_hud(mut commands: Commands) {

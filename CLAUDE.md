@@ -194,6 +194,41 @@ etc.) instead of inventing a new approach:
   need a full headless app harness for little payoff); do unit-test the
   pure helper functions inside them (parsers, name formatting, round-trips)
   the way `commands.rs` and `inventory.rs::display_name` do.
+- **Turning a compile-time constant into a runtime-determined value ripples
+  further than it looks - find every consumer before writing code.**
+  `TILE_SIZE`/`ATLAS_PX` went from a `pub const` in `config.rs` to a value
+  only known once the atlas is actually built (`atlas::AtlasData::
+  tile_size`, auto-detected from whatever custom textures exist in
+  `textures/blocks/`), so the game could render at 32x32/64x64 when real
+  art is supplied instead of being stuck at the base procedural 16x16
+  forever. The grep that mattered before writing a single line: `grep -rn
+  "TILE_SIZE\|ATLAS_PX\|ATLAS_TILES"` across the whole `src/` tree - it
+  touched `atlas.rs` (obviously), but also `mesher.rs`'s UV padding math,
+  `icons.rs`'s entire isometric-projection geometry *and* its own derived
+  `ICON_SIZE`/`ICON_ATLAS_PX`, `render.rs`'s GPU image dimensions, and
+  `ui.rs`'s pixel-space icon-cropping rects - five files, none of them
+  obviously "about textures" from their names alone. Two things made this
+  tractable instead of a sprawling mess:
+  - **Not everything that referenced the old constant actually needed the
+    new runtime value.** `mesher.rs`'s `FLUID_SURFACE` (water sits one
+    sixteenth of a block below the true top) and the falling-water taper's
+    sliver height are gameplay-geometry constants that happened to reuse
+    `TILE_SIZE` for convenience, not because a higher-resolution atlas
+    should make water dip by a smaller fraction - these correctly stayed
+    pinned to the base resolution (`atlas::BASE_TILE_SIZE`, a real
+    always-16 constant, kept separate from the atlas's *actual* resolution
+    on purpose). Don't reflexively thread the new value everywhere the old
+    constant appeared; ask what each usage was actually *for* first.
+  - **Give tests a way to inject the controlled input a real startup path
+    resolves automatically.** `atlas::build_atlas()` (the real entry point,
+    used everywhere, resolving `textures/blocks/` itself) stayed untouched
+    so none of the other ~10 call sites needed editing; a second function,
+    `build_atlas_from_dir(painters, dir)`, took the actual resolution-
+    picking logic and an explicit directory parameter, letting a test drop
+    a real 32x32 PNG in a scratch dir and assert the *whole atlas* (not
+    just that one tile) ended up at 32x32 with correctly upscaled
+    procedural neighbours - mirrors `blocks.rs`'s `with_defaults()` /
+    `load_from_dir()` split for exactly the same reason.
 
 ## This project's simulation patterns
 
