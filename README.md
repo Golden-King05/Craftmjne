@@ -220,20 +220,19 @@ gap.
 
 ## Releasing a new version
 
-Bump `version` in `Cargo.toml` (and the matching `craftmjne` entry near the
-top of `Cargo.lock`) and push to `main` — that's it. `.github/workflows/
-auto-tag.yml` notices the version changed, creates and pushes the matching
-`vX.Y.Z` tag, and dispatches `release.yml` against it, which builds
-Windows/Linux/macOS binaries, packages the Windows installer, and publishes
-everything to a GitHub Release. Installed copies of the game pick it up
-automatically within one restart (see "Auto-updating" above).
+Releases are cut by hand: bump `version` in `Cargo.toml` (and the matching
+`craftmjne` entry near the top of `Cargo.lock`), merge that to `main`, then
+either `git tag vX.Y.Z && git push origin vX.Y.Z` or create a Release for
+that tag directly on GitHub (Releases → Draft a new release → type the new
+tag). Either path fires `release.yml`'s `on: push: tags: ["v*"]` trigger,
+which builds Windows/Linux/macOS binaries, packages the Windows installer,
+and publishes everything to a GitHub Release (usually ~10-15 minutes end to
+end). Installed copies of the game pick it up automatically within one
+restart after that (see "Auto-updating" above).
 
-If you ever need to cut a release by hand instead (e.g. `auto-tag.yml`
-itself is broken), the manual path still works: `git tag vX.Y.Z && git push
-origin vX.Y.Z`. Note that some environments — including Claude sessions
-working in this repo — get an HTTP 403 pushing tags even though branch
-pushes work fine; that's exactly the gap `auto-tag.yml` exists to close,
-since the Actions bot's own `GITHUB_TOKEN` *can* push tags within this repo.
+Note that some environments — including Claude sessions working in this
+repo — get an HTTP 403 pushing tags even though branch pushes work fine, so
+tagging/releasing has to be done from a normal git checkout or the GitHub UI.
 
 ## Performance design
 
@@ -293,8 +292,7 @@ blocks/
 installer/
 └── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
 .github/workflows/
-├── auto-tag.yml          # Cargo.toml version bump on main -> tags + dispatches release.yml
-└── release.yml           # tag push (or auto-tag.yml's dispatch) -> cross-platform build + release
+└── release.yml           # push of a vX.Y.Z tag -> cross-platform build + release
 ```
 
 Data flow for a chunk: `stream_chunks` → generation task → blocks arrive →

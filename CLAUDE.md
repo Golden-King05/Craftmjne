@@ -268,15 +268,19 @@ etc.) instead of inventing a new approach:
   origin <branch> && git checkout -B <branch> origin/<branch>` if stale.
   Don't assume a clean `cargo check` means the tree is what you last left it.
 - **`git push` works for branches but 403s on tags** (both creating and
-  deleting) with the credentials available in this environment — but this no
-  longer blocks releases. `.github/workflows/auto-tag.yml` watches for
-  `Cargo.toml`'s `version` changing on a push to `main` and creates+pushes
-  the matching `vX.Y.Z` tag itself (via the Actions bot's own `GITHUB_TOKEN`,
-  which *can* push tags), then explicitly dispatches `release.yml` against
-  it. **To cut a release, just bump `version` in `Cargo.toml` (and the
-  matching entry in `Cargo.lock`) and push to `main` — don't hand the user a
-  manual `git tag` command anymore**, that's only a fallback for if
-  `auto-tag.yml` itself breaks.
+  deleting) with the credentials available in this environment. That means
+  Claude sessions in this repo **cannot cut releases themselves** — releases
+  are manual and belong to the user. As of 2026-07-12 the user explicitly
+  chose manual releases over the old auto-tag-on-Cargo.toml-bump workflow
+  (which has been removed); they tag/release by hand from a normal checkout
+  or the GitHub UI (Releases → Draft a new release → type the new tag),
+  which fires `release.yml`'s `on: push: tags: ["v*"]` trigger directly. If
+  the user reports "I tagged/released and nothing happened," the far more
+  likely explanation is they checked within a minute or two of tagging — a
+  full build across all three platforms takes ~10-15 minutes, and Windows in
+  particular has consistently been the slowest leg. Check
+  `mcp__github__actions_list` (`list_workflow_runs` for `release.yml`) and
+  `list_workflow_jobs` for the run before assuming anything is broken.
 - **A GitHub Actions matrix job can get zero hosted-runner capacity and sit
   "queued" forever** (`runner_id: 0`, never assigned) — this happened to
   `macos-13` for the `v1.1.1` release, which sat stuck for hours and
