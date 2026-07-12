@@ -37,6 +37,24 @@ const AO_BRIGHT: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
 /// Fluid tops sit one pixel below the block top (16x16 textures -> 1/16).
 const FLUID_SURFACE: f32 = 1.0 - 1.0 / TILE_SIZE as f32;
 
+/// How falling (waterfall) segments render. `Sloped` (the default) tapers
+/// each segment's exposed side walls from full height down to a one-pixel
+/// sliver, so a multi-block drop reads as a cascading wedge. `Blocky` is the
+/// original flat-walled look (a falling segment renders as a plain solid
+/// cube) — kept as a real, working alternative rather than deleted, so a
+/// future per-fluid setting or graphics option can offer either look
+/// without re-deriving this. Flip this constant to switch globally for now.
+#[derive(PartialEq, Eq)]
+enum FallingWaterStyle {
+    // Only reachable by editing `FALLING_WATER_STYLE` below - that's the
+    // point (see the doc comment above), not a mistake.
+    #[allow(dead_code)]
+    Blocky,
+    Sloped,
+}
+
+const FALLING_WATER_STYLE: FallingWaterStyle = FallingWaterStyle::Sloped;
+
 /// Surface height for a fluid cell at `level` blocks from its source, given
 /// that fluid's configured `flow_distance`. Level 0 (a permanent source) and
 /// `FLUID_FALLING` (a waterfall column) both render full-height; everything
@@ -215,8 +233,13 @@ pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> Chunk
                     // down a multi-block drop this reads as one continuous
                     // cascade rather than a stack of solid cubes. Doesn't
                     // apply where the step-wall case above already set a
-                    // (different) partial bottom.
-                    if is_fluid && is_side && level == FLUID_FALLING && !stepped {
+                    // (different) partial bottom, or under `Blocky` style.
+                    if is_fluid
+                        && is_side
+                        && level == FLUID_FALLING
+                        && !stepped
+                        && FALLING_WATER_STYLE == FallingWaterStyle::Sloped
+                    {
                         bottom = 1.0 / TILE_SIZE as f32;
                     }
 

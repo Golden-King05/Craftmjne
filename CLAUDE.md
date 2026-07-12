@@ -215,6 +215,15 @@ etc.) instead of inventing a new approach:
   otherwise emit a partial quad from the neighbour's height up to this
   cell's. See `mesh_chunk`'s `is_side`/`bottom` handling — the same pattern
   generalizes to any future variable-height content (snow layers, etc.).
+- **When asked to keep an old visual/behavior around "in case we want it
+  later" instead of deleting it on a replace, wire it behind a real
+  compile-time (or runtime) switch, don't just leave the removed code
+  commented out or only in git history.** `mesher.rs`'s `FallingWaterStyle`
+  (`Blocky` vs `Sloped`) is the pattern: an enum + a single const the whole
+  behavior is gated on, so flipping it is a one-line, actually-compiled,
+  actually-tested change rather than an archaeology exercise through commits.
+  A variant that's only reachable by editing the const needs `#[allow
+  (dead_code)]` on it specifically (with a comment saying why) or it warns.
 
 ## Environment gotchas (this remote session, not Bevy)
 
