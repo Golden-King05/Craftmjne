@@ -14,7 +14,7 @@
 
 use std::sync::LazyLock;
 
-use crate::blocks::{Tables, FLUID_FALLING, FLUID_SOURCE};
+use crate::blocks::{Tables, AXIS_X, AXIS_Y, AXIS_Z, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{ATLAS_TILES, CHUNK_SIZE, CS, H, TILE_SIZE, WORLD_HEIGHT};
 
 // Padded array layout: x,z in [-1, CHUNK_SIZE], y in [-1, WORLD_HEIGHT].
@@ -68,6 +68,29 @@ fn fluid_height(level: u8, flow_distance: u8) -> f32 {
     let fd = flow_distance.max(1) as f32;
     let l = (level as f32).min(fd);
     FLUID_SURFACE * (fd - l + 1.0) / (fd + 1.0)
+}
+
+/// Which atlas tile a rotated block's face `f` (0:+x,1:-x,2:+y,3:-y,4:+z,
+/// 5:-z, matching `Tables::tiles`) should show, given its stored orientation
+/// `axis` (`blocks::AXIS_X/Y/Z`). The two faces whose normal lies along
+/// `axis` show the block's "cap" texture (the `top`/`bottom` tile slots,
+/// preserving which end is which); every other face shows its `side`
+/// texture. For `axis == AXIS_Y` this reduces to exactly the plain `tiles
+/// [id*6+f]` lookup, so it's cheap and correct to call unconditionally once
+/// `Tables::rotates` says a block id cares about rotation at all - no
+/// separate "unrotated" code path needed.
+fn rotated_tile(tables: &Tables, id: u16, axis: u8, f: usize) -> u16 {
+    let face_axis = match f {
+        0 | 1 => AXIS_X,
+        2 | 3 => AXIS_Y,
+        _ => AXIS_Z,
+    };
+    let base = id as usize * 6;
+    if face_axis == axis {
+        tables.tiles[base + if f % 2 == 0 { 2 } else { 3 }]
+    } else {
+        tables.tiles[base] // any side slot - all four are identical by construction
+    }
 }
 
 struct FaceCorner {
@@ -158,9 +181,15 @@ pub struct ChunkMeshData {
     pub water: MeshBucket,
 }
 
-pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> ChunkMeshData {
+pub fn mesh_chunk(
+    padded: &[u16],
+    padded_fluid: &[u8],
+    padded_axis: &[u8],
+    tables: &Tables,
+) -> ChunkMeshData {
     debug_assert_eq!(padded.len(), PAD_XZ * PAD_XZ * PAD_Y);
     debug_assert_eq!(padded_fluid.len(), padded.len());
+    debug_assert_eq!(padded_axis.len(), padded.len());
     let mut solid = MeshBucket::default();
     let mut water = MeshBucket::default();
 
@@ -183,6 +212,7 @@ pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> Chunk
                 let is_translucent = tables.translucent[id as usize];
                 let bucket = if is_translucent { &mut water } else { &mut solid };
                 let is_fluid = tables.fluid[id as usize];
+                let axis = if tables.rotates[id as usize] { padded_axis[cell] } else { AXIS_Y };
                 let level = padded_fluid[cell];
                 let flow_dist = tables.flow_distance[id as usize];
                 // Covered by more of the same fluid above -> render full
@@ -243,7 +273,7 @@ pub fn mesh_chunk(padded: &[u16], padded_fluid: &[u8], tables: &Tables) -> Chunk
                         bottom = 1.0 / TILE_SIZE as f32;
                     }
 
-                    let tile = tables.tiles[id as usize * 6 + f] as usize;
+                    let tile = rotated_tile(tables, id, axis, f) as usize;
                     let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
                     let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
                     let vi = bucket.positions.len() as u32;
@@ -308,12 +338,16 @@ mod tests {
         vec![0u8; PAD_XZ * PAD_XZ * PAD_Y]
     }
 
+    fn empty_axis() -> Vec<u8> {
+        vec![AXIS_Y; PAD_XZ * PAD_XZ * PAD_Y]
+    }
+
     #[test]
     fn lone_block_emits_six_faces() {
         let (reg, tables) = tables();
         let mut padded = empty_padded();
         padded[padded_index(8, 30, 8)] = reg.id("stone");
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
         assert_eq!(mesh.solid.positions.len(), 6 * 4);
         assert_eq!(mesh.solid.indices.len(), 6 * 6);
         assert!(mesh.water.is_empty());
@@ -327,11 +361,11 @@ mod tests {
         // one exposed face at the top only for the interior column we check:
         // actually fully solid volume -> zero faces inside; boundary faces
         // depend on the shell, which is also stone here.
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
         assert!(mesh.solid.is_empty());
         // poke a hole: the neighbouring block gains exactly one face
         padded[padded_index(8, 30, 8)] = 0;
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
         assert_eq!(mesh.solid.positions.len(), 6 * 4); // 6 cavity walls
     }
 
@@ -340,7 +374,7 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = empty_padded();
         padded[padded_index(4, 10, 4)] = reg.id("water");
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
         assert!(mesh.solid.is_empty());
         assert_eq!(mesh.water.positions.len(), 6 * 4);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
@@ -355,7 +389,7 @@ mod tests {
         let mut fluid = empty_fluid();
         padded[padded_index(4, 10, 4)] = water;
         fluid[padded_index(4, 10, 4)] = 3; // 3 blocks from a source
-        let mesh = mesh_chunk(&padded, &fluid, &tables);
+        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
         assert!(max_y < 10.0 + FLUID_SURFACE);
         assert!(max_y > 10.0);
@@ -371,14 +405,14 @@ mod tests {
         padded[padded_index(5, 10, 4)] = water;
         fluid[padded_index(4, 10, 4)] = 1;
         fluid[padded_index(5, 10, 4)] = 4; // shallower neighbour
-        let mesh = mesh_chunk(&padded, &fluid, &tables);
+        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
         // the boundary between them must render a wall face instead of being
         // fully culled (same-id neighbours at equal height cull completely).
         assert!(!mesh.water.is_empty());
 
         // sanity: identical levels on both sides fully cull that face.
         fluid[padded_index(5, 10, 4)] = 1;
-        let level_mesh = mesh_chunk(&padded, &fluid, &tables);
+        let level_mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
         assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
     }
 
@@ -394,7 +428,7 @@ mod tests {
         fluid[padded_index(4, 11, 4)] = FLUID_SOURCE;
         padded[padded_index(4, 10, 4)] = water;
         fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
-        let mesh = mesh_chunk(&padded, &fluid, &tables);
+        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
         let sliver = 10.0 + 1.0 / TILE_SIZE as f32;
@@ -413,7 +447,7 @@ mod tests {
         let mut padded = empty_padded();
         padded[padded_index(8, 30, 8)] = stone;
         padded[padded_index(9, 31, 8)] = stone; // occluder above the +x neighbour
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &tables);
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
         // some top-face vertex of the base block must now be darker than shade 1.0
         let top_lights: Vec<f32> = mesh
             .solid
@@ -426,6 +460,36 @@ mod tests {
         assert!(!top_lights.is_empty());
         assert!(top_lights.iter().any(|&l| l < 1.0));
         assert!(top_lights.iter().any(|&l| l == 1.0));
+    }
+
+    #[test]
+    fn rotated_tile_moves_the_cap_texture_to_the_axis_faces() {
+        let (reg, tables) = tables();
+        let log = reg.id("log");
+        let base = log as usize * 6;
+        let (top, bottom, side) = (tables.tiles[base + 2], tables.tiles[base + 3], tables.tiles[base]);
+
+        // Unrotated (axis Y, the default): identical to the plain lookup -
+        // top/bottom faces show the cap, the four sides show bark.
+        for f in 0..6 {
+            let expected = if f == 2 { top } else if f == 3 { bottom } else { side };
+            assert_eq!(rotated_tile(&tables, log, AXIS_Y, f), expected, "face {f}");
+        }
+
+        // Axis X (placed against a side face, lying east-west): the cap
+        // moves to the +x/-x faces, and the *original* top/bottom faces
+        // (now the long sides of the log) show bark instead.
+        assert_eq!(rotated_tile(&tables, log, AXIS_X, 0), top);
+        assert_eq!(rotated_tile(&tables, log, AXIS_X, 1), bottom);
+        assert_eq!(rotated_tile(&tables, log, AXIS_X, 2), side);
+        assert_eq!(rotated_tile(&tables, log, AXIS_X, 3), side);
+        assert_eq!(rotated_tile(&tables, log, AXIS_X, 4), side);
+        assert_eq!(rotated_tile(&tables, log, AXIS_X, 5), side);
+
+        // Axis Z: same idea, cap on the +z/-z faces instead.
+        assert_eq!(rotated_tile(&tables, log, AXIS_Z, 4), top);
+        assert_eq!(rotated_tile(&tables, log, AXIS_Z, 5), bottom);
+        assert_eq!(rotated_tile(&tables, log, AXIS_Z, 0), side);
     }
 
     #[test]
@@ -455,7 +519,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_chunk(&padded, &fluid, &tables);
+        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
         assert!(mesh.solid.positions.len() > 1000);
         assert_eq!(mesh.solid.positions.len() % 4, 0);
         assert_eq!(mesh.solid.indices.len() / 6, mesh.solid.positions.len() / 4);

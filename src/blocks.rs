@@ -34,6 +34,7 @@
 //!   "max_stack": 124,
 //!   "item": true,
 //!   "item_model": "default",
+//!   "rotation": "none",
 //!   "textures": { "all": "coal_ore" }
 //! }
 //! ```
@@ -66,6 +67,15 @@
 //!   `custom_item_model`, a path — required when `"custom"` is chosen, the
 //!   loader panics on a block file missing it; no model loader exists yet,
 //!   so this renders as `"face"` for now). Defaults to `"default"`.
+//! - `rotation` is `"none"` (the default - always renders unrotated, "top"/
+//!   "bottom"/"side" textures fixed to +y/-y/the four sides) or `"log"`
+//!   (Minecraft log behavior: placing it against a block's top or bottom
+//!   face stands it upright as normal; placing it against a side face lays
+//!   it on its side instead, with its "top" texture - the end grain - facing
+//!   the face you placed it against, i.e. facing you). This is a property of
+//!   the placed block instance, not the definition, so two logs placed
+//!   differently render differently even though they share one `BlockDef` -
+//!   see `Chunk::axis` in `world.rs`.
 //! - `textures` defaults to a single texture named after `id` on every face
 //!   if omitted entirely.
 
@@ -167,6 +177,31 @@ pub enum ItemModel {
     Custom,
 }
 
+/// How a placed block instance can be oriented. Unlike every other
+/// `BlockDef` field, this alone doesn't fully determine rendering - the
+/// actual orientation (`blocks::AXIS_X/Y/Z`) is per-placed-instance state,
+/// stored in `Chunk::axis` (`world.rs`) and computed at placement time from
+/// which face was clicked (`interact.rs`). This field only says *whether*
+/// that mechanism applies to a block at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Rotation {
+    /// Always renders unrotated (`AXIS_Y`) regardless of how it was placed.
+    #[default]
+    None,
+    /// Minecraft log behavior - see the module docs' `rotation` entry.
+    Log,
+}
+
+/// A rotating block's stored orientation (`Chunk::axis`, meaningful only
+/// where `Tables::rotates` is true for that cell's block id). Matches the
+/// mesher's face-index axis grouping exactly (faces 0/1 are the x-axis,
+/// 2/3 are y, 4/5 are z), so `mesher.rs` can compare them with no
+/// translation. `AXIS_Y` is the default - standing upright, unrotated.
+pub const AXIS_X: u8 = 0;
+pub const AXIS_Y: u8 = 1;
+pub const AXIS_Z: u8 = 2;
+
 /// Face order used across the whole engine (mesher, tiles table):
 /// 0:+x east, 1:-x west, 2:+y top, 3:-y bottom, 4:+z south, 5:-z north
 #[derive(Clone, Default, Deserialize)]
@@ -251,6 +286,9 @@ pub struct BlockDef {
     /// treat this as relative to wherever a future model system decides -
     /// for now it's just carried through the registry unread.
     pub custom_item_model: Option<String>,
+    /// Whether a placed instance can face different directions. See
+    /// [`Rotation`].
+    pub rotation: Rotation,
     pub textures: FaceTextures,
 }
 
@@ -270,6 +308,7 @@ impl Default for BlockDef {
             item: true,
             item_model: ItemModel::default(),
             custom_item_model: None,
+            rotation: Rotation::default(),
             textures: FaceTextures::default(),
         }
     }
@@ -316,6 +355,8 @@ struct BlockFile {
     item_model: ItemModel,
     custom_item_model: Option<String>,
     #[serde(default)]
+    rotation: Rotation,
+    #[serde(default)]
     textures: FaceTextures,
 }
 
@@ -351,6 +392,7 @@ impl BlockFile {
             item: self.item,
             item_model: self.item_model,
             custom_item_model: self.custom_item_model,
+            rotation: self.rotation,
             textures: self.textures,
         }
     }
@@ -370,6 +412,11 @@ pub struct Tables {
     /// clamped to `u8`. Drives both the spread sim and the mesher's per-level
     /// surface height.
     pub flow_distance: Vec<u8>,
+    /// Whether a placed instance's face textures depend on its stored
+    /// `Chunk::axis` (mirrors `BlockDef::rotation != Rotation::None`). Lets
+    /// the mesher skip the axis lookup/remap entirely for the vast majority
+    /// of blocks that never rotate.
+    pub rotates: Vec<bool>,
     /// Atlas tile per face: `tiles[id as usize * 6 + face]`.
     pub tiles: Vec<u16>,
 }
@@ -497,6 +544,7 @@ impl BlockRegistry {
             fluid: vec![false; n],
             replaceable: vec![false; n],
             flow_distance: vec![0; n],
+            rotates: vec![false; n],
             tiles: vec![0; n * 6],
         };
         for (id, def) in self.defs.iter().enumerate().skip(1) {
@@ -506,6 +554,7 @@ impl BlockRegistry {
             tables.fluid[id] = def.fluid;
             tables.replaceable[id] = def.replaceable;
             tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
+            tables.rotates[id] = def.rotation != Rotation::None;
             for face in 0..6 {
                 let tex = def.textures.resolve(&def.id, face);
                 let tile = atlas_index.get(tex).unwrap_or_else(|| {
@@ -647,5 +696,25 @@ mod tests {
         // silently accepted (see `load_from_dir`'s explicit check).
         let file: BlockFile = serde_json::from_str(r#"{"id": "bad id"}"#).unwrap();
         assert!(file.id.contains(' '));
+    }
+
+    #[test]
+    fn rotation_defaults_to_none_and_log_is_tagged() {
+        let def: BlockDef =
+            serde_json::from_str::<BlockFile>(r#"{"id": "dirt"}"#).unwrap().into_def();
+        assert_eq!(def.rotation, Rotation::None);
+
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "log", "rotation": "log"}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.rotation, Rotation::Log);
+
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices);
+        let log = reg.id("log");
+        let stone = reg.id("stone");
+        assert!(tables.rotates[log as usize]);
+        assert!(!tables.rotates[stone as usize]);
     }
 }

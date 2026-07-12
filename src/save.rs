@@ -96,6 +96,11 @@ pub struct BlockEdit {
     pub y: i32,
     pub z: i32,
     pub block: String,
+    /// The placed orientation (`blocks::AXIS_X/Y/Z`) for a rotating block;
+    /// meaningless (and ignored) for anything else, so an old save missing
+    /// this field entirely just defaults to `0` with no ill effect.
+    #[serde(default)]
+    pub axis: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -339,7 +344,7 @@ mod tests {
 
         let data = WorldData {
             player: Some(PlayerSave { x: 1.0, y: 2.0, z: 3.0, yaw: 0.5, pitch: -0.2, fly: true }),
-            edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into() }],
+            edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0 }],
         };
         store.save_data(&slug, &data).unwrap();
 

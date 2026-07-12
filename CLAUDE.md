@@ -223,6 +223,33 @@ etc.) instead of inventing a new approach:
   moment generation finishes, both copied together in `build_padded`). Reuse
   this shape for any future per-block runtime state (growth stage, charge
   level, etc.) rather than inventing a `HashMap<IVec3, T>` side-channel.
+  `Chunk::axis` (block rotation) is the second example of this shape, and
+  the point where it *diverges* from `fluid_level` matters: `fluid_level` is
+  simulated and fully re-derivable, so it deliberately never touches
+  `BlockSetEvent`/the save file (see the point above); `axis` is a *player
+  choice* (which face you placed a log against), so it's the opposite - it
+  must round-trip through `BlockSetEvent` (an added `axis: u8` field),
+  `EditLog` (now keyed to `(BlockId, u8)` instead of bare `BlockId`), and
+  `save::BlockEdit` (an added `#[serde(default)] axis: u8` field - the
+  `default` matters, so old saves without the field still load instead of
+  failing to parse). Before adding a new per-cell `Vec`, decide which
+  category it's in - re-derivable-from-the-world (skip the event, like
+  fluid) or a genuine player decision (persist it, like axis) - since
+  copying the wrong sibling silently drops or bloats data.
+- **When a per-instance variation only kicks in for a handful of block ids,
+  give `Tables` a `Vec<bool>` gate (`rotates`, mirroring `fluid`/
+  `replaceable`) and make the general-case formula reduce to a no-op when
+  the gate is false**, rather than branching between two separate code
+  paths. `mesher.rs`'s `rotated_tile` (remaps a face index through a stored
+  rotation axis to pick the right atlas tile) is written so that `axis ==
+  AXIS_Y` (the default every non-rotating block implicitly has) produces
+  exactly the original unrotated `tiles[id*6+f]` lookup - so the mesher can
+  call it unconditionally for every block, and the *only* thing gating
+  behavior is whether `padded_axis` is even consulted (`tables.rotates[id]
+  ? padded_axis[cell] : AXIS_Y`). This sidesteps a whole class of staleness
+  bug for free: a cell's leftover `axis` value from a rotating block that
+  was later broken and replaced with a non-rotating one is simply never
+  read, so there's no need to reset it on every `set_block` "just in case."
 - **A pull-based relaxation ("what's the best value my neighbours currently
   offer me") must never let an already-filled cell adopt a *worse* value
   than it already has — only improve, or reset to empty.** `world.rs`'s

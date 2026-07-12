@@ -15,7 +15,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
-use crate::blocks::{BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE};
+use crate::blocks::{
+    BlockId, BlockRegistry, BlockTables, Tables, AIR, AXIS_Y, FLUID_FALLING, FLUID_SOURCE,
+};
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, H, WORLD_HEIGHT};
 use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
@@ -46,6 +48,10 @@ pub struct BlockSetEvent {
     pub pos: IVec3,
     pub id: BlockId,
     pub prev: BlockId,
+    /// The placed orientation (`blocks::AXIS_X/Y/Z`) - `AXIS_Y` (the
+    /// default) for anything that doesn't rotate. Carried on the event so
+    /// `record_edits`/`write_save` can persist it alongside the block id.
+    pub axis: u8,
 }
 
 #[derive(Event)]
@@ -58,6 +64,12 @@ pub struct Chunk {
     /// is a fluid (see `blocks::FLUID_SOURCE`/`FLUID_FALLING`). Always
     /// `Some` whenever `blocks` is.
     pub fluid_level: Option<Vec<u8>>,
+    /// Parallel to `blocks`; meaningful only where the corresponding block id
+    /// rotates (`blocks::Tables::rotates`). Always `Some` whenever `blocks`
+    /// is - same lifecycle as `fluid_level`. Unlike `fluid_level` (simulated,
+    /// re-derivable, never saved), this *is* player-chosen state and round-
+    /// trips through `BlockSetEvent`/`EditLog`/`save::BlockEdit`.
+    pub axis: Option<Vec<u8>>,
     pub version: u32,
     pub dirty: bool,
     pub meshing: bool,
@@ -178,6 +190,24 @@ impl ChunkMap {
         }
     }
 
+    /// Directly overwrites a cell's stored rotation axis without touching
+    /// its block id - mirrors `set_fluid_level_raw` exactly. No-op if the
+    /// chunk isn't loaded.
+    pub fn set_axis_raw(&mut self, pos: IVec3, axis: u8) {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        if let Some(axes) = self.chunks.get_mut(&coord).and_then(|c| c.axis.as_mut()) {
+            axes[idx] = axis;
+        }
+    }
+
     /// Reads a cell's stored fluid level. Only meaningful when `get_block`
     /// for the same position is a fluid id; returns `FLUID_SOURCE` for
     /// unloaded chunks (harmless, since callers gate on the block id first).
@@ -251,12 +281,13 @@ impl ChunkMap {
         true
     }
 
-    /// Copies chunk blocks (+fluid levels) plus a 1-block shell from the 8
-    /// neighbours into padded arrays. Y-major layout keeps this a series of
-    /// column copies.
-    fn build_padded(&self, coord: IVec2) -> (Vec<BlockId>, Vec<u8>) {
+    /// Copies chunk blocks (+fluid levels +rotation axes) plus a 1-block
+    /// shell from the 8 neighbours into padded arrays. Y-major layout keeps
+    /// this a series of column copies.
+    fn build_padded(&self, coord: IVec2) -> (Vec<BlockId>, Vec<u8>, Vec<u8>) {
         let mut padded = vec![AIR; PAD_XZ * PAD_XZ * PAD_Y];
         let mut padded_fluid = vec![FLUID_SOURCE; PAD_XZ * PAD_XZ * PAD_Y];
+        let mut padded_axis = vec![AXIS_Y; PAD_XZ * PAD_XZ * PAD_Y];
         for pz in -1..=CHUNK_SIZE {
             let ncz = coord.y + if pz < 0 { -1 } else if pz >= CHUNK_SIZE { 1 } else { 0 };
             let lz = pz.rem_euclid(CHUNK_SIZE) as usize;
@@ -266,16 +297,19 @@ impl ChunkMap {
                 let chunk = &self.chunks[&IVec2::new(ncx, ncz)];
                 let src = chunk.blocks.as_ref().unwrap();
                 let src_fluid = chunk.fluid_level.as_ref().unwrap();
+                let src_axis = chunk.axis.as_ref().unwrap();
                 let src_base = block_index(lx, 0, lz);
                 let dst_base = padded_index(px, 0, pz);
                 padded[dst_base..dst_base + H].copy_from_slice(&src[src_base..src_base + H]);
                 padded_fluid[dst_base..dst_base + H]
                     .copy_from_slice(&src_fluid[src_base..src_base + H]);
+                padded_axis[dst_base..dst_base + H]
+                    .copy_from_slice(&src_axis[src_base..src_base + H]);
                 padded[dst_base - 1] = 1; // below the world: solid, culls bottom faces
                 // above the world stays 0 (air)
             }
         }
-        (padded, padded_fluid)
+        (padded, padded_fluid, padded_axis)
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -300,14 +334,15 @@ struct MeshTask {
 
 /// Edits made this session, keyed by world position (last write wins). Reset
 /// fresh on every `enter_world`; flushed to disk by `exit_world` and the
-/// periodic autosave.
+/// periodic autosave. Stores `(id, axis)` rather than just `id` so a
+/// rotated block's orientation survives a save/reload, not just its type.
 #[derive(Resource, Default)]
-pub struct EditLog(pub HashMap<IVec3, BlockId>);
+pub struct EditLog(pub HashMap<IVec3, (BlockId, u8)>);
 
 /// Edits loaded from a save, grouped by chunk so `collect_gen_tasks` can
 /// apply them in O(1) right after a chunk finishes procedurally generating.
 #[derive(Resource, Default)]
-struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId)>>);
+struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId, u8)>>);
 
 #[derive(Resource, Default)]
 struct AutosaveTimer(f32);
@@ -557,14 +592,14 @@ fn enter_world(
     *map = ChunkMap { needs_scan: true, ..ChunkMap::default() };
 
     let data = store.load_data(&active.slug);
-    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId)>> = HashMap::new();
+    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u8)>> = HashMap::new();
     for edit in data.edits {
         // Unknown block names (e.g. from a mod no longer installed) are
         // skipped rather than failing the whole load.
         let Ok(id) = registry.by_name(&edit.block) else { continue };
         let pos = IVec3::new(edit.x, edit.y, edit.z);
         let coord = IVec2::new(edit.x.div_euclid(CHUNK_SIZE), edit.z.div_euclid(CHUNK_SIZE));
-        grouped.entry(coord).or_default().push((pos, id));
+        grouped.entry(coord).or_default().push((pos, id, edit.axis));
     }
     commands.insert_resource(PendingEdits(grouped));
     commands.insert_resource(EditLog::default());
@@ -585,7 +620,7 @@ fn enter_world(
 
 fn record_edits(mut events: EventReader<BlockSetEvent>, mut log: ResMut<EditLog>) {
     for e in events.read() {
-        log.0.insert(e.pos, e.id);
+        log.0.insert(e.pos, (e.id, e.axis));
     }
 }
 
@@ -601,7 +636,13 @@ fn write_save(
     let edits = log
         .0
         .iter()
-        .map(|(pos, &id)| BlockEdit { x: pos.x, y: pos.y, z: pos.z, block: registry.def(id).id.clone() })
+        .map(|(pos, &(id, axis))| BlockEdit {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            block: registry.def(id).id.clone(),
+            axis,
+        })
         .collect();
     let player = player.map(|p| PlayerSave {
         x: p.pos.x,
@@ -728,14 +769,15 @@ fn stream_chunks(
         if map.mesh_in_flight >= MAX_MESH_TASKS {
             break;
         }
-        let (padded, padded_fluid) = map.build_padded(coord);
+        let (padded, padded_fluid, padded_axis) = map.build_padded(coord);
         let chunk = map.chunks.get_mut(&coord).unwrap();
         chunk.meshing = true;
         chunk.dirty = false;
         let version = chunk.version;
         map.mesh_in_flight += 1;
         let tables = tables.0.clone();
-        let task = pool.spawn(async move { mesh_chunk(&padded, &padded_fluid, &tables) });
+        let task =
+            pool.spawn(async move { mesh_chunk(&padded, &padded_fluid, &padded_axis, &tables) });
         commands.spawn(MeshTask { coord, version, task });
     }
 
@@ -777,10 +819,12 @@ fn collect_gen_tasks(
         let chunk = map.chunks.get_mut(&gen_task.coord).unwrap();
         chunk.blocks = Some(generated.blocks);
         chunk.fluid_level = Some(generated.fluid);
+        chunk.axis = Some(generated.axis);
         // Re-apply any saved edits for this chunk on top of the fresh terrain.
         if let Some(edits) = pending.0.remove(&gen_task.coord) {
-            for (pos, id) in edits {
+            for (pos, id, axis) in edits {
                 map.set_block(pos, id);
+                map.set_axis_raw(pos, axis);
             }
         }
     }

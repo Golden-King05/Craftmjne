@@ -4,7 +4,7 @@
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
-use crate::blocks::{BlockRegistry, ItemStack, AIR, FLUID_SOURCE};
+use crate::blocks::{BlockRegistry, ItemStack, Rotation, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::inventory::InventoryState;
@@ -15,6 +15,21 @@ use crate::world::{BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
 const ACTION_REPEAT: f32 = 0.22; // seconds between repeats while a button is held
+
+/// Which rotation axis a placement's face normal implies - whichever axis
+/// its single nonzero component lies on. Minecraft log placement: click a
+/// block's top/bottom face (normal on Y) and it stands upright; click a
+/// side face (normal on X or Z) and it lies down along that axis instead,
+/// end grain facing the face you clicked (see `blocks::Rotation::Log`).
+fn axis_from_normal(normal: IVec3) -> u8 {
+    if normal.x != 0 {
+        AXIS_X
+    } else if normal.z != 0 {
+        AXIS_Z
+    } else {
+        AXIS_Y
+    }
+}
 
 pub struct RayHit {
     pub pos: IVec3,
@@ -187,7 +202,7 @@ fn interact(
         let id = map.get_block(hit.pos);
         if registry.def(id).breakable {
             if let Some(prev) = map.set_block(hit.pos, AIR) {
-                block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev });
+                block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev, axis: AXIS_Y });
             }
         }
         timers.break_t = ACTION_REPEAT;
@@ -209,7 +224,18 @@ fn interact(
                         // fluid array last held (e.g. a dried flowing cell).
                         map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
                     }
-                    block_events.write(BlockSetEvent { pos: place_pos, id, prev });
+                    // A rotating block's orientation follows the face it was
+                    // placed against, Minecraft-log-style; everything else
+                    // stays at the default (AXIS_Y is also the "doesn't
+                    // matter" value the mesher ignores for non-rotating ids).
+                    let axis = if registry.def(id).rotation != Rotation::None {
+                        let axis = axis_from_normal(hit.normal);
+                        map.set_axis_raw(place_pos, axis);
+                        axis
+                    } else {
+                        AXIS_Y
+                    };
+                    block_events.write(BlockSetEvent { pos: place_pos, id, prev, axis });
                     // Survival consumes from the stack (clearing the slot
                     // once it's empty); Creative's stacks never deplete -
                     // its "free items" already come from being able to

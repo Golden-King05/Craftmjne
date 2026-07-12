@@ -6,7 +6,7 @@
 //! To customize generation, swap the generator constructed in
 //! `world::compile_content` for your own.
 
-use crate::blocks::{BlockId, BlockRegistry, AIR, FLUID_SOURCE};
+use crate::blocks::{BlockId, BlockRegistry, AIR, AXIS_Y, FLUID_SOURCE};
 use crate::config::{block_index, CHUNK_SIZE, CS, H, SEA_LEVEL, WORLD_HEIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
 
@@ -19,6 +19,11 @@ const SNOW_LINE: i32 = 45;
 pub struct GeneratedChunk {
     pub blocks: Vec<BlockId>,
     pub fluid: Vec<u8>,
+    /// Parallel to `blocks`, like `fluid`. Terrain never generates a
+    /// non-default orientation today (tree trunks are always upright), so
+    /// this is always filled with `AXIS_Y` - only player placement
+    /// (`interact.rs`) ever writes a different value.
+    pub axis: Vec<u8>,
 }
 
 struct TerrainIds {
@@ -207,7 +212,11 @@ impl TerrainGenerator {
             }
         }
 
-        GeneratedChunk { fluid: vec![FLUID_SOURCE; blocks.len()], blocks }
+        GeneratedChunk {
+            fluid: vec![FLUID_SOURCE; blocks.len()],
+            axis: vec![AXIS_Y; blocks.len()],
+            blocks,
+        }
     }
 }
 

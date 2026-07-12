@@ -182,6 +182,30 @@ standalone item system:
 the inventory screen, Creative's block grid) goes through, so they all stay
 consistent as `ItemModel` grows more variants.
 
+### Rotation
+
+Controlled by `rotation` (`blocks::Rotation`):
+
+- **`"none"`** (the default) — always renders unrotated: `top`/`bottom`
+  textures fixed to +y/-y, `side` on the four remaining faces, no matter how
+  it was placed.
+- **`"log"`** — Minecraft log behavior. Place it against a block's top or
+  bottom face and it stands upright as normal; place it against a side face
+  and it lies on its side instead, its `top` texture (the end grain) facing
+  the face you clicked — i.e. facing you. This unlocks three orientations:
+  up-down (the default), east-west, and south-north.
+
+This is state on the *placed instance*, not the definition — two logs
+placed against different faces render differently even though they share
+one `BlockDef`. It's stored per-cell in `Chunk::axis` (`world.rs`), computed
+from the clicked face's normal at placement time (`interact::
+axis_from_normal`), and — unlike the fluid sim's per-cell state, which is
+fully re-derivable and intentionally never saved — round-trips through
+`BlockSetEvent`/`EditLog`/`save::BlockEdit` so a rotated block's orientation
+survives a save and reload. `mesher::rotated_tile` does the actual face
+remap; it's a no-op for any block whose `rotation` is `"none"`, so adding a
+second rotating block someday needs zero mesher changes.
+
 ## Chat and commands
 
 Press `T` to open a one-line chat box; `Enter` sends, `Escape` cancels. Sent
@@ -387,6 +411,7 @@ by) is required. Everything else defaults sanely:
 | `item` | `true` | `false` means this block has no inventory item at all — left out of Creative's grid, can't be middle-click picked. `air` is the built-in example; use it for a block that's only ever meant to be obtained via a separate item later (a bucket-of-water instead of a raw water block, say) |
 | `item_model` | `"default"` | `"default"` \| `"face"` \| `"custom"` — see "Item models" below |
 | `custom_item_model` | *(none)* | path to an external model, required when `item_model` is `"custom"` |
+| `rotation` | `"none"` | `"none"` \| `"log"` — see "Rotation" below |
 | `textures` | tile named after `id` on every face | `{ "all": "..." }` or `{ "top": "...", "bottom": "...", "side": "..." }` |
 
 `transparent`'s three options all still respect the block's own texture
