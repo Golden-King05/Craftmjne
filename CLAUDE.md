@@ -30,6 +30,23 @@ that mistake.** Specifically:
   get clear confirmation before writing any code — this is a decision only
   the user should make, not something to infer from an ambiguous request.
 
+## Push to `claude/minecraft-clone-framework-2vjlng`, not `main`
+
+As of 2026-07-12, the user asked that all work go to the
+`claude/minecraft-clone-framework-2vjlng` branch instead of `main` — they'll
+merge it over themselves when ready. This reverses earlier guidance in this
+file/session history to work directly on `main`; that branch had been
+sitting stale since the project's first two PRs while `main` moved on for
+many sessions, and it's now been fast-forwarded to match `main`'s tip
+(`fcc9677`) as of the switch. **Commit and push new work to
+`claude/minecraft-clone-framework-2vjlng`** (`git push origin
+claude/minecraft-clone-framework-2vjlng`) unless the user says otherwise —
+don't default back to `main`. Before starting work each session, `git fetch
+origin claude/minecraft-clone-framework-2vjlng && git checkout -B
+claude/minecraft-clone-framework-2vjlng origin/claude/minecraft-clone-framework-2vjlng`
+to make sure local state matches the real remote branch (see "local disk can
+silently reset" below — the same staleness risk applies here).
+
 ## Quick orientation
 
 - `cargo run --release` to play; `cargo test` to run the test suite.
