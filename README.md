@@ -109,17 +109,20 @@ Press `E` to open/close it (`src/inventory.rs`). The hotbar and the
 inventory screen both start **completely empty** in every mode — nothing is
 pre-filled — matching Minecraft's own behavior.
 
-- **Survival** shows the hotbar plus a second row of personal storage
-  (`inventory::Inventory`, `INVENTORY_SIZE` slots — a constant, deliberately
-  easy to make configurable later). There's no block-pickup-on-break yet, so
-  Survival currently has no way to fill either row; that's a natural next
-  step. Middle-click "pick block" is Creative-only for the same reason —
-  Survival has no free items.
+- **Survival** shows the hotbar plus three rows of personal storage
+  (`inventory::Inventory`, `STORAGE_ROWS` x `STORAGE_ROW_WIDTH` slots —
+  constants, deliberately easy to make configurable later). There's no
+  block-pickup-on-break yet, so Survival currently has no way to fill either
+  the hotbar or storage; that's a natural next step. Middle-click "pick
+  block" is Creative-only for the same reason — Survival has no free items.
 - **Creative** shows one scrollable grid of every registered block instead
   of personal storage. Clicking a block puts it in the currently selected
   hotbar slot.
 - Hovering any occupied slot (in either mode) shows the block's name in a
-  cursor-following tooltip, Minecraft-style.
+  cursor-following tooltip, Minecraft-style. Scrolling or pressing a number
+  key to change the selected hotbar slot also briefly shows that block's
+  name above the hotbar itself (`ui::hotbar_label`), fading out after
+  `HOTBAR_LABEL_DURATION` seconds — no inventory screen needs to be open.
 
 Opening the inventory frees the cursor and freezes player movement/hotbar
 shortcuts/block interaction, the same way chat and the pause menu do — all

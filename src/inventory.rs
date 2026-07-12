@@ -18,10 +18,13 @@ use crate::save::GameMode;
 use crate::state::{AppState, PauseState};
 use crate::ui::tile_rect;
 
-/// Personal storage beyond the hotbar. Just a constant for now - "how much
-/// inventory space" is meant to be easy to make configurable later without
-/// touching anything else here.
-pub const INVENTORY_SIZE: usize = 9;
+/// Personal storage beyond the hotbar: three rows of `STORAGE_ROW_WIDTH`,
+/// Minecraft's classic layout. Just constants for now - "how much inventory
+/// space" is meant to be easy to make configurable later without touching
+/// anything else here.
+pub const STORAGE_ROW_WIDTH: usize = 9;
+pub const STORAGE_ROWS: usize = 3;
+pub const INVENTORY_SIZE: usize = STORAGE_ROW_WIDTH * STORAGE_ROWS;
 
 #[derive(Resource)]
 pub struct Inventory {
@@ -267,7 +270,9 @@ fn sync_inventory_screen(
                         TextFont { font_size: 12.0, ..default() },
                         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
                     ));
-                    spawn_slot_row(panel, &tables, &atlas, inventory.slots.iter().copied());
+                    for row in inventory.slots.chunks(STORAGE_ROW_WIDTH) {
+                        spawn_slot_row(panel, &tables, &atlas, row.iter().copied());
+                    }
                 }
                 GameMode::Creative => {
                     panel.spawn((Text::new("Blocks"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));

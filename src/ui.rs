@@ -6,7 +6,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::blocks::{BlockRegistry, BlockTables};
+use crate::blocks::{BlockRegistry, BlockTables, AIR};
 use crate::config::{TILE_SIZE, ATLAS_TILES};
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
@@ -21,6 +21,19 @@ struct HudRoot;
 
 #[derive(Component)]
 struct HotbarRoot;
+
+#[derive(Component)]
+struct HotbarLabel;
+
+#[derive(Resource, Default)]
+struct HotbarLabelState {
+    timer: f32,
+}
+
+/// How long the selected block's name stays visible above the hotbar after
+/// the selection last changed (scroll, number keys, or the slot's contents
+/// changing), Minecraft-style.
+const HOTBAR_LABEL_DURATION: f32 = 1.6;
 
 #[derive(Component)]
 struct HintText;
@@ -89,6 +102,34 @@ fn setup_hud(mut commands: Commands) {
                 },
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
             ));
+
+            // Selected block's name, shown above the hotbar for a few
+            // seconds whenever the selection (or its contents) changes. The
+            // outer node is a full-width flex row so the label centers
+            // itself regardless of how wide the name text ends up being.
+            root.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(78.0),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+            ))
+            .with_children(|wrap| {
+                wrap.spawn((
+                    HotbarLabel,
+                    Text::new(""),
+                    TextFont { font_size: 16.0, ..default() },
+                    TextColor(Color::WHITE),
+                    Node {
+                        padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                    Visibility::Hidden,
+                ));
+            });
 
             root.spawn((
                 HintText,
@@ -170,7 +211,6 @@ fn update_banner(state: Res<UpdateState>, mut banners: Query<(&mut Text, &mut Vi
 fn rebuild_hotbar(
     mut commands: Commands,
     hotbar: Res<Hotbar>,
-    registry: Res<BlockRegistry>,
     tables: Option<Res<BlockTables>>,
     atlas: Option<Res<AtlasImage>>,
     roots: Query<Entity, With<HotbarRoot>>,
@@ -185,7 +225,6 @@ fn rebuild_hotbar(
     for (i, &id) in hotbar.slots.iter().enumerate() {
         let selected = i == hotbar.selected;
         let tile = tables.0.tiles[id as usize * 6]; // east face as the icon
-        let _ = registry; // registry kept for future name tooltips
         let slot = commands
             .spawn((
                 Node {
@@ -223,6 +262,38 @@ fn rebuild_hotbar(
             })
             .id();
         commands.entity(root).add_child(slot);
+    }
+}
+
+/// Shows the selected hotbar slot's block name for `HOTBAR_LABEL_DURATION`
+/// seconds whenever the selection (scroll, number keys) or that slot's
+/// contents last changed, then fades it back out.
+fn hotbar_label(
+    time: Res<Time>,
+    hotbar: Res<Hotbar>,
+    registry: Res<BlockRegistry>,
+    mut state: ResMut<HotbarLabelState>,
+    mut labels: Query<(&mut Text, &mut Visibility), With<HotbarLabel>>,
+) {
+    let Ok((mut text, mut vis)) = labels.single_mut() else { return };
+    if hotbar.is_changed() {
+        let id = hotbar.slots[hotbar.selected];
+        if id == AIR {
+            *vis = Visibility::Hidden;
+            state.timer = 0.0;
+        } else {
+            text.0 = registry.def(id).name.clone();
+            *vis = Visibility::Visible;
+            state.timer = HOTBAR_LABEL_DURATION;
+        }
+        return;
+    }
+    if state.timer <= 0.0 {
+        return;
+    }
+    state.timer -= time.delta_secs();
+    if state.timer <= 0.0 {
+        *vis = Visibility::Hidden;
     }
 }
 
@@ -289,12 +360,14 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugState>()
+            .init_resource::<HotbarLabelState>()
             .add_systems(Startup, setup_update_banner)
             .add_systems(OnEnter(AppState::InGame), setup_hud)
             .add_systems(OnExit(AppState::InGame), despawn_hud)
             .add_systems(
                 Update,
-                (rebuild_hotbar, hint_visibility, debug_panel).run_if(in_state(AppState::InGame)),
+                (rebuild_hotbar, hotbar_label, hint_visibility, debug_panel)
+                    .run_if(in_state(AppState::InGame)),
             )
             .add_systems(Update, update_banner);
     }
