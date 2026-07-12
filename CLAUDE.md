@@ -443,3 +443,27 @@ etc.) instead of inventing a new approach:
   pre-warms the Cargo cache in the background on remote session start —
   print `{"async": true, "asyncTimeout": ...}` as the *first* line of stdout
   to run it non-blocking.
+- **Two different, non-opaque blocks sharing a face plane z-fight** (e.g.
+  water next to glass): `mesher.rs`'s culling only skips a face when the
+  neighbour is opaque, or the *same* fluid at the *same* height — a
+  different non-opaque neighbour (glass, or a different fluid) correctly
+  keeps both faces (you're meant to see through one to the other), but that
+  means both faces sit at the exact same world-space plane, which is a
+  textbook z-fight (flickering/tearing, reported as "water on glass is
+  clipping"). Fixed with a tiny inward nudge (`COINCIDENT_FACE_BIAS =
+  1/512`, well under a texel) along each face's own outward normal
+  (`Face::dir`), applied only when `nid != 0 && nid != id` — i.e. only the
+  genuinely-coincident case, not the normal opaque-culled or
+  same-fluid-step-wall cases. When writing the test for this
+  (`glass_next_to_water_does_not_z_fight`), the first version filtered
+  `mesh.water.positions` for any vertex near `x=5` and took a min/max — that
+  incorrectly swept in the water block's *other* faces (top/bottom/±Z),
+  which also touch `x=5` as part of their own footprint but were never
+  supposed to be biased. A temporary `eprintln!` in the hot loop confirmed
+  the production bias math was right all along; the fix was tightening the
+  test to assert the *exact* expected biased coordinate
+  (`5.0 - COINCIDENT_FACE_BIAS`) via `.any()` with a `1e-6` epsilon instead
+  of a loose filter+fold. Lesson: when a new test fails, don't assume the
+  production code is wrong — a quick throwaway probe (temporary test or
+  eprintln, removed once the question is answered) is faster than guessing
+  which side of the assertion is broken.

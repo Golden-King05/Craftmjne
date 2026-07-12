@@ -35,6 +35,17 @@ pub fn padded_index(x: i32, y: i32, z: i32) -> usize {
 /// AO brightness for 0..3 occluders touching a vertex.
 const AO_BRIGHT: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
 
+/// How far to nudge a face inward, along its own outward normal, when its
+/// neighbour is a *different*, non-opaque block (glass next to water, say).
+/// Neither block's face gets culled there - unlike an opaque neighbour, or
+/// the same fluid id, there's a real reason to see both (glass's actual
+/// cutout holes, the water surface beyond them) - so both faces render at
+/// what would otherwise be the exact same plane, and alpha-blended/cutout
+/// geometry sitting exactly coincident like that z-fights (flickers,
+/// visibly tears, as the depth test can't consistently pick a winner).
+/// Pulling each side in by a hair fixes it with no visible seam.
+const COINCIDENT_FACE_BIAS: f32 = 1.0 / 512.0;
+
 /// Fluid tops sit one sixteenth of a block below the true top - a gameplay-
 /// geometry constant tied to the base 16x16 grid, deliberately independent
 /// of the atlas's actual resolution (`Tables::tile_size`): a hand-supplied
@@ -107,6 +118,11 @@ struct FaceCorner {
 
 struct Face {
     neighbor_ofs: i32,
+    /// Outward unit normal - used to nudge a face's plane slightly inward
+    /// when it would otherwise sit exactly coincident with a different
+    /// non-opaque neighbour's own face (see the z-fighting note where this
+    /// is used, in the main mesh loop).
+    dir: [f32; 3],
     shade: f32,
     corners: [FaceCorner; 4],
 }
@@ -158,7 +174,7 @@ static FACES: LazyLock<[Face; 6]> = LazyLock::new(|| {
                 ao: [side1, side2, side1 + dv * STRIDES[v]],
             }
         });
-        Face { neighbor_ofs, shade, corners }
+        Face { neighbor_ofs, dir: [dir[0] as f32, dir[1] as f32, dir[2] as f32], shade, corners }
     })
 });
 
@@ -290,6 +306,18 @@ pub fn mesh_chunk(
                         bottom = 1.0 / BASE_TILE_SIZE as f32;
                     }
 
+                    // Reaching here with a real (non-air) neighbour means
+                    // that neighbour is non-opaque (an opaque one already
+                    // hit `continue` above) and, if it's the same fluid id,
+                    // already went through the step-wall path (a real
+                    // height difference, not a coincident plane). What's
+                    // left - a different, non-opaque block, e.g. glass next
+                    // to water - has both sides' faces rendering at what
+                    // would otherwise be the exact same plane, so nudge
+                    // this one inward to avoid z-fighting (see
+                    // `COINCIDENT_FACE_BIAS`).
+                    let bias = if nid != 0 && nid != id { COINCIDENT_FACE_BIAS } else { 0.0 };
+
                     let tile = rotated_tile(tables, id, axis, f) as usize;
                     let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
                     let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
@@ -309,9 +337,9 @@ pub fn mesh_chunk(
                         ao[ci] = bright;
 
                         bucket.positions.push([
-                            x as f32 + c.pos[0],
-                            y as f32 + if c.pos[1] == 1.0 { cap } else { bottom },
-                            z as f32 + c.pos[2],
+                            x as f32 + c.pos[0] - bias * face.dir[0],
+                            y as f32 + if c.pos[1] == 1.0 { cap } else { bottom } - bias * face.dir[1],
+                            z as f32 + c.pos[2] - bias * face.dir[2],
                         ]);
                         bucket.uvs.push([
                             tu + tables.uv_pad + c.uv[0] * tables.uv_span,
@@ -431,6 +459,40 @@ mod tests {
         fluid[padded_index(5, 10, 4)] = 1;
         let level_mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
         assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
+    }
+
+    #[test]
+    fn glass_next_to_water_does_not_z_fight() {
+        let (reg, tables) = tables();
+        let water = reg.id("water");
+        let glass = reg.id("glass");
+        let mut padded = empty_padded();
+        padded[padded_index(4, 10, 4)] = water;
+        padded[padded_index(5, 10, 4)] = glass;
+        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
+
+        // Neither block culls the other's face at their shared boundary
+        // (glass has real cutout holes you're meant to see the water
+        // through), so both still render - but at the *exact* same plane
+        // that's a textbook z-fight. Water's +x face (touching glass) must
+        // land pulled back from x=5, and glass's -x face (touching water)
+        // pulled back the other way - not filtering "any vertex near x=5"
+        // (the water block's top/bottom/z faces also have corners at x=5
+        // as part of their own footprint, correctly unbiased, since they
+        // aren't the coincident face at all), but checking for the exact
+        // biased coordinate each one's touching face should land on.
+        let water_biased_x = 5.0 - COINCIDENT_FACE_BIAS;
+        assert!(
+            mesh.water.positions.iter().any(|p| (p[0] - water_biased_x).abs() < 1e-6),
+            "expected water's face touching glass pulled back to x={water_biased_x}, got {:?}",
+            mesh.water.positions.iter().map(|p| p[0]).collect::<Vec<_>>()
+        );
+        let glass_biased_x = 5.0 + COINCIDENT_FACE_BIAS;
+        assert!(
+            mesh.solid.positions.iter().any(|p| (p[0] - glass_biased_x).abs() < 1e-6),
+            "expected glass's face touching water pulled back to x={glass_biased_x}, got {:?}",
+            mesh.solid.positions.iter().map(|p| p[0]).collect::<Vec<_>>()
+        );
     }
 
     #[test]
