@@ -72,6 +72,14 @@ The mouse locks automatically the moment you enter a world — no click needed.
 | F3 | debug overlay |
 | Esc | pause (Resume / Quit to Menu / Quit Game); Esc again resumes; also closes the inventory/chat if one is open |
 
+Swimming toward a shoreline climbs you out automatically — no need to hold
+Space and wait for buoyancy to slowly float you up over the edge. Moving
+into a wall while submerged (`player::Player::assist_climb_out`) scans up to
+`MAX_CLIMB_HEIGHT` blocks above your feet for an opening with headroom to
+stand in; if one exists within reach, `vel.y` gets a steady upward floor
+until you actually climb out onto it. Bounded by `MAX_CLIMB_HEIGHT` so it
+stays "climb out of a pool," not a general climb-any-cliff exploit.
+
 ## Menus and saved worlds
 
 The game boots into a main menu (**Worlds**, **Settings**, **Mods**, **Quit
@@ -128,10 +136,14 @@ pre-filled — matching Minecraft's own behavior.
   name above the hotbar itself (`ui::hotbar_label`), fading out after
   `HOTBAR_LABEL_DURATION` seconds — no inventory screen needs to be open.
 
-Opening the inventory frees the cursor and freezes player movement/hotbar
-shortcuts/block interaction, the same way chat and the pause menu do — all
-three overlays are mutually exclusive (only one can be open at a time) and
-Escape closes whichever one is open before it would open the pause menu.
+Opening the inventory frees the cursor and takes over WASD/look/hotbar
+shortcuts/block interaction, the same way chat does — all three overlays
+(chat, inventory, pause) are mutually exclusive (only one can be open at a
+time) and Escape closes whichever one is open before it would open the pause
+menu. Unlike the actual pause menu, chat and the inventory screen don't stop
+the world simulating underneath them: gravity, swimming buoyancy, and
+momentum keep running while either is open (`player::player_update`), so
+you don't, say, freeze mid-fall just because you checked your inventory.
 
 ### Stacking
 

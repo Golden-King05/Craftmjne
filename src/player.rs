@@ -28,6 +28,15 @@ const SPRINT_MULT: f32 = 1.6;
 const FLY_SPEED: f32 = 16.0;
 const STEP: f32 = 1.0 / 120.0;
 const LOOK_SENS: f32 = 0.0022;
+/// Steady upward speed applied while swimming into a climbable pool edge -
+/// lets you climb out onto land by just swimming into the ledge, rather
+/// than needing to hold Space and wait for buoyancy to slowly float you up
+/// over it.
+const CLIMB_SPEED: f32 = 3.4;
+/// How many blocks of wall above the current feet position the swim-to-
+/// shore assist will search for an opening - keeps it scoped to "getting
+/// out of a pool" rather than a general climb-any-cliff assist.
+const MAX_CLIMB_HEIGHT: i32 = 4;
 
 #[derive(Component)]
 pub struct Player {
@@ -147,6 +156,8 @@ impl Player {
             wish = wish.normalize();
         }
         let sprint = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        let body = self.pos + Vec3::Y * 0.6;
+        let in_water = tables.fluid[map.get_block(body.floor().as_ivec3()) as usize];
 
         if self.fly {
             let speed = FLY_SPEED * if sprint { 2.5 } else { 1.0 };
@@ -156,8 +167,6 @@ impl Player {
                 - keys.pressed(KeyCode::ShiftLeft) as i32) as f32
                 * speed;
         } else {
-            let body = self.pos + Vec3::Y * 0.6;
-            let in_water = tables.fluid[map.get_block(body.floor().as_ivec3()) as usize];
             let speed = WALK_SPEED
                 * if sprint { SPRINT_MULT } else { 1.0 }
                 * if in_water { 0.55 } else { 1.0 };
@@ -180,10 +189,51 @@ impl Player {
             }
         }
 
+        if !self.fly && wish.length_squared() > 0.0 {
+            self.assist_climb_out(map, tables, wish);
+        }
+
         self.on_ground = false;
         self.move_axis(map, tables, 0, self.vel.x * dt);
         self.move_axis(map, tables, 2, self.vel.z * dt);
         self.move_axis(map, tables, 1, self.vel.y * dt);
+    }
+
+    /// While swimming toward a solid wall ahead, looks for an opening within
+    /// `MAX_CLIMB_HEIGHT` blocks above the current feet position (with room
+    /// above it to stand) and, if found, gives `vel.y` a steady upward floor
+    /// of `CLIMB_SPEED` - so swimming into a pool edge climbs you out over a
+    /// second or so instead of just bumping the wall. Scans upward (rather
+    /// than only checking right at the current feet cell) so this keeps
+    /// pulling you up from anywhere in a multi-block-deep pool, not just the
+    /// last block below the surface; bounded by `MAX_CLIMB_HEIGHT` so it
+    /// can't turn into a general climb-any-cliff exploit.
+    ///
+    /// Checks fluid at the *feet* cell rather than reusing `step`'s
+    /// chest-height `in_water` sample: that sample flips to "not in water"
+    /// the instant your chest clears the surface, which is well before your
+    /// feet actually reach ledge height, and full gravity reasserting itself
+    /// at that exact moment would cut the climb short and drop you back in -
+    /// staying keyed on the feet cell keeps the assist active for the whole
+    /// climb, right up until you're actually standing on the ledge.
+    fn assist_climb_out(&mut self, map: &ChunkMap, tables: &Tables, wish: Vec2) {
+        let feet = self.pos.y.floor() as i32;
+        let feet_wet = tables.fluid
+            [map.get_block(IVec3::new(self.pos.x.floor() as i32, feet, self.pos.z.floor() as i32)) as usize];
+        if !feet_wet {
+            return;
+        }
+        let ahead = self.pos + Vec3::new(wish.x, 0.0, wish.y) * (HALF_W + 0.2);
+        let (ax, az) = (ahead.x.floor() as i32, ahead.z.floor() as i32);
+        let solid_at = |dy: i32| map.is_solid(tables, IVec3::new(ax, feet + dy, az));
+        if !solid_at(0) {
+            return;
+        }
+        if let Some(opening) = (1..=MAX_CLIMB_HEIGHT).find(|&dy| !solid_at(dy)) {
+            if !solid_at(opening + 1) {
+                self.vel.y = self.vel.y.max(CLIMB_SPEED);
+            }
+        }
     }
 
     /// Wait for terrain, then drop the player on a dry column near the origin.
@@ -329,28 +379,37 @@ fn player_update(
     let Some(tables) = tables else { return };
     let Ok((mut player, mut transform)) = players.single_mut() else { return };
 
-    // While chat is open, the game is paused, or the inventory is open,
-    // WASD/Space/etc shouldn't drive movement - freeze physics entirely
-    // rather than let input leak through.
-    if !chat.open && !paused.open && !inventory.open {
-        // Flying is a creative-only convenience; survival always keeps both
-        // feet (eventually) on the ground.
-        if *mode == GameMode::Creative {
-            if keys.just_pressed(KeyCode::KeyF) {
-                player.fly = !player.fly;
-                player.vel.y = 0.0;
-            }
-        } else if player.fly {
-            player.fly = false;
-        }
-
+    // Only the pause menu actually freezes the world. Chat and the
+    // inventory screen just take over WASD/Space/mouse-look - gravity,
+    // buoyancy, and momentum keep simulating underneath them, same as
+    // vanilla Minecraft (opening your inventory doesn't stop you falling).
+    if !paused.open {
         if !player.spawned {
             player.try_spawn(&map, &tables.0);
         } else {
+            let frozen = chat.open || inventory.open;
+
+            // Flying is a creative-only convenience; survival always keeps
+            // both feet (eventually) on the ground.
+            if !frozen {
+                if *mode == GameMode::Creative {
+                    if keys.just_pressed(KeyCode::KeyF) {
+                        player.fly = !player.fly;
+                        player.vel.y = 0.0;
+                    }
+                } else if player.fly {
+                    player.fly = false;
+                }
+            }
+
+            let real_keys: &ButtonInput<KeyCode> = &keys;
+            let no_keys = ButtonInput::<KeyCode>::default();
+            let input = if frozen { &no_keys } else { real_keys };
+
             player.accumulator = (player.accumulator + time.delta_secs()).min(0.25);
             while player.accumulator >= STEP {
                 player.accumulator -= STEP;
-                player.step(STEP, &keys, &map, &tables.0);
+                player.step(STEP, input, &map, &tables.0);
             }
         }
     }
@@ -458,5 +517,46 @@ mod tests {
         assert!(player.pos.x > 11.0 && player.pos.x <= 12.0 - HALF_W + 0.01,
             "x = {}", player.pos.x);
         assert!((player.pos.y - 11.0).abs() < 0.01, "sank: y = {}", player.pos.y);
+    }
+
+    #[test]
+    fn swimming_into_a_flush_shore_climbs_out_without_pressing_space() {
+        let mut reg = crate::blocks::BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices);
+        let stone = reg.id("stone");
+        let water = reg.id("water");
+
+        // Pool at x < 12 (floor at y<=10, three blocks of water above it);
+        // shore at x >= 12 is flush stone up to the same height instead -
+        // a normal one-block-tall pool edge with clear headroom above it.
+        let mut blocks = vec![0u16; CS * CS * H];
+        for z in 0..CS {
+            for x in 0..CS {
+                for y in 0..=10 {
+                    blocks[block_index(x, y, z)] = stone;
+                }
+                for y in 11..=13 {
+                    blocks[block_index(x, y, z)] = if x < 12 { water } else { stone };
+                }
+            }
+        }
+        let mut map = ChunkMap::default();
+        map.chunks.insert(IVec2::ZERO, Chunk { blocks: Some(blocks), ..Chunk::default() });
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyD); // +x, same convention as the wall test above
+        let mut player = Player {
+            pos: Vec3::new(11.3, 13.0, 8.5),
+            yaw: 0.0,
+            spawned: true,
+            ..Player::default()
+        };
+        for _ in 0..600 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+
+        assert!(player.pos.x > 12.0, "never made it onto the shore: x = {}", player.pos.x);
+        assert!(player.pos.y >= 13.99, "didn't climb up onto land: y = {}", player.pos.y);
     }
 }

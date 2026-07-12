@@ -277,15 +277,11 @@ fn rebuild_hotbar(
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
-                BorderColor(if selected {
-                    Color::WHITE
-                } else {
-                    Color::srgba(1.0, 1.0, 1.0, 0.35)
-                }),
+                BorderColor(if selected { Color::WHITE } else { Color::NONE }),
                 BackgroundColor(if selected {
                     Color::srgba(1.0, 1.0, 1.0, 0.18)
                 } else {
-                    Color::srgba(0.0, 0.0, 0.0, 0.4)
+                    Color::NONE
                 }),
             ))
             .with_children(|parent| {

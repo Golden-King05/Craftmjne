@@ -120,6 +120,16 @@ etc.) instead of inventing a new approach:
   overlay N+1: `grep -rn "chat.open\|paused.open\|inventory.open"` across
   `player.rs`, `interact.rs`, and every other overlay's toggle system, and
   add the new flag everywhere an existing one appears.
+- **"Blocks input" and "freezes the world" are different things — don't
+  conflate them.** `player_update` used to skip `player.step()` entirely
+  whenever chat *or* the inventory *or* the pause menu was open, which
+  looked like the whole game pausing just from opening your inventory
+  (gravity stopped, you'd hang frozen mid-fall). Only the real pause menu
+  (`paused.open`) should stop simulation; overlays like chat/inventory that
+  merely want the cursor and WASD should instead call `player.step()` every
+  tick as normal but pass it an empty `ButtonInput::<KeyCode>::default()`
+  in place of the real one, so gravity/buoyancy/momentum keep integrating
+  underneath them (matches vanilla Minecraft: E doesn't stop you falling).
 - **Spawn-on-change UI rebuild**: a marker `Component` for the root entity,
   and a system that despawns-and-respawns the whole subtree whenever the
   backing resource(s) `.is_changed()` — don't hand-patch individual nodes.
@@ -231,6 +241,24 @@ etc.) instead of inventing a new approach:
   worse value. Emptying is monotonic (a cell only empties once) and a
   neighbour with a real remaining path simply re-fills it on a later pass.
   Apply this to *any* future pull-based propagating sim, not just fluids.
+- **An "am I near the edge" collision probe must scan a range, not check one
+  exact cell — a moving body will drift past a single-cell window before
+  anything reacts to it.** `player.rs`'s swim-to-shore climb assist
+  (`Player::assist_climb_out`) first checked only `feet+1`/`feet+2` for a
+  clear opening; that's only true in the single block nearest the surface,
+  so a player still a block or two deep (the common case — nothing pins you
+  to the top of a pool) sinks past that window before horizontal contact
+  with the wall ever triggers the check, and the assist never fires. Fixed
+  by scanning upward from the current feet cell (bounded by
+  `MAX_CLIMB_HEIGHT`) for the first opening with headroom, so it keeps
+  re-checking and pulling you up every tick from wherever you actually are,
+  not just the one instant you'd need to already be at the top. Also don't
+  key an assist like this off a *different* system's existing "am I
+  submerged" sample if that sample uses a different reference point (here,
+  `step()`'s chest-height `in_water` flips false the instant your chest
+  clears the surface, well before your feet reach ledge height — reusing it
+  cut the climb short right at the finish line). Give the assist its own
+  probe at the reference point it actually cares about (feet, here).
 - **When a "does this converge" test times out, don't assume it's a true
   infinite loop before measuring.** The fix above was first diagnosed as a
   hang from a 10k-iteration guard tripping; instrumenting the loop (a

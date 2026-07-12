@@ -1,6 +1,6 @@
 [package]
 name = "craftmjne"
-version = "1.2.0"
+version = "1.2.2"
 edition = "2021"
 description = "A well-optimized, extensible voxel engine / Minecraft-style game framework"
 license = "MIT"
