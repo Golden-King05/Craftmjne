@@ -374,15 +374,22 @@ draws a partial "step" wall between same-fluid neighbours at different
 levels instead of culling that face outright, so adjacent flow heights never
 show a gap. See the "Known gaps" note in Roadmap ideas for what's simplified.
 
-**Reloading doesn't re-simulate from a cold start.** `fluid_level` itself
-isn't saved (like terrain, it's fully deterministic from its inputs — saving
-every flowing cell would balloon a save file with a big lake or river's
-worth of transient state for zero benefit). What *is* saved is the one
-source block a player placed; on reload, `collect_gen_tasks` resets that
-cell back to a permanent source and re-seeds `FluidQueue` with it, so the
-exact same spread it had before re-derives on its own — quickly (the same
-budgeted queue as live play, not a blocking recompute) and automatically,
-not "type `/reload` and wait" or "the lake is just gone now."
+**Reloading never re-simulates fluid — it's saved exactly, like any other
+block.** Every fluid cell (source, flowing, falling — not just the source a
+player placed) is written to disk as a `save::FluidCell {x, y, z, block,
+level}` and restored verbatim on load (`ChunkMap::set_block` +
+`set_fluid_level_raw`, no `FluidQueue` involvement at all), so a build with
+water in it can't come back different just because the simulation happened
+to converge differently on reload. This can't reuse `BlockEdit`'s
+sparse-diff-of-player-touches approach, because flowing/falling cells are
+the simulation's own writes and never fire a `BlockSetEvent` in the first
+place (see `set_fluid_cell`'s doc comment) — so `write_save` instead scans
+every currently-loaded chunk fresh on every save and falls back to the
+previously-saved data only for chunks the player didn't revisit this
+session (`world::OriginalFluids`), so an unvisited lake's data is never
+silently dropped either. The tradeoff is exactly what you'd expect from
+"treat it like a real block": a session with a lot of flowing water makes
+for a bigger save file, same as a session with a lot of block edits does.
 
 ## Extending the framework
 

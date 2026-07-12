@@ -211,31 +211,55 @@ etc.) instead of inventing a new approach:
   fluid. Reuse this shape for any future propagating simulation (light,
   fire spread, etc.) instead of writing a fresh scan-the-world system.
 - **Simulated state changes must not go through the same path as player
-  edits.** `ChunkMap::set_block` fires a `BlockSetEvent` (which `record_edits`
-  persists to the save file) — a per-tick simulation writing through it would
-  bloat every save with thousands of transient cells. Simulated writes get
-  their own setter (`ChunkMap::set_fluid_cell`) that updates the grid + marks
-  chunks dirty for remeshing, same as `set_block`, but skips the event.
-  **The flip side of this deliberately not persisting**: whatever seeds the
-  simulation in the first place still has to get re-seeded on load, or the
-  "fully re-derivable" state just... doesn't re-derive. This bit fluid
-  specifically - `collect_gen_tasks` reapplied a saved water-source edit's
-  block id on world load, but never reset its `fluid_level` back to
-  `FLUID_SOURCE` and never re-queued it into `FluidQueue`, so a reloaded
-  lake was a lone source block with none of the flow that had spread from it
-  (that flow was never a saved edit - see the point above). Fixed by having
-  the edit-reapply loop do exactly what a live placement does when the
-  reapplied id is a fluid: `set_fluid_level_raw(pos, FLUID_SOURCE)` +
-  push `pos` and its `FLUID_NEIGHBORS` onto `FluidQueue`. General lesson:
-  every "don't persist this, it's re-derivable" decision has an implicit
-  partner obligation - re-derive it, actually, every time the thing that
-  seeds it (a save load, here) happens, not just on the first live
-  placement. Test it by asserting the *derived* state reappears after a
-  save/reload round-trip, not just the literal saved edit (see
-  `water_source_re_spreads_after_leaving_and_reentering_a_world` in
-  `tests/headless.rs` - it fails without the fix even though every plain
-  unit test in `world.rs`/`blocks.rs` still passes, because none of those
-  exercise the actual `collect_gen_tasks` reload path end to end).
+  edits, even when that state IS persisted.** `ChunkMap::set_block` fires a
+  `BlockSetEvent` (which `record_edits` accumulates into `EditLog`) — a
+  per-tick simulation writing through it would insert into that map
+  thousands of times a second during a big spread, for no reason (only the
+  *final* state matters). Simulated writes get their own setter
+  (`ChunkMap::set_fluid_cell`), same grid update + dirty-marking as
+  `set_block`, but skipping the event entirely.
+  **This doesn't mean fluid state goes unsaved** (an earlier version of
+  this file said so — that was the wrong call: it left an in-progress
+  design where a placed water source came back on reload but everything it
+  had spread into didn't, since that spread was never captured any other
+  way, and re-deriving it via `FluidQueue` on load risked the exact
+  live-vs-reloaded convergence mismatch a save is supposed to prevent).
+  Fluid state genuinely is fully saved now — every cell, not just sources —
+  via a *different* mechanism than edits: `write_save` scans every
+  currently-loaded chunk fresh on every save (`save::FluidCell`s: id +
+  level, not a diff against terrain) and falls back to the previous save's
+  data (`world::OriginalFluids`) only for chunks the player didn't revisit
+  this session. Reapplying on load (`collect_gen_tasks`) is a straight
+  `set_block` + `set_fluid_level_raw` per saved cell - zero `FluidQueue`
+  involvement, so a reload never has to (and structurally *can't*) converge
+  to something different than what was actually there. The general
+  takeaway: "must not share the player-edit event path" and "must not be
+  persisted" are two separate decisions - a continuously-changing
+  simulation still needs a snapshot-style persistence strategy of its own
+  if the alternative (re-deriving on load) can't be guaranteed to reproduce
+  the exact same result, it just can't be the same *incremental,
+  event-driven* mechanism blocks use.
+- **`EditLog` must be seeded from the save file at load time, not started
+  empty.** It used to reset to `EditLog::default()` on every `enter_world`
+  and only grow from this session's own `BlockSetEvent`s; `write_save`
+  serializes *only* `EditLog`. Combine those two facts and any edit whose
+  chunk the player didn't happen to revisit this session - its data lived
+  only in the separate, chunk-generation-triggered `PendingEdits`, which
+  nothing ever serializes - would silently vanish from the save the moment
+  something else triggered the *next* autosave or exit. One session
+  wouldn't show the bug (the edit's still correctly visible in memory,
+  reapplied via `PendingEdits` same as ever); it takes a *second* reload to
+  notice the edit never made it back, by which point there's no trail
+  connecting the loss to its cause. Fixed by building `EditLog` from
+  `data.edits` up front (same loop that builds `PendingEdits`), so it always
+  holds the complete old+new picture regardless of what got visited. Same
+  root-cause shape as the fluid point above - anything that's supposed to
+  be "the complete authoritative record for saving" has to actually start
+  complete, not empty-plus-hope-everything-gets-revisited. Test this kind
+  of bug with a *second* reload cycle, not just one - `tests/headless.rs`'s
+  `edits_in_unvisited_chunks_survive_a_second_reload` is the pattern: edit
+  something, leave, reload-without-revisiting-it, leave again (the save
+  that silently drops it), reload once more and check it's still there.
 - **A block's per-cell dynamic state (beyond its id) lives in a second
   `Vec` parallel to `Chunk::blocks`**, not packed into the `BlockId` or a
   separate side-table keyed by position. `Chunk::fluid_level: Option<Vec<u8>>`
@@ -244,18 +268,19 @@ etc.) instead of inventing a new approach:
   this shape for any future per-block runtime state (growth stage, charge
   level, etc.) rather than inventing a `HashMap<IVec3, T>` side-channel.
   `Chunk::axis` (block rotation) is the second example of this shape, and
-  the point where it *diverges* from `fluid_level` matters: `fluid_level` is
-  simulated and fully re-derivable, so it deliberately never touches
-  `BlockSetEvent`/the save file (see the point above); `axis` is a *player
-  choice* (which face you placed a log against), so it's the opposite - it
-  must round-trip through `BlockSetEvent` (an added `axis: u8` field),
-  `EditLog` (now keyed to `(BlockId, u8)` instead of bare `BlockId`), and
-  `save::BlockEdit` (an added `#[serde(default)] axis: u8` field - the
-  `default` matters, so old saves without the field still load instead of
-  failing to parse). Before adding a new per-cell `Vec`, decide which
-  category it's in - re-derivable-from-the-world (skip the event, like
-  fluid) or a genuine player decision (persist it, like axis) - since
-  copying the wrong sibling silently drops or bloats data.
+  it's persisted through a *different* mechanism than `fluid_level` even
+  though both are now saved: `axis` only ever changes on a discrete player
+  action (placing a rotating block), so it fits the same incremental,
+  `BlockSetEvent`-driven path as ordinary block edits (`EditLog`, now keyed
+  to `(BlockId, u8)` instead of bare `BlockId`; `save::BlockEdit` gained a
+  `#[serde(default)] axis: u8` field - the `default` matters, so old saves
+  without the field still load instead of failing to parse). `fluid_level`
+  changes continuously (every simulation tick, not a discrete action), so it
+  needs the scan-based snapshot approach described above instead. Before
+  adding a new per-cell `Vec`, figure out which shape its updates have -
+  sparse and event-driven (reuse the edit-log path) or dense and continuous
+  (reuse the fluid scan-and-snapshot path) - since copying the wrong sibling
+  silently drops or bloats data.
 - **When a per-instance variation only kicks in for a handful of block ids,
   give `Tables` a `Vec<bool>` gate (`rotates`, mirroring `fluid`/
   `replaceable`) and make the general-case formula reduce to a no-op when

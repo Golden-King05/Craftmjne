@@ -103,10 +103,29 @@ pub struct BlockEdit {
     pub axis: u8,
 }
 
+/// One fluid cell's exact state, saved so a reload restores water (and any
+/// other fluid) exactly as it was left - not just the source a player
+/// placed, but every cell it spread into - with zero re-simulation. Unlike
+/// `BlockEdit` (a sparse diff of cells a player touched), this is closer to
+/// a full snapshot of a chunk's fluid footprint - see `world.rs`'s
+/// `write_save` for why a fluid can't use the same sparse-diff approach a
+/// solid block edit can (every fluid cell matters, not just ones that
+/// differ from what terrain generation would have produced).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FluidCell {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub block: String,
+    pub level: u8,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct WorldData {
     pub player: Option<PlayerSave>,
     pub edits: Vec<BlockEdit>,
+    #[serde(default)]
+    pub fluids: Vec<FluidCell>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -345,6 +364,7 @@ mod tests {
         let data = WorldData {
             player: Some(PlayerSave { x: 1.0, y: 2.0, z: 3.0, yaw: 0.5, pitch: -0.2, fly: true }),
             edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0 }],
+            fluids: vec![FluidCell { x: 4, y: 5, z: 6, block: "water".into(), level: 2 }],
         };
         store.save_data(&slug, &data).unwrap();
 
@@ -352,6 +372,23 @@ mod tests {
         assert_eq!(loaded.player.unwrap().x, 1.0);
         assert_eq!(loaded.edits.len(), 1);
         assert_eq!(loaded.edits[0].block, "stone");
+        assert_eq!(loaded.fluids.len(), 1);
+        assert_eq!(loaded.fluids[0].level, 2);
+    }
+
+    #[test]
+    fn missing_fluids_field_in_old_saves_loads_as_empty() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("Old Water", 1, GameMode::Survival).unwrap();
+        // Simulate a data.json written before `fluids` existed.
+        fs::write(
+            store.data_path(&slug),
+            r#"{"player":null,"edits":[{"x":1,"y":2,"z":3,"block":"stone"}]}"#,
+        )
+        .unwrap();
+        let data = store.load_data(&slug);
+        assert_eq!(data.edits.len(), 1);
+        assert!(data.fluids.is_empty());
     }
 
     #[test]

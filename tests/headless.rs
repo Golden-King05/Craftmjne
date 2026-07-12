@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use craftmjne::blocks::{BlockRegistry, AXIS_Y};
-use craftmjne::config::WorldSettings;
+use craftmjne::config::{WorldSettings, CHUNK_SIZE};
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
 use craftmjne::save::{GameMode, SaveStore};
@@ -55,6 +55,31 @@ fn headless_app(temp: &TempSaves) -> App {
     app.world_mut().insert_resource(ActiveWorld { slug, meta });
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
     app.update(); // process the MainMenu -> InGame transition (runs `enter_world`)
+
+    app
+}
+
+/// Builds a fresh app pointed at an *existing* save directory and loads its
+/// (only) world, simulating a quit-and-relaunch: a brand new app, same save
+/// on disk, no state carried over except what's on disk.
+fn reload_app(temp: &TempSaves) -> App {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, AssetPlugin::default(), StatesPlugin));
+    app.init_asset::<Mesh>();
+    app.init_asset::<Image>();
+    app.init_asset::<ChunkMaterial>();
+    app.insert_resource(WorldSettings { seed: 7, render_distance: 2 });
+    app.insert_resource(SaveStore::at(temp.0.clone()));
+    app.insert_resource(ChunkMaterials { solid: Handle::default(), water: Handle::default() });
+    app.init_state::<AppState>();
+    app.add_plugins(WorldPlugin);
+    app.world_mut().spawn(Player::default());
+
+    let store = app.world().resource::<SaveStore>();
+    let (slug, meta) = store.list_worlds().into_iter().next().expect("world was saved");
+    app.world_mut().insert_resource(ActiveWorld { slug, meta });
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+    app.update();
 
     app
 }
@@ -227,14 +252,13 @@ fn leaving_and_reentering_a_world_persists_edits_and_player_pose() {
     assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(edit_pos) == 0, 2000));
 }
 
-/// A saved edit only ever records the *source* block a player placed - the
-/// flowing water it spread into afterward is the simulation's own writes,
-/// never persisted (see `world.rs`'s `set_fluid_cell` doc comment). So
-/// reloading has to re-derive that spread instead of leaving a lone source
-/// with nothing flowing out of it - this is the regression `collect_gen_
-/// tasks`'s fluid-edit handling (re-seeding `FluidQueue` on reapply) guards.
+/// Every fluid cell's exact state (id *and* level) is saved and restored
+/// verbatim - not just the source a player placed, but every cell it spread
+/// into (the simulation's own writes, never routed through `BlockSetEvent` -
+/// see `world.rs`'s `set_fluid_cell` doc comment). So a reload must bring
+/// the whole spread back with zero re-simulation, not just the lone source.
 #[test]
-fn water_source_re_spreads_after_leaving_and_reentering_a_world() {
+fn water_restores_exactly_after_leaving_and_reentering_a_world() {
     let temp = temp_saves();
     let mut app = headless_app(&temp);
     assert!(run_until(
@@ -282,31 +306,87 @@ fn water_source_re_spreads_after_leaving_and_reentering_a_world() {
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
     app.update(); // exit_world writes the save
 
-    let mut app2 = App::new();
-    app2.add_plugins((MinimalPlugins, AssetPlugin::default(), StatesPlugin));
-    app2.init_asset::<Mesh>();
-    app2.init_asset::<Image>();
-    app2.init_asset::<ChunkMaterial>();
-    app2.insert_resource(WorldSettings { seed: 7, render_distance: 2 });
-    app2.insert_resource(SaveStore::at(temp.0.clone()));
-    app2.insert_resource(ChunkMaterials { solid: Handle::default(), water: Handle::default() });
-    app2.init_state::<AppState>();
-    app2.add_plugins(WorldPlugin);
-    app2.world_mut().spawn(Player::default());
+    let mut app2 = reload_app(&temp);
 
-    let store = app2.world().resource::<SaveStore>();
-    let (slug, meta) = store.list_worlds().into_iter().next().expect("world was saved");
-    app2.world_mut().insert_resource(ActiveWorld { slug, meta });
-    app2.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+    // Both the source and the neighbour it spread into come back the moment
+    // their chunk generates - not "eventually, once the fluid queue works
+    // it out again," but restored outright, so a small budget of iterations
+    // (rather than the generous ones other tests use to allow for gradual
+    // simulation) is enough to prove this isn't quietly still re-deriving.
+    assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(src) == water, 200));
+    assert!(
+        run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(neighbour) == water, 200),
+        "water didn't restore exactly to its neighbour after reload"
+    );
+}
+
+/// `EditLog` used to reset to empty on every `enter_world` and `write_save`
+/// only ever serialized *it* - so an edit whose chunk the player didn't
+/// happen to revisit this session (its data lived only in `PendingEdits`,
+/// which nothing serializes) would vanish the moment the *next* autosave or
+/// exit overwrote the save file with "this session's edits" alone. Two
+/// reload cycles are exactly what's needed to catch this: one to load the
+/// old edit without revisiting it, one more to prove it actually survived
+/// the save that happened in between.
+#[test]
+fn edits_in_unvisited_chunks_survive_a_second_reload() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+
+    // Move out to a far chunk, let it stream in, and edit it there.
+    let far = IVec3::new(400, 40, 400);
+    let far_coord = IVec2::new(far.x.div_euclid(CHUNK_SIZE), far.z.div_euclid(CHUNK_SIZE));
+    {
+        let mut players = app.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app.world_mut()).unwrap();
+        player.pos = Vec3::new(far.x as f32 + 0.5, far.y as f32, far.z as f32 + 0.5);
+        player.spawned = true;
+    }
+    assert!(run_until(
+        &mut app,
+        |app| {
+            app.world().resource::<ChunkMap>().chunks.get(&far_coord).is_some_and(|c| c.blocks.is_some())
+        },
+        2000,
+    ));
+
+    let glass = app.world().resource::<BlockRegistry>().id("glass");
+    {
+        let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(far, glass).expect("chunk loaded");
+        app.world_mut().send_event(BlockSetEvent { pos: far, id: glass, prev, axis: AXIS_Y });
+    }
+    app.update(); // let record_edits pick up the event
+
+    // Head back toward spawn before leaving, so the saved player position -
+    // and thus session 2's streaming radius - never comes near `far` again.
+    {
+        let mut players = app.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app.world_mut()).unwrap();
+        player.pos = Vec3::new(8.5, 40.0, 8.5);
+    }
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update(); // exit_world: session 1's save includes the `far` edit
+
+    // Session 2: reload near spawn, touch nothing near `far`, leave again.
+    // This is the save that used to silently drop the `far` edit.
+    let mut app2 = reload_app(&temp);
+    for _ in 0..5 {
+        app2.update();
+    }
+    app2.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
     app2.update();
 
-    // The source itself reapplies immediately, like any other saved edit...
-    assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(src) == water, 2000));
-
-    // ...and the spread neighbour - never itself a saved edit - re-derives
-    // on its own instead of staying missing forever.
+    // Session 3: reload again and go back to `far` - the edit from session 1
+    // must still be there even though session 2 never touched that chunk.
+    let mut app3 = reload_app(&temp);
+    {
+        let mut players = app3.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app3.world_mut()).unwrap();
+        player.pos = Vec3::new(far.x as f32 + 0.5, far.y as f32, far.z as f32 + 0.5);
+        player.spawned = true;
+    }
     assert!(
-        run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(neighbour) == water, 2000),
-        "water never re-spread to its neighbour after reload"
+        run_until(&mut app3, |app| app.world().resource::<ChunkMap>().get_block(far) == glass, 2000),
+        "edit in a chunk unvisited during session 2 was lost after session 2's save"
     );
 }

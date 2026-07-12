@@ -18,12 +18,12 @@ use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
 use crate::blocks::{
     BlockId, BlockRegistry, BlockTables, Tables, AIR, AXIS_Y, FLUID_FALLING, FLUID_SOURCE,
 };
-use crate::config::{block_index, WorldSettings, CHUNK_SIZE, H, WORLD_HEIGHT};
+use crate::config::{block_index, WorldSettings, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
 use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
-use crate::save::{BlockEdit, GameMode, PlayerSave, SaveStore, WorldData};
+use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
 use crate::state::{ActiveWorld, AppState};
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
 
@@ -332,17 +332,41 @@ struct MeshTask {
     task: Task<ChunkMeshData>,
 }
 
-/// Edits made this session, keyed by world position (last write wins). Reset
-/// fresh on every `enter_world`; flushed to disk by `exit_world` and the
-/// periodic autosave. Stores `(id, axis)` rather than just `id` so a
-/// rotated block's orientation survives a save/reload, not just its type.
+/// Every known edit for the current world, keyed by position (last write
+/// wins) - flushed to disk by `exit_world` and the periodic autosave.
+/// Seeded from the save file's `edits` at `enter_world` (*not* reset to
+/// empty - see the point in CLAUDE.md about this: `write_save` only ever
+/// serializes this map, so if it started empty and only grew from this
+/// session's own `BlockSetEvent`s, any edit whose chunk the player didn't
+/// happen to revisit this session would silently vanish from the next
+/// save). Stores `(id, axis)` rather than just `id` so a rotated block's
+/// orientation survives a save/reload, not just its type.
 #[derive(Resource, Default)]
 pub struct EditLog(pub HashMap<IVec3, (BlockId, u8)>);
 
 /// Edits loaded from a save, grouped by chunk so `collect_gen_tasks` can
 /// apply them in O(1) right after a chunk finishes procedurally generating.
+/// Drained per-chunk as each one is applied - `EditLog` (above) is the
+/// resource that actually needs the complete picture for the whole session.
 #[derive(Resource, Default)]
 struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId, u8)>>);
+
+/// Saved fluid cells (`save::FluidCell`), grouped by chunk exactly like
+/// `PendingEdits` - reapplied verbatim (id *and* level, no simulation
+/// involved) the moment each chunk finishes generating.
+#[derive(Resource, Default)]
+struct PendingFluids(HashMap<IVec2, Vec<(IVec3, BlockId, u8)>>);
+
+/// The fluid data a save was loaded with, grouped by chunk. Unlike
+/// `EditLog`, this is never updated in memory during play - fluid state
+/// changes too continuously (every simulation tick) to track incrementally
+/// the way `record_edits` tracks block edits. Instead `write_save` scans
+/// `ChunkMap` fresh for every *currently loaded* chunk (an exact, complete
+/// snapshot - no diffing against terrain) and falls back to this untouched
+/// original data only for chunks the player never visited this session, so
+/// their fluid state isn't lost just because nothing rescanned it.
+#[derive(Resource, Default)]
+struct OriginalFluids(HashMap<IVec2, Vec<FluidCell>>);
 
 #[derive(Resource, Default)]
 struct AutosaveTimer(f32);
@@ -593,16 +617,33 @@ fn enter_world(
 
     let data = store.load_data(&active.slug);
     let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u8)>> = HashMap::new();
-    for edit in data.edits {
+    let mut edit_log: HashMap<IVec3, (BlockId, u8)> = HashMap::new();
+    for edit in &data.edits {
         // Unknown block names (e.g. from a mod no longer installed) are
         // skipped rather than failing the whole load.
         let Ok(id) = registry.by_name(&edit.block) else { continue };
         let pos = IVec3::new(edit.x, edit.y, edit.z);
         let coord = IVec2::new(edit.x.div_euclid(CHUNK_SIZE), edit.z.div_euclid(CHUNK_SIZE));
         grouped.entry(coord).or_default().push((pos, id, edit.axis));
+        // EditLog needs the complete picture (old + new) from the start, not
+        // just what this session adds - see its doc comment for why.
+        edit_log.insert(pos, (id, edit.axis));
     }
     commands.insert_resource(PendingEdits(grouped));
-    commands.insert_resource(EditLog::default());
+    commands.insert_resource(EditLog(edit_log));
+
+    let mut fluid_grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u8)>> = HashMap::new();
+    let mut original_fluids: HashMap<IVec2, Vec<FluidCell>> = HashMap::new();
+    for cell in &data.fluids {
+        let Ok(id) = registry.by_name(&cell.block) else { continue };
+        let pos = IVec3::new(cell.x, cell.y, cell.z);
+        let coord = IVec2::new(cell.x.div_euclid(CHUNK_SIZE), cell.z.div_euclid(CHUNK_SIZE));
+        fluid_grouped.entry(coord).or_default().push((pos, id, cell.level));
+        original_fluids.entry(coord).or_default().push(cell.clone());
+    }
+    commands.insert_resource(PendingFluids(fluid_grouped));
+    commands.insert_resource(OriginalFluids(original_fluids));
+
     commands.insert_resource(AutosaveTimer::default());
     commands.insert_resource(FluidQueue::default());
 
@@ -624,13 +665,28 @@ fn record_edits(mut events: EventReader<BlockSetEvent>, mut log: ResMut<EditLog>
     }
 }
 
-/// Serializes the current `EditLog` + player pose and writes it to disk.
-/// Shared by `exit_world` and the periodic autosave.
+/// Serializes the current `EditLog` + exact fluid state + player pose and
+/// writes it to disk. Shared by `exit_world` and the periodic autosave.
+///
+/// Fluid can't reuse `EditLog`'s sparse-diff-of-player-touches approach:
+/// flowing/falling cells are the simulation's own writes, never routed
+/// through `BlockSetEvent` (see `set_fluid_cell`'s doc comment), so nothing
+/// incrementally tracks them the way `record_edits` tracks block edits.
+/// Instead this scans every *currently loaded* chunk fresh, every time -
+/// an exact snapshot, not a diff against terrain - and only falls back to
+/// `OriginalFluids`' untouched data for chunks the player didn't revisit
+/// this session (those couldn't have changed, so there's nothing to
+/// rescan; using the fresh scan there instead would just be "no fluid
+/// data", silently forgetting them).
+#[allow(clippy::too_many_arguments)]
 fn write_save(
     store: &SaveStore,
     active: &ActiveWorld,
     log: &EditLog,
     registry: &BlockRegistry,
+    tables: &Tables,
+    map: &ChunkMap,
+    original_fluids: &OriginalFluids,
     player: Option<&Player>,
 ) {
     let edits = log
@@ -644,6 +700,35 @@ fn write_save(
             axis,
         })
         .collect();
+
+    let mut fluids = Vec::new();
+    for (coord, chunk) in &map.chunks {
+        let (Some(blocks), Some(levels)) = (&chunk.blocks, &chunk.fluid_level) else { continue };
+        for z in 0..CS {
+            for x in 0..CS {
+                for y in 0..H {
+                    let idx = block_index(x, y, z);
+                    let id = blocks[idx];
+                    if !tables.fluid[id as usize] {
+                        continue;
+                    }
+                    fluids.push(FluidCell {
+                        x: coord.x * CHUNK_SIZE + x as i32,
+                        y: y as i32,
+                        z: coord.y * CHUNK_SIZE + z as i32,
+                        block: registry.def(id).id.clone(),
+                        level: levels[idx],
+                    });
+                }
+            }
+        }
+    }
+    for (coord, saved) in &original_fluids.0 {
+        if !map.chunks.contains_key(coord) {
+            fluids.extend(saved.iter().cloned());
+        }
+    }
+
     let player = player.map(|p| PlayerSave {
         x: p.pos.x,
         y: p.pos.y,
@@ -652,7 +737,7 @@ fn write_save(
         pitch: p.pitch,
         fly: p.fly,
     });
-    let _ = store.save_data(&active.slug, &WorldData { player, edits });
+    let _ = store.save_data(&active.slug, &WorldData { player, edits, fluids });
 }
 
 fn autosave(
@@ -662,6 +747,9 @@ fn autosave(
     active: Res<ActiveWorld>,
     log: Res<EditLog>,
     registry: Res<BlockRegistry>,
+    tables: Res<BlockTables>,
+    map: Res<ChunkMap>,
+    original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
 ) {
     timer.0 += time.delta_secs();
@@ -669,7 +757,16 @@ fn autosave(
         return;
     }
     timer.0 = 0.0;
-    write_save(&store, &active, &log, &registry, players.single().ok());
+    write_save(
+        &store,
+        &active,
+        &log,
+        &registry,
+        &tables.0,
+        &map,
+        &original_fluids,
+        players.single().ok(),
+    );
 }
 
 /// `OnExit(AppState::InGame)`: persist this session's edits and player pose,
@@ -680,17 +777,29 @@ fn autosave(
 /// menus are supposed to have — `enter_world` only ever cleaned this up on
 /// the *next* world load, leaving a gap for however long the player sat at
 /// the menu in between.
+#[allow(clippy::too_many_arguments)]
 fn exit_world(
     mut commands: Commands,
     store: Res<SaveStore>,
     active: Res<ActiveWorld>,
     log: Res<EditLog>,
     registry: Res<BlockRegistry>,
+    tables: Res<BlockTables>,
+    original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
 ) {
-    write_save(&store, &active, &log, &registry, players.single().ok());
+    write_save(
+        &store,
+        &active,
+        &log,
+        &registry,
+        &tables.0,
+        &map,
+        &original_fluids,
+        players.single().ok(),
+    );
 
     for e in &tasks {
         commands.entity(e).despawn();
@@ -804,8 +913,7 @@ fn collect_gen_tasks(
     mut commands: Commands,
     mut map: ResMut<ChunkMap>,
     mut pending: ResMut<PendingEdits>,
-    tables: Res<BlockTables>,
-    mut fluid_queue: ResMut<FluidQueue>,
+    mut pending_fluids: ResMut<PendingFluids>,
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
     for (entity, mut gen_task) in &mut tasks {
@@ -827,21 +935,17 @@ fn collect_gen_tasks(
             for (pos, id, axis) in edits {
                 map.set_block(pos, id);
                 map.set_axis_raw(pos, axis);
-                if tables.0.fluid[id as usize] {
-                    // A saved fluid edit is always the source that got
-                    // placed (interact.rs always starts a player-placed
-                    // fluid as FLUID_SOURCE) - everything it spread into
-                    // was the simulation's own writes, never saved (see
-                    // `set_fluid_cell`'s doc comment), so re-seed the queue
-                    // here to deterministically re-derive that same spread
-                    // instead of leaving a lone source with no flow around
-                    // it until something else happens to touch this cell.
-                    map.set_fluid_level_raw(pos, FLUID_SOURCE);
-                    fluid_queue.0.push_back(pos);
-                    for d in FLUID_NEIGHBORS {
-                        fluid_queue.0.push_back(pos + d);
-                    }
-                }
+            }
+        }
+        // Re-apply this chunk's exact saved fluid state - id *and* level,
+        // straight from disk, no simulation involved. This restores every
+        // fluid cell (not just sources a player placed - flowing/falling
+        // cells the simulation spread into are just as real here), so a
+        // reload never needs to re-derive anything, only place it back.
+        if let Some(fluids) = pending_fluids.0.remove(&gen_task.coord) {
+            for (pos, id, level) in fluids {
+                map.set_block(pos, id);
+                map.set_fluid_level_raw(pos, level);
             }
         }
     }
@@ -915,6 +1019,8 @@ impl Plugin for WorldPlugin {
             .insert_resource(ChunkMap { needs_scan: true, ..ChunkMap::default() })
             .init_resource::<EditLog>()
             .init_resource::<PendingEdits>()
+            .init_resource::<PendingFluids>()
+            .init_resource::<OriginalFluids>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
             .add_event::<BlockSetEvent>()
@@ -953,7 +1059,6 @@ impl Plugin for WorldPlugin {
 mod tests {
     use super::*;
     use crate::blocks::BlockRegistry;
-    use crate::config::CS;
 
     fn empty_chunk() -> Chunk {
         Chunk {
