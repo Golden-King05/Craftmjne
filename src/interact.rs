@@ -4,7 +4,7 @@
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
-use crate::blocks::{BlockId, BlockRegistry, AIR, FLUID_SOURCE};
+use crate::blocks::{BlockRegistry, ItemStack, AIR, FLUID_SOURCE};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::inventory::InventoryState;
@@ -80,7 +80,7 @@ pub fn raycast_voxel(
 
 #[derive(Resource)]
 pub struct Hotbar {
-    pub slots: Vec<BlockId>,
+    pub slots: Vec<ItemStack>,
     pub selected: usize,
 }
 
@@ -98,7 +98,7 @@ struct ActionTimers {
 /// block-pickup-on-break yet, so Survival can't fill it; Creative fills it
 /// via the inventory screen's block list (`inventory::handle_creative_click`).
 fn setup_hotbar(mut commands: Commands) {
-    commands.insert_resource(Hotbar { slots: vec![AIR; 9], selected: 0 });
+    commands.insert_resource(Hotbar { slots: vec![ItemStack::EMPTY; 9], selected: 0 });
 }
 
 /// Skips entirely while chat, the pause menu, or the inventory screen is
@@ -196,7 +196,7 @@ fn interact(
     // Place (right click / hold).
     if mouse.pressed(MouseButton::Right) && timers.place_t <= 0.0 {
         let place_pos = hit.pos + hit.normal;
-        let id = hotbar.slots[hotbar.selected];
+        let id = hotbar.slots[hotbar.selected].id;
         if place_pos.y >= 0 && place_pos.y < WORLD_HEIGHT {
             let existing = map.get_block(place_pos);
             let replaceable = existing == AIR || registry.def(existing).replaceable;
@@ -210,6 +210,21 @@ fn interact(
                         map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
                     }
                     block_events.write(BlockSetEvent { pos: place_pos, id, prev });
+                    // Survival consumes from the stack (clearing the slot
+                    // once it's empty); Creative's stacks never deplete -
+                    // its "free items" already come from being able to
+                    // refill a slot from the block list at will. `id != AIR`
+                    // guards against an empty selected slot "placing air"
+                    // onto a replaceable block (water, say) - nothing to
+                    // decrement from a slot that was already empty.
+                    if *mode == GameMode::Survival && id != AIR {
+                        let selected = hotbar.selected;
+                        let stack = &mut hotbar.slots[selected];
+                        stack.count -= 1;
+                        if stack.count == 0 {
+                            *stack = ItemStack::EMPTY;
+                        }
+                    }
                 }
             }
         }
@@ -222,11 +237,11 @@ fn interact(
     if *mode == GameMode::Creative && mouse.just_pressed(MouseButton::Middle) {
         let id = map.get_block(hit.pos);
         if id != AIR {
-            if let Some(existing) = hotbar.slots.iter().position(|&s| s == id) {
+            if let Some(existing) = hotbar.slots.iter().position(|s| s.id == id) {
                 hotbar.selected = existing;
             } else {
                 let sel = hotbar.selected;
-                hotbar.slots[sel] = id;
+                hotbar.slots[sel] = ItemStack { id, count: registry.def(id).max_stack };
             }
         }
     }

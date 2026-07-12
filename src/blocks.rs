@@ -31,6 +31,7 @@
 //!   "selectable": true,
 //!   "replaceable": false,
 //!   "breakable": true,
+//!   "max_stack": 124,
 //!   "textures": { "all": "coal_ore" }
 //! }
 //! ```
@@ -46,6 +47,10 @@
 //!   controls how far the fluid spreads from a source before drying up (see
 //!   `world.rs`'s `FluidQueue`/`recompute_cell` for the spread sim and
 //!   `mesher.rs`'s `fluid_height` for the resulting slope).
+//! - `max_stack` is how many of this block a single inventory/hotbar slot
+//!   can hold (see [`ItemStack`]); defaults to [`DEFAULT_MAX_STACK`] (124)
+//!   if omitted — set it per-block for anything that should stack
+//!   differently (or not at all, with `1`).
 //! - `textures` defaults to a single texture named after `id` on every face
 //!   if omitted entirely.
 
@@ -56,6 +61,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub type BlockId = u16;
+
+/// A slot's contents: which block and how many. `id == AIR` (or `count ==
+/// 0`) means empty — `is_empty()` treats either as the same thing, so
+/// callers don't need to keep both fields in sync by hand.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct ItemStack {
+    pub id: BlockId,
+    pub count: u32,
+}
+
+impl ItemStack {
+    pub const EMPTY: ItemStack = ItemStack { id: AIR, count: 0 };
+
+    pub fn is_empty(&self) -> bool {
+        self.id == AIR || self.count == 0
+    }
+}
+
+/// How many of a block a single slot holds unless a block file overrides it
+/// with `max_stack`.
+pub const DEFAULT_MAX_STACK: u32 = 124;
 
 /// A fluid cell's stored level, meaningful only while that cell's block id is
 /// a fluid (see `Chunk::fluid_level` in `world.rs`). `0` is a permanent
@@ -166,6 +192,9 @@ pub struct BlockDef {
     pub replaceable: bool,
     /// Can be mined (bedrock is not).
     pub breakable: bool,
+    /// How many of this block a single inventory/hotbar slot holds. See
+    /// [`ItemStack`]; defaults to [`DEFAULT_MAX_STACK`].
+    pub max_stack: u32,
     pub textures: FaceTextures,
 }
 
@@ -181,6 +210,7 @@ impl Default for BlockDef {
             selectable: true,
             replaceable: false,
             breakable: true,
+            max_stack: DEFAULT_MAX_STACK,
             textures: FaceTextures::default(),
         }
     }
@@ -219,12 +249,18 @@ struct BlockFile {
     replaceable: Option<bool>,
     #[serde(default = "default_true")]
     breakable: bool,
+    #[serde(default = "default_max_stack")]
+    max_stack: u32,
     #[serde(default)]
     textures: FaceTextures,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_stack() -> u32 {
+    DEFAULT_MAX_STACK
 }
 
 impl BlockFile {
@@ -247,6 +283,7 @@ impl BlockFile {
             selectable: self.selectable.unwrap_or(selectable),
             replaceable: self.replaceable.unwrap_or(replaceable),
             breakable: self.breakable,
+            max_stack: self.max_stack,
             textures: self.textures,
         }
     }
@@ -434,6 +471,27 @@ mod tests {
         let grass = reg.id("grass") as usize;
         assert_ne!(tables.tiles[grass * 6 + 2], tables.tiles[grass * 6 + 3]);
         assert_ne!(tables.tiles[grass * 6 + 2], tables.tiles[grass * 6]);
+    }
+
+    #[test]
+    fn max_stack_defaults_and_is_overridable() {
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "stone"}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.max_stack, DEFAULT_MAX_STACK);
+
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "ruby", "max_stack": 1}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.max_stack, 1);
+    }
+
+    #[test]
+    fn item_stack_is_empty_for_air_or_zero_count() {
+        assert!(ItemStack::EMPTY.is_empty());
+        assert!(ItemStack { id: AIR, count: 5 }.is_empty());
+        assert!(ItemStack { id: 3, count: 0 }.is_empty());
+        assert!(!ItemStack { id: 3, count: 1 }.is_empty());
     }
 
     #[test]

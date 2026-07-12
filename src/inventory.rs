@@ -1,16 +1,19 @@
 //! In-world inventory screen. Press E to open/close it (Escape also closes
 //! it, taking priority over the pause menu). Survival shows the hotbar plus
-//! a second row of personal storage - both start completely empty, since
+//! three rows of personal storage - both start completely empty, since
 //! there's no block-pickup-on-break yet (a natural next step; see README).
-//! Creative shows a scrollable list of every registered block instead;
-//! clicking one puts it in the currently selected hotbar slot. Hovering any
-//! occupied slot shows the block's name, Minecraft-tooltip style.
+//! Creative shows the same hotbar+storage view *or* a scrollable list of
+//! every registered block, switched with a button above the grid; clicking
+//! a block gives a full stack of it in the currently selected hotbar slot.
+//! `Inventory` is one resource shared by both modes, so switching modes
+//! (including mid-session via `/mode`) never touches its contents. Hovering
+//! any occupied slot shows the block's name, Minecraft-tooltip style.
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
-use crate::blocks::{BlockId, BlockRegistry, BlockTables, AIR};
+use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemStack, AIR};
 use crate::chat::ChatState;
 use crate::interact::Hotbar;
 use crate::render::AtlasImage;
@@ -28,13 +31,23 @@ pub const INVENTORY_SIZE: usize = STORAGE_ROW_WIDTH * STORAGE_ROWS;
 
 #[derive(Resource)]
 pub struct Inventory {
-    pub slots: Vec<BlockId>,
+    pub slots: Vec<ItemStack>,
 }
 
 impl Default for Inventory {
     fn default() -> Self {
-        Self { slots: vec![AIR; INVENTORY_SIZE] }
+        Self { slots: vec![ItemStack::EMPTY; INVENTORY_SIZE] }
     }
+}
+
+/// Which panel Creative's inventory screen shows - toggled by
+/// `CreativeTabButton`, independent of the survival-only hotbar+storage
+/// view (which has no tab, since it's the only thing Survival ever shows).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum CreativeTab {
+    #[default]
+    Blocks,
+    Inventory,
 }
 
 #[derive(Resource, Default)]
@@ -42,6 +55,7 @@ pub struct InventoryState {
     pub open: bool,
     was_grabbed: bool,
     tooltip: Option<String>,
+    creative_tab: CreativeTab,
 }
 
 fn close(inv: &mut InventoryState, window: &mut Window) {
@@ -64,12 +78,17 @@ struct SlotBlock(BlockId);
 struct CreativeCell;
 #[derive(Component)]
 struct CreativeListRoot;
+/// Switches Creative's inventory screen between the block list and the
+/// hotbar+storage view (see `CreativeTab`).
+#[derive(Component)]
+struct CreativeTabButton;
 #[derive(Component)]
 struct TooltipText;
 
 fn reset_on_enter(mut inv: ResMut<InventoryState>) {
     inv.open = false;
     inv.tooltip = None;
+    inv.creative_tab = CreativeTab::default();
 }
 
 fn despawn_inventory_ui(mut commands: Commands, roots: Query<Entity, With<InventoryRoot>>) {
@@ -131,13 +150,28 @@ fn scroll_creative_list(
 }
 
 fn handle_creative_click(
+    registry: Res<BlockRegistry>,
     mut hotbar: ResMut<Hotbar>,
     clicks: Query<(&Interaction, &SlotBlock), (Changed<Interaction>, With<CreativeCell>)>,
 ) {
     for (interaction, slot) in &clicks {
         if *interaction == Interaction::Pressed {
             let selected = hotbar.selected;
-            hotbar.slots[selected] = slot.0;
+            hotbar.slots[selected] = ItemStack { id: slot.0, count: registry.def(slot.0).max_stack };
+        }
+    }
+}
+
+fn toggle_creative_tab(
+    mut inv: ResMut<InventoryState>,
+    clicks: Query<&Interaction, (Changed<Interaction>, With<CreativeTabButton>)>,
+) {
+    for interaction in &clicks {
+        if *interaction == Interaction::Pressed {
+            inv.creative_tab = match inv.creative_tab {
+                CreativeTab::Blocks => CreativeTab::Inventory,
+                CreativeTab::Inventory => CreativeTab::Blocks,
+            };
         }
     }
 }
@@ -150,6 +184,18 @@ fn slot_hover_visuals(
             Interaction::Pressed => Color::srgba(1.0, 1.0, 1.0, 0.35),
             Interaction::Hovered => Color::srgba(1.0, 1.0, 1.0, 0.22),
             Interaction::None => Color::srgba(0.0, 0.0, 0.0, 0.4),
+        });
+    }
+}
+
+fn tab_button_hover(
+    mut buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<CreativeTabButton>)>,
+) {
+    for (interaction, mut bg) in &mut buttons {
+        *bg = BackgroundColor(match interaction {
+            Interaction::Pressed => Color::srgba(1.0, 1.0, 1.0, 0.35),
+            Interaction::Hovered => Color::srgba(1.0, 1.0, 1.0, 0.22),
+            Interaction::None => Color::srgba(1.0, 1.0, 1.0, 0.15),
         });
     }
 }
@@ -174,14 +220,14 @@ fn track_hovered_block(
     }
 }
 
-fn spawn_slot_row(parent: &mut ChildSpawnerCommands, tables: &BlockTables, atlas: &AtlasImage, slots: impl Iterator<Item = BlockId>) {
+fn spawn_slot_row(parent: &mut ChildSpawnerCommands, tables: &BlockTables, atlas: &AtlasImage, slots: impl Iterator<Item = ItemStack>) {
     parent
         .spawn(Node { column_gap: Val::Px(4.0), ..default() })
         .with_children(|row| {
-            for id in slots {
+            for stack in slots {
                 row.spawn((
                     Button,
-                    SlotBlock(id),
+                    SlotBlock(stack.id),
                     Node {
                         width: Val::Px(46.0),
                         height: Val::Px(46.0),
@@ -194,16 +240,55 @@ fn spawn_slot_row(parent: &mut ChildSpawnerCommands, tables: &BlockTables, atlas
                     BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.4)),
                 ))
                 .with_children(|cell| {
-                    if id != AIR {
-                        let tile = tables.0.tiles[id as usize * 6];
+                    if !stack.is_empty() {
+                        let tile = tables.0.tiles[stack.id as usize * 6];
                         cell.spawn((
                             ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() },
                             Node { width: Val::Px(34.0), height: Val::Px(34.0), ..default() },
                         ));
+                        if stack.count > 1 {
+                            cell.spawn((
+                                Text::new(stack.count.to_string()),
+                                TextFont { font_size: 12.0, ..default() },
+                                TextColor(Color::WHITE),
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    right: Val::Px(3.0),
+                                    bottom: Val::Px(1.0),
+                                    ..default()
+                                },
+                            ));
+                        }
                     }
                 });
             }
         });
+}
+
+/// The hotbar+storage view shared by Survival (its only screen) and
+/// Creative's "Inventory" tab - one `Inventory` resource either way, so
+/// contents survive a mode switch untouched.
+fn spawn_hotbar_and_storage(
+    panel: &mut ChildSpawnerCommands,
+    tables: &BlockTables,
+    atlas: &AtlasImage,
+    hotbar: &Hotbar,
+    inventory: &Inventory,
+) {
+    panel.spawn((
+        Text::new("Hotbar"),
+        TextFont { font_size: 12.0, ..default() },
+        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
+    ));
+    spawn_slot_row(panel, tables, atlas, hotbar.slots.iter().copied());
+    panel.spawn((
+        Text::new("Storage"),
+        TextFont { font_size: 12.0, ..default() },
+        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
+    ));
+    for row in inventory.slots.chunks(STORAGE_ROW_WIDTH) {
+        spawn_slot_row(panel, tables, atlas, row.iter().copied());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -259,63 +344,84 @@ fn sync_inventory_screen(
             .with_children(|panel| match *mode {
                 GameMode::Survival => {
                     panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
-                    panel.spawn((
-                        Text::new("Hotbar"),
-                        TextFont { font_size: 12.0, ..default() },
-                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
-                    ));
-                    spawn_slot_row(panel, &tables, &atlas, hotbar.slots.iter().copied());
-                    panel.spawn((
-                        Text::new("Storage"),
-                        TextFont { font_size: 12.0, ..default() },
-                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
-                    ));
-                    for row in inventory.slots.chunks(STORAGE_ROW_WIDTH) {
-                        spawn_slot_row(panel, &tables, &atlas, row.iter().copied());
-                    }
+                    spawn_hotbar_and_storage(panel, &tables, &atlas, &hotbar, &inventory);
                 }
                 GameMode::Creative => {
-                    panel.spawn((Text::new("Blocks"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
+                    let title = match inv.creative_tab {
+                        CreativeTab::Blocks => "Blocks",
+                        CreativeTab::Inventory => "Inventory",
+                    };
+                    panel.spawn((Text::new(title), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
+
+                    let tab_label = match inv.creative_tab {
+                        CreativeTab::Blocks => "Show Inventory",
+                        CreativeTab::Inventory => "Show Blocks",
+                    };
                     panel
                         .spawn((
-                            CreativeListRoot,
-                            ScrollPosition::default(),
+                            Button,
+                            CreativeTabButton,
                             Node {
-                                width: Val::Px(9.0 * 50.0),
-                                height: Val::Px(400.0),
-                                flex_direction: FlexDirection::Row,
-                                flex_wrap: FlexWrap::Wrap,
-                                align_content: AlignContent::FlexStart,
-                                overflow: Overflow::scroll_y(),
+                                padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)),
                                 ..default()
                             },
+                            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
                         ))
-                        .with_children(|grid| {
-                            for (id, _def) in registry.defs.iter().enumerate().skip(1) {
-                                let id = id as BlockId;
-                                let tile = tables.0.tiles[id as usize * 6];
-                                grid.spawn((
-                                    Button,
-                                    SlotBlock(id),
-                                    CreativeCell,
+                        .with_children(|b| {
+                            b.spawn((
+                                Text::new(tab_label),
+                                TextFont { font_size: 14.0, ..default() },
+                                TextColor(Color::WHITE),
+                            ));
+                        });
+
+                    match inv.creative_tab {
+                        CreativeTab::Blocks => {
+                            panel
+                                .spawn((
+                                    CreativeListRoot,
+                                    ScrollPosition::default(),
                                     Node {
-                                        width: Val::Px(46.0),
-                                        height: Val::Px(46.0),
-                                        margin: UiRect::all(Val::Px(2.0)),
-                                        align_items: AlignItems::Center,
-                                        justify_content: JustifyContent::Center,
+                                        width: Val::Px(9.0 * 50.0),
+                                        height: Val::Px(400.0),
+                                        flex_direction: FlexDirection::Row,
+                                        flex_wrap: FlexWrap::Wrap,
+                                        align_content: AlignContent::FlexStart,
+                                        overflow: Overflow::scroll_y(),
                                         ..default()
                                     },
-                                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.4)),
                                 ))
-                                .with_children(|cell| {
-                                    cell.spawn((
-                                        ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() },
-                                        Node { width: Val::Px(34.0), height: Val::Px(34.0), ..default() },
-                                    ));
+                                .with_children(|grid| {
+                                    for (id, _def) in registry.defs.iter().enumerate().skip(1) {
+                                        let id = id as BlockId;
+                                        let tile = tables.0.tiles[id as usize * 6];
+                                        grid.spawn((
+                                            Button,
+                                            SlotBlock(id),
+                                            CreativeCell,
+                                            Node {
+                                                width: Val::Px(46.0),
+                                                height: Val::Px(46.0),
+                                                margin: UiRect::all(Val::Px(2.0)),
+                                                align_items: AlignItems::Center,
+                                                justify_content: JustifyContent::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.4)),
+                                        ))
+                                        .with_children(|cell| {
+                                            cell.spawn((
+                                                ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile)), ..default() },
+                                                Node { width: Val::Px(34.0), height: Val::Px(34.0), ..default() },
+                                            ));
+                                        });
+                                    }
                                 });
-                            }
-                        });
+                        }
+                        CreativeTab::Inventory => {
+                            spawn_hotbar_and_storage(panel, &tables, &atlas, &hotbar, &inventory);
+                        }
+                    }
                 }
             });
 
@@ -372,7 +478,9 @@ impl Plugin for InventoryPlugin {
                     inventory_escape,
                     scroll_creative_list,
                     handle_creative_click,
+                    toggle_creative_tab,
                     slot_hover_visuals,
+                    tab_button_hover,
                     track_hovered_block,
                     sync_inventory_screen,
                     sync_tooltip_ui,
@@ -391,6 +499,6 @@ mod tests {
     fn default_inventory_is_empty() {
         let inv = Inventory::default();
         assert_eq!(inv.slots.len(), INVENTORY_SIZE);
-        assert!(inv.slots.iter().all(|&id| id == AIR));
+        assert!(inv.slots.iter().all(|s| s.is_empty()));
     }
 }

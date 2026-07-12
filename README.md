@@ -115,9 +115,13 @@ pre-filled — matching Minecraft's own behavior.
   block-pickup-on-break yet, so Survival currently has no way to fill either
   the hotbar or storage; that's a natural next step. Middle-click "pick
   block" is Creative-only for the same reason — Survival has no free items.
-- **Creative** shows one scrollable grid of every registered block instead
-  of personal storage. Clicking a block puts it in the currently selected
-  hotbar slot.
+- **Creative** shows the same hotbar+storage view, or a scrollable grid of
+  every registered block — a button above the grid switches between the two
+  (`inventory::CreativeTab`). Clicking a block in the grid gives a full
+  stack of it in the currently selected hotbar slot.
+- **`Inventory` is one resource shared by both modes** — switching modes
+  (including mid-session via `/mode`) never resets or duplicates it, so
+  whatever's in storage/the hotbar stays exactly where you left it.
 - Hovering any occupied slot (in either mode) shows the block's name in a
   cursor-following tooltip, Minecraft-style. Scrolling or pressing a number
   key to change the selected hotbar slot also briefly shows that block's
@@ -128,6 +132,17 @@ Opening the inventory frees the cursor and freezes player movement/hotbar
 shortcuts/block interaction, the same way chat and the pause menu do — all
 three overlays are mutually exclusive (only one can be open at a time) and
 Escape closes whichever one is open before it would open the pause menu.
+
+### Stacking
+
+Every slot holds an `ItemStack { id, count }` (`blocks::ItemStack`), not just
+a bare block id. `max_stack` (defaults to `DEFAULT_MAX_STACK` = 124, see "Add
+a block" below) caps how many of a given block one slot holds. Placing a
+block consumes one from the stack **in Survival**, clearing the slot once it
+hits zero; Creative's stacks never deplete on placement — its "free items"
+already come from being able to refill a slot from the block grid at will,
+same asymmetry as middle-click pick-block. A slot's count shows as a small
+badge in its bottom-right corner once it's above 1.
 
 ## Chat and commands
 
@@ -331,6 +346,7 @@ by) is required. Everything else defaults sanely:
 | `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |
 | `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
 | `breakable` | `true` | bedrock sets this `false` |
+| `max_stack` | `124` (`DEFAULT_MAX_STACK`) | how many fit in one inventory/hotbar slot — see "Stacking" above |
 | `textures` | tile named after `id` on every face | `{ "all": "..." }` or `{ "top": "...", "bottom": "...", "side": "..." }` |
 
 `transparent`'s three options all still respect the block's own texture

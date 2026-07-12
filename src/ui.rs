@@ -6,7 +6,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::blocks::{BlockRegistry, BlockTables, AIR};
+use crate::blocks::{BlockRegistry, BlockTables};
 use crate::config::{TILE_SIZE, ATLAS_TILES};
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
@@ -222,9 +222,9 @@ fn rebuild_hotbar(
     let Ok(root) = roots.single() else { return };
     commands.entity(root).despawn_related::<Children>();
 
-    for (i, &id) in hotbar.slots.iter().enumerate() {
+    for (i, &stack) in hotbar.slots.iter().enumerate() {
         let selected = i == hotbar.selected;
-        let tile = tables.0.tiles[id as usize * 6]; // east face as the icon
+        let tile = tables.0.tiles[stack.id as usize * 6]; // east face as the icon
         let slot = commands
             .spawn((
                 Node {
@@ -247,18 +247,33 @@ fn rebuild_hotbar(
                 }),
             ))
             .with_children(|parent| {
-                parent.spawn((
-                    ImageNode {
-                        image: atlas.0.clone(),
-                        rect: Some(tile_rect(tile)),
-                        ..default()
-                    },
-                    Node {
-                        width: Val::Px(34.0),
-                        height: Val::Px(34.0),
-                        ..default()
-                    },
-                ));
+                if !stack.is_empty() {
+                    parent.spawn((
+                        ImageNode {
+                            image: atlas.0.clone(),
+                            rect: Some(tile_rect(tile)),
+                            ..default()
+                        },
+                        Node {
+                            width: Val::Px(34.0),
+                            height: Val::Px(34.0),
+                            ..default()
+                        },
+                    ));
+                    if stack.count > 1 {
+                        parent.spawn((
+                            Text::new(stack.count.to_string()),
+                            TextFont { font_size: 12.0, ..default() },
+                            TextColor(Color::WHITE),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                right: Val::Px(3.0),
+                                bottom: Val::Px(1.0),
+                                ..default()
+                            },
+                        ));
+                    }
+                }
             })
             .id();
         commands.entity(root).add_child(slot);
@@ -277,12 +292,12 @@ fn hotbar_label(
 ) {
     let Ok((mut text, mut vis)) = labels.single_mut() else { return };
     if hotbar.is_changed() {
-        let id = hotbar.slots[hotbar.selected];
-        if id == AIR {
+        let stack = hotbar.slots[hotbar.selected];
+        if stack.is_empty() {
             *vis = Visibility::Hidden;
             state.timer = 0.0;
         } else {
-            text.0 = registry.def(id).name.clone();
+            text.0 = registry.def(stack.id).name.clone();
             *vis = Visibility::Visible;
             state.timer = HOTBAR_LABEL_DURATION;
         }
