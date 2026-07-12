@@ -347,6 +347,7 @@ by) is required. Everything else defaults sanely:
 | `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
 | `breakable` | `true` | bedrock sets this `false` |
 | `max_stack` | `124` (`DEFAULT_MAX_STACK`) | how many fit in one inventory/hotbar slot — see "Stacking" above |
+| `item` | `true` | `false` means this block has no inventory item at all — left out of Creative's grid, can't be middle-click picked. `air` is the built-in example; use it for a block that's only ever meant to be obtained via a separate item later (a bucket-of-water instead of a raw water block, say) |
 | `textures` | tile named after `id` on every face | `{ "all": "..." }` or `{ "top": "...", "bottom": "...", "side": "..." }` |
 
 `transparent`'s three options all still respect the block's own texture

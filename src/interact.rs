@@ -234,9 +234,11 @@ fn interact(
     // Pick block (middle click): put the targeted block in the current slot.
     // Creative-only for now - Survival has no free items, and picking a
     // block you don't already have would defeat starting with nothing.
+    // `item: false` blocks (air, and anything similarly hidden) can't be
+    // picked either - there's nothing to hold.
     if *mode == GameMode::Creative && mouse.just_pressed(MouseButton::Middle) {
         let id = map.get_block(hit.pos);
-        if id != AIR {
+        if id != AIR && registry.def(id).item {
             if let Some(existing) = hotbar.slots.iter().position(|s| s.id == id) {
                 hotbar.selected = existing;
             } else {

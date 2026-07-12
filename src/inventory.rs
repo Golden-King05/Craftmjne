@@ -392,7 +392,10 @@ fn sync_inventory_screen(
                                     },
                                 ))
                                 .with_children(|grid| {
-                                    for (id, _def) in registry.defs.iter().enumerate().skip(1) {
+                                    for (id, def) in registry.defs.iter().enumerate().skip(1) {
+                                        if !def.item {
+                                            continue;
+                                        }
                                         let id = id as BlockId;
                                         let tile = tables.0.tiles[id as usize * 6];
                                         grid.spawn((

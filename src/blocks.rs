@@ -32,6 +32,7 @@
 //!   "replaceable": false,
 //!   "breakable": true,
 //!   "max_stack": 124,
+//!   "item": true,
 //!   "textures": { "all": "coal_ore" }
 //! }
 //! ```
@@ -51,6 +52,13 @@
 //!   can hold (see [`ItemStack`]); defaults to [`DEFAULT_MAX_STACK`] (124)
 //!   if omitted — set it per-block for anything that should stack
 //!   differently (or not at all, with `1`).
+//! - `item` controls whether this block has a corresponding inventory item
+//!   at all - defaults to `true` (an ordinary block like dirt or grass).
+//!   Set it to `false` for a block that should never be obtainable/holdable
+//!   by any means: it's left out of Creative's block grid and can't be
+//!   middle-click picked. `air` is the built-in example; a future block
+//!   that's only ever obtained via a separate item (a water block once
+//!   there's a bucket-of-water item, say) is the intended general use.
 //! - `textures` defaults to a single texture named after `id` on every face
 //!   if omitted entirely.
 
@@ -195,6 +203,15 @@ pub struct BlockDef {
     /// How many of this block a single inventory/hotbar slot holds. See
     /// [`ItemStack`]; defaults to [`DEFAULT_MAX_STACK`].
     pub max_stack: u32,
+    /// Whether this block has a corresponding inventory item at all. `true`
+    /// (the default) covers ordinary blocks - dirt, grass, etc. `false`
+    /// means it's never obtainable by any means: left out of Creative's
+    /// block grid, can't be middle-click picked. `air` is the built-in
+    /// example; the general use is a block that's meant to only ever be
+    /// obtained via a *separate* item (a future water block once there's a
+    /// bucket-of-water item, say), without having to define a whole
+    /// separate item system just to hide the raw block from the UI.
+    pub item: bool,
     pub textures: FaceTextures,
 }
 
@@ -211,6 +228,7 @@ impl Default for BlockDef {
             replaceable: false,
             breakable: true,
             max_stack: DEFAULT_MAX_STACK,
+            item: true,
             textures: FaceTextures::default(),
         }
     }
@@ -251,6 +269,8 @@ struct BlockFile {
     breakable: bool,
     #[serde(default = "default_max_stack")]
     max_stack: u32,
+    #[serde(default = "default_true")]
+    item: bool,
     #[serde(default)]
     textures: FaceTextures,
 }
@@ -284,6 +304,7 @@ impl BlockFile {
             replaceable: self.replaceable.unwrap_or(replaceable),
             breakable: self.breakable,
             max_stack: self.max_stack,
+            item: self.item,
             textures: self.textures,
         }
     }
@@ -350,6 +371,7 @@ impl BlockRegistry {
             transparency: Transparency::Full,
             selectable: false,
             replaceable: true,
+            item: false,
             ..BlockDef::default()
         };
         let mut reg = Self {
@@ -484,6 +506,22 @@ mod tests {
             .unwrap()
             .into_def();
         assert_eq!(def.max_stack, 1);
+    }
+
+    #[test]
+    fn item_defaults_to_true_and_air_has_none() {
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "dirt"}"#)
+            .unwrap()
+            .into_def();
+        assert!(def.item);
+
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "void", "item": false}"#)
+            .unwrap()
+            .into_def();
+        assert!(!def.item);
+
+        let reg = BlockRegistry::with_defaults();
+        assert!(!reg.def(AIR).item, "air must not be obtainable");
     }
 
     #[test]
