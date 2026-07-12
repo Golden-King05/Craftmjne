@@ -147,10 +147,10 @@ pub fn build_icon_atlas(registry: &BlockRegistry, atlas: &AtlasData) -> IconAtla
         if def.item_model != ItemModel::Default {
             continue;
         }
-        let top_name = def.textures.resolve(&def.id, 2);
-        let side_name = def.textures.resolve(&def.id, 0);
+        let top_name = def.texture_name(2);
+        let side_name = def.texture_name(0);
         let (Some(&top_tile), Some(&side_tile)) =
-            (atlas.indices.get(top_name), atlas.indices.get(side_name))
+            (atlas.indices.get(&top_name), atlas.indices.get(&side_name))
         else {
             continue; // texture presence is already validated by compile()
         };

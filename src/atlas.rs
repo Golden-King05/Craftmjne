@@ -103,6 +103,39 @@ impl Painters {
         );
         self.0.push((name.into(), Box::new(f)));
     }
+
+    fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|(n, _)| n == name)
+    }
+
+    /// Registers the "missing texture" placeholder painter under `name` if
+    /// nothing's registered there yet - a no-op otherwise. Lets
+    /// `texture_scheme`-derived names (see `blocks::TextureScheme`) resolve
+    /// to *something* renderable without every block author having to
+    /// hand-write a procedural painter (or supply real art) for every
+    /// derived name up front; drop a matching `textures/blocks/<name>.png`
+    /// in later and it overrides this exactly like any other tile.
+    pub fn ensure_registered(&mut self, name: &str) {
+        if !self.contains(name) {
+            self.register(name, missing_texture_painter);
+        }
+    }
+}
+
+/// A checkerboard magenta/black "missing texture" placeholder - the classic
+/// game-dev signal that a tile has no real art yet, instead of either
+/// crashing or silently reusing some other block's texture. `rng` is
+/// per-name (seeded from the tile's own name, see `build_atlas_from_dir`),
+/// so different placeholder tiles still look distinguishable from each
+/// other rather than being bit-for-bit identical.
+fn missing_texture_painter(t: &mut TilePainter, rng: &mut dyn FnMut() -> f32) {
+    for y in 0..S {
+        for x in 0..S {
+            let j = (rng() - 0.5) * 10.0;
+            let c = if (x / 4 + y / 4) % 2 == 0 { [230.0, 30.0, 220.0] } else { [20.0, 20.0, 20.0] };
+            t.px(x, y, [c[0] + j, c[1] + j, c[2] + j]);
+        }
+    }
 }
 
 pub struct AtlasData {
@@ -462,6 +495,20 @@ mod tests {
         };
         assert!(tile_alpha(stone).iter().all(|&a| a == 255));
         assert!(tile_alpha(leaves).iter().any(|&a| a == 0));
+    }
+
+    #[test]
+    fn ensure_registered_only_adds_a_painter_when_the_name_is_missing() {
+        let mut painters = Painters(Vec::new());
+        painters.register("stone", |t, rng| t.noisy_fill(rng, [1.0, 1.0, 1.0], 0.0));
+        assert_eq!(painters.0.len(), 1);
+
+        painters.ensure_registered("stone"); // already registered - no-op
+        assert_eq!(painters.0.len(), 1);
+
+        painters.ensure_registered("ruby"); // missing - gets the placeholder
+        assert_eq!(painters.0.len(), 2);
+        assert!(painters.contains("ruby"));
     }
 
     /// A throwaway scratch directory, removed when the guard drops.

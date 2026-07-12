@@ -1,5 +1,6 @@
 {
   "id": "grass",
   "name": "Grass",
-  "textures": { "top": "grass_top", "bottom": "dirt", "side": "grass_side" }
+  "texture_scheme": "organic",
+  "textures": { "bottom": "dirt" }
 }

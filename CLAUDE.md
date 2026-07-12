@@ -167,6 +167,33 @@ etc.) instead of inventing a new approach:
   startup (`blocks.rs`'s module docs have the full schema). Programmatic
   `.register(BlockDef {..})` from a plugin still works too, for content
   that's easier to generate than to hand-write as JSON.
+- **`texture_scheme` derives per-face texture *names* from a block's `id`,
+  so most blocks never need to spell out a `textures` field by hand.**
+  `TextureScheme` (`blocks.rs`) is a fixed enum of naming conventions
+  (`default`/`log`/`organic`/`interface`/`advanced_interface`, plus
+  `custom` reserved for a future fully-independent per-face mapping) - each
+  variant just maps a face index to a `{id}_{suffix}` name (or plain `id`
+  for an un-suffixed face) via `TextureScheme::suffix`, consumed by
+  `BlockDef::texture_name(face)`. An explicit `textures.top`/`bottom`/
+  `side`/`all` value, if a block's file sets one, always overrides whatever
+  the scheme derived for that specific face - `blocks/grass.json` uses
+  `organic` (which alone would look for `grass_bottom`) but overrides just
+  `bottom` to reuse `dirt`, demonstrating the two compose per-face rather
+  than being mutually exclusive. This only solves *naming* - every name a
+  block ends up needing (derived or explicit) still has to resolve to an
+  actual tile, which is a second, previously-separate problem: every
+  `atlas.rs` painter is manually registered by name, so a scheme deriving a
+  name nobody wrote a painter for used to panic at `compile()`. Fixed by
+  `BlockRegistry::texture_names()` (every name every block's six faces
+  resolve to) walked once at startup (`world::compile_content`, before
+  `build_atlas`) to call `Painters::ensure_registered` for any name not
+  already known — which registers a checkerboard "missing texture"
+  placeholder painter (visually obvious, never silently reuses another
+  block's art) rather than leaving the name unresolvable. A later
+  `textures/blocks/<name>.png` overrides the placeholder exactly like any
+  other tile, so the intended workflow is: write the JSON with a scheme,
+  get an obviously-placeholder-textured block that runs fine, then drop in
+  real art whenever it's ready - never a hard blocker either way.
 - **Finding a shipped data directory at runtime** (`blocks.rs`'s
   `find_blocks_dir`): try `std::env::current_exe()`'s parent dir first (how
   an installed/distributed build finds files shipped next to it), fall back

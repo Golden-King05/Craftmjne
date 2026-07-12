@@ -576,8 +576,15 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
 pub fn compile_content(
     mut commands: Commands,
     mut registry: ResMut<BlockRegistry>,
-    painters: Res<Painters>,
+    mut painters: ResMut<Painters>,
 ) {
+    // Any texture name a block's `texture_scheme` derives (or `textures`
+    // names explicitly) that nobody registered a procedural painter for
+    // gets the "missing texture" placeholder instead of `compile()`
+    // panicking - see `Painters::ensure_registered`.
+    for name in registry.texture_names().collect::<std::collections::HashSet<_>>() {
+        painters.ensure_registered(&name);
+    }
     let atlas = build_atlas(&painters);
     let icon_atlas = build_icon_atlas(&registry, &atlas);
     let tables = registry.compile(&atlas.indices, atlas.tile_size);

@@ -76,8 +76,14 @@
 //!   the placed block instance, not the definition, so two logs placed
 //!   differently render differently even though they share one `BlockDef` -
 //!   see `Chunk::axis` in `world.rs`.
-//! - `textures` defaults to a single texture named after `id` on every face
-//!   if omitted entirely.
+//! - `texture_scheme` picks which texture *names* get looked up per face,
+//!   without having to spell any of them out by hand in `textures` - see
+//!   [`TextureScheme`]. Defaults to `"default"` (one texture, named after
+//!   `id`, on every face).
+//! - `textures` explicitly names a face's texture, overriding whatever
+//!   `texture_scheme` would have derived for that face. Defaults to
+//!   whatever `texture_scheme` derives if omitted entirely (which itself
+//!   defaults to a single texture named after `id` on every face).
 
 use bevy::prelude::*;
 use serde::Deserialize;
@@ -202,6 +208,86 @@ pub const AXIS_X: u8 = 0;
 pub const AXIS_Y: u8 = 1;
 pub const AXIS_Z: u8 = 2;
 
+/// Which texture *names* a block's six faces look up, when `textures`
+/// doesn't explicitly spell a face out (see [`FaceTextures`]) - lets most
+/// blocks skip `textures` entirely and just get sane per-face names derived
+/// from `id`, instead of every block author having to hand-write a name for
+/// each face. All derived names follow `{id}_{suffix}` except `Default`
+/// (plain `id`, no suffix, same name on every face) and the un-suffixed
+/// faces of `Interface` (also plain `id`).
+///
+/// | Scheme               | top        | bottom        | north         | remaining sides |
+/// |-----------------------|------------|---------------|---------------|------------------|
+/// | `default`             | `id`       | `id`          | `id`          | `id`             |
+/// | `log`                 | `id_top`   | `id_top`      | `id_side`     | `id_side`        |
+/// | `organic`              | `id_top`   | `id_bottom`   | `id_side`     | `id_side`        |
+/// | `interface`            | `id`       | `id`          | `id_north`    | `id`             |
+/// | `advanced_interface`   | `id_top`   | `id_bottom`   | `id_north`    | `id_side`        |
+/// | `custom`               | *(reserved for a future fully-independent per-face mapping - for now, behaves like `default` unless overridden per-face by `textures`)* ||||
+///
+/// A face named this way can still be overridden individually via
+/// `textures` (an explicit `textures.top`/`bottom`/`side`/`all` always wins
+/// over whatever the scheme would have derived) - see `grass.json` for an
+/// example that uses `organic` for its top/side but overrides `bottom` to
+/// reuse `dirt`'s texture rather than a dedicated `grass_bottom`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureScheme {
+    /// One texture, named after `id`, on every face.
+    #[default]
+    Default,
+    /// Top and bottom share `id_top` (the end-grain), the four sides share
+    /// `id_side` - a log standing upright.
+    Log,
+    /// Top gets `id_top`, bottom gets `id_bottom`, the four sides share
+    /// `id_side` - grass-like blocks with a distinct top and bottom.
+    Organic,
+    /// Only the north face is unique (`id_north`); every other face
+    /// (top, bottom, and the remaining three sides) shares the plain `id`
+    /// texture - a block with a single distinguishing front panel.
+    Interface,
+    /// North (`id_north`), top (`id_top`), and bottom (`id_bottom`) are all
+    /// unique; the remaining three sides (east, west, south) share
+    /// `id_side` - the "fully dressed" version of `Interface`.
+    AdvancedInterface,
+    /// No automatic derivation - reserved for a future fully-independent
+    /// per-face mapping (a distinct texture for all six faces, not just the
+    /// north/top/bottom/side buckets `textures` currently supports). For
+    /// now this behaves like `Default`; use explicit `textures` fields to
+    /// override individual faces in the meantime.
+    Custom,
+}
+
+impl TextureScheme {
+    /// The `{id}_{suffix}` suffix this scheme uses for `face`, or `None` if
+    /// this face should just use the plain, un-suffixed `id`.
+    fn suffix(self, face: usize) -> Option<&'static str> {
+        use TextureScheme::*;
+        match self {
+            Default | Custom => None,
+            Log => match face {
+                2 | 3 => Some("top"),
+                _ => Some("side"),
+            },
+            Organic => match face {
+                2 => Some("top"),
+                3 => Some("bottom"),
+                _ => Some("side"),
+            },
+            Interface => match face {
+                5 => Some("north"),
+                _ => None,
+            },
+            AdvancedInterface => match face {
+                5 => Some("north"),
+                2 => Some("top"),
+                3 => Some("bottom"),
+                _ => Some("side"),
+            },
+        }
+    }
+}
+
 /// Face order used across the whole engine (mesher, tiles table):
 /// 0:+x east, 1:-x west, 2:+y top, 3:-y bottom, 4:+z south, 5:-z north
 #[derive(Clone, Default, Deserialize)]
@@ -226,18 +312,17 @@ impl FaceTextures {
         }
     }
 
-    pub fn resolve<'a>(&'a self, block_id: &'a str, face: usize) -> &'a str {
-        let pick = |primary: &'a Option<String>| {
-            primary
-                .as_deref()
-                .or(self.all.as_deref())
-                .unwrap_or(block_id)
+    /// An explicit, hand-named override for `face`, if this block's
+    /// `textures` set one - `None` means "defer to `texture_scheme`", not
+    /// "use `id`" (that fallback now lives in [`BlockDef::texture_name`],
+    /// since it needs the scheme to pick the right derived name first).
+    fn explicit(&self, face: usize) -> Option<&str> {
+        let primary = match face {
+            2 => &self.top,
+            3 => &self.bottom,
+            _ => &self.side,
         };
-        match face {
-            2 => pick(&self.top),
-            3 => pick(&self.bottom),
-            _ => pick(&self.side),
-        }
+        primary.as_deref().or(self.all.as_deref())
     }
 }
 
@@ -289,7 +374,26 @@ pub struct BlockDef {
     /// Whether a placed instance can face different directions. See
     /// [`Rotation`].
     pub rotation: Rotation,
+    /// Which texture names an unset face in `textures` falls back to. See
+    /// [`TextureScheme`].
+    pub texture_scheme: TextureScheme,
     pub textures: FaceTextures,
+}
+
+impl BlockDef {
+    /// The texture name this block's `face` (0..6, see the face-order doc
+    /// above `FaceTextures`) resolves to: an explicit `textures` override
+    /// if this block's file set one for that face, otherwise whatever
+    /// `texture_scheme` derives from `id`.
+    pub fn texture_name(&self, face: usize) -> String {
+        if let Some(name) = self.textures.explicit(face) {
+            return name.to_string();
+        }
+        match self.texture_scheme.suffix(face) {
+            Some(suffix) => format!("{}_{suffix}", self.id),
+            None => self.id.clone(),
+        }
+    }
 }
 
 impl Default for BlockDef {
@@ -309,6 +413,7 @@ impl Default for BlockDef {
             item_model: ItemModel::default(),
             custom_item_model: None,
             rotation: Rotation::default(),
+            texture_scheme: TextureScheme::default(),
             textures: FaceTextures::default(),
         }
     }
@@ -357,6 +462,8 @@ struct BlockFile {
     #[serde(default)]
     rotation: Rotation,
     #[serde(default)]
+    texture_scheme: TextureScheme,
+    #[serde(default)]
     textures: FaceTextures,
 }
 
@@ -393,6 +500,7 @@ impl BlockFile {
             item_model: self.item_model,
             custom_item_model: self.custom_item_model,
             rotation: self.rotation,
+            texture_scheme: self.texture_scheme,
             textures: self.textures,
         }
     }
@@ -545,6 +653,19 @@ impl BlockRegistry {
         &self.defs[id as usize]
     }
 
+    /// Every distinct texture name any registered block's six faces resolve
+    /// to (explicit `textures` overrides and `texture_scheme`-derived names
+    /// alike) - what `world::compile_content` walks before building the
+    /// atlas, so a block whose scheme derives a name nobody registered a
+    /// procedural painter for gets an automatic placeholder instead of
+    /// `compile()` panicking (see `atlas::Painters::ensure_registered`).
+    pub fn texture_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.defs
+            .iter()
+            .skip(1) // AIR has no texture
+            .flat_map(|def| (0..6).map(|face| def.texture_name(face)))
+    }
+
     /// Bakes flat lookup tables. `atlas_index` maps texture names -> tiles;
     /// `tile_size` is the atlas's actual per-tile pixel resolution
     /// (`atlas::AtlasData::tile_size`), used to derive the UV inset that
@@ -575,8 +696,8 @@ impl BlockRegistry {
             tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
             tables.rotates[id] = def.rotation != Rotation::None;
             for face in 0..6 {
-                let tex = def.textures.resolve(&def.id, face);
-                let tile = atlas_index.get(tex).unwrap_or_else(|| {
+                let tex = def.texture_name(face);
+                let tile = atlas_index.get(&tex).unwrap_or_else(|| {
                     panic!("block {:?}: no texture painter registered for {tex:?}", def.id)
                 });
                 tables.tiles[id * 6 + face] = *tile;
@@ -612,6 +733,103 @@ mod tests {
         let grass = reg.id("grass") as usize;
         assert_ne!(tables.tiles[grass * 6 + 2], tables.tiles[grass * 6 + 3]);
         assert_ne!(tables.tiles[grass * 6 + 2], tables.tiles[grass * 6]);
+    }
+
+    #[test]
+    fn texture_scheme_derives_the_documented_name_per_face() {
+        let mut def = BlockDef { id: "widget".into(), ..BlockDef::default() };
+
+        def.texture_scheme = TextureScheme::Default;
+        for face in 0..6 {
+            assert_eq!(def.texture_name(face), "widget");
+        }
+
+        def.texture_scheme = TextureScheme::Log;
+        assert_eq!(def.texture_name(2), "widget_top"); // top
+        assert_eq!(def.texture_name(3), "widget_top"); // bottom
+        assert_eq!(def.texture_name(0), "widget_side"); // east
+        assert_eq!(def.texture_name(5), "widget_side"); // north
+
+        def.texture_scheme = TextureScheme::Organic;
+        assert_eq!(def.texture_name(2), "widget_top");
+        assert_eq!(def.texture_name(3), "widget_bottom");
+        assert_eq!(def.texture_name(0), "widget_side");
+        assert_eq!(def.texture_name(5), "widget_side");
+
+        def.texture_scheme = TextureScheme::Interface;
+        assert_eq!(def.texture_name(5), "widget_north");
+        assert_eq!(def.texture_name(2), "widget"); // top stays plain
+        assert_eq!(def.texture_name(3), "widget"); // bottom stays plain
+        assert_eq!(def.texture_name(0), "widget"); // east stays plain
+
+        def.texture_scheme = TextureScheme::AdvancedInterface;
+        assert_eq!(def.texture_name(5), "widget_north");
+        assert_eq!(def.texture_name(2), "widget_top");
+        assert_eq!(def.texture_name(3), "widget_bottom");
+        assert_eq!(def.texture_name(0), "widget_side"); // east
+        assert_eq!(def.texture_name(4), "widget_side"); // south
+
+        def.texture_scheme = TextureScheme::Custom;
+        for face in 0..6 {
+            assert_eq!(def.texture_name(face), "widget");
+        }
+    }
+
+    #[test]
+    fn an_explicit_textures_field_overrides_the_scheme_only_for_that_face() {
+        let def: BlockDef = serde_json::from_str::<BlockFile>(
+            r#"{"id": "grass", "texture_scheme": "organic", "textures": {"bottom": "dirt"}}"#,
+        )
+        .unwrap()
+        .into_def();
+        assert_eq!(def.texture_name(2), "grass_top"); // derived from the scheme
+        assert_eq!(def.texture_name(3), "dirt"); // explicit override wins
+        assert_eq!(def.texture_name(0), "grass_side"); // derived from the scheme
+    }
+
+    #[test]
+    fn texture_scheme_defaults_to_default_when_omitted() {
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "stone"}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.texture_scheme, TextureScheme::Default);
+    }
+
+    #[test]
+    fn texture_names_includes_scheme_derived_names_for_every_face() {
+        let mut reg = BlockRegistry::with_defaults();
+        reg.register(BlockDef {
+            id: "ruby_lamp".into(),
+            texture_scheme: TextureScheme::AdvancedInterface,
+            ..BlockDef::default()
+        });
+        let names: Vec<String> = reg.texture_names().collect();
+        assert!(names.contains(&"ruby_lamp_north".to_string()));
+        assert!(names.contains(&"ruby_lamp_top".to_string()));
+        assert!(names.contains(&"ruby_lamp_bottom".to_string()));
+        assert!(names.contains(&"ruby_lamp_side".to_string()));
+    }
+
+    #[test]
+    fn a_block_with_no_registered_painter_gets_an_automatic_placeholder() {
+        let mut reg = BlockRegistry::with_defaults();
+        reg.register(BlockDef {
+            id: "ruby_lamp".into(),
+            texture_scheme: TextureScheme::Interface,
+            ..BlockDef::default()
+        });
+        let mut painters = crate::atlas::default_painters();
+        for name in reg.texture_names().collect::<std::collections::HashSet<_>>() {
+            painters.ensure_registered(&name);
+        }
+        let atlas = crate::atlas::build_atlas(&painters);
+        // Should not panic - every derived name got a placeholder painter.
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        let lamp = reg.id("ruby_lamp") as usize;
+        // Interface: the north face is unique, every other face is plain -
+        // so north's tile must differ from top's, but top must match east's.
+        assert_ne!(tables.tiles[lamp * 6 + 5], tables.tiles[lamp * 6 + 2]);
+        assert_eq!(tables.tiles[lamp * 6 + 2], tables.tiles[lamp * 6]);
     }
 
     #[test]

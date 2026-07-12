@@ -6,11 +6,10 @@ one specific tile with real art instead; no code changes, no recompile.
 
 ## Rules
 
-- **Filename = texture name, exactly.** Not the block's `id` — the texture
-  name referenced in its `blocks/*.json` file (`textures.all`/`top`/
-  `bottom`/`side`), or the block's own `id` if it doesn't set `textures` at
-  all (most blocks: the file just falls back to a texture named after
-  itself — see `blocks.rs`'s module docs for the full schema).
+- **Filename = texture name, exactly.** Not always the block's `id` — see
+  "Texture scheme" below for how a block's `texture_scheme` (in its
+  `blocks/*.json` file) picks the names it looks for per face, and
+  `blocks.rs`'s module docs for the full schema.
 - **Square, and 16×16, 32×32, or 64×64 pixels.** Startup panics with a
   clear message if a file is some other size — better than silently
   stretching or cropping your art.
@@ -31,6 +30,39 @@ replace — gets rendered at 64×64, upscaled with nearest-neighbor (crisp
 pixel replication, not blur) wherever real 64×64 art isn't available yet.
 Baked inventory icons, the mesher's UVs, and the GPU texture itself all
 follow the same resolution automatically — nothing else to configure.
+
+## Texture scheme
+
+Every block picks a `texture_scheme` in its `blocks/*.json` file, which
+decides what name(s) it looks for here **without you having to spell any of
+them out** — drop in a file with the right name and it's picked up
+automatically:
+
+| `texture_scheme` | top | bottom | north | other sides |
+|---|---|---|---|---|
+| `default` *(the default if omitted)* | `{id}` | `{id}` | `{id}` | `{id}` |
+| `log` | `{id}_top` | `{id}_top` | `{id}_side` | `{id}_side` |
+| `organic` | `{id}_top` | `{id}_bottom` | `{id}_side` | `{id}_side` |
+| `interface` | `{id}` | `{id}` | `{id}_north` | `{id}` |
+| `advanced_interface` | `{id}_top` | `{id}_bottom` | `{id}_north` | `{id}_side` |
+| `custom` | *(reserved — behaves like `default` for now)* ||||
+
+For example, `blocks/log.json` sets `"texture_scheme": "log"`, so it
+automatically looks for `log_top.png` (its top and bottom - the end grain)
+and `log_side.png` (its four sides) — no `textures` field needed at all.
+
+Any single face can still be overridden explicitly with a block's
+`textures` field, no matter what scheme it uses — `blocks/grass.json` uses
+`"texture_scheme": "organic"` (which alone would look for `grass_top.png`,
+`grass_bottom.png`, and `grass_side.png`) but sets `"textures": {"bottom":
+"dirt"}` to reuse `dirt.png` for its underside instead of a dedicated
+`grass_bottom.png`.
+
+If a name a block needs (whether scheme-derived or explicit) has no PNG
+here *and* no procedural painter registered for it in `src/atlas.rs`, it
+renders as an obvious magenta/black checkerboard placeholder instead of
+crashing the game — a signal that it's waiting on real art, exactly like
+the `stone.png`/`dirt.png` slots before this file existed.
 
 ## Texture names the built-in blocks currently look for
 
@@ -59,9 +91,12 @@ grass's underside too.
 | `stone.png` | stone (all faces) |
 | `water.png` | water (all faces) |
 
-Adding a brand new block (`blocks/ruby_block.json` with `"textures": {"all":
-"ruby"}`, say) works the same way — just add `ruby.png` here too, whenever
-you have it. If you never do, it keeps using its procedural painter forever.
+Adding a brand new block works the same way — a bare `blocks/ruby_block.json`
+with just an `id` (`texture_scheme` defaults to `default`) looks for
+`ruby_block.png` here automatically, no `textures` field needed. Whenever you
+have it, just add the file; if you never do, it renders as the checkerboard
+placeholder (or a procedural painter, if `src/atlas.rs` registers one under
+that name) forever - either way, nothing crashes.
 
 ## Where this folder needs to live
 

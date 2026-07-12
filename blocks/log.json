@@ -2,5 +2,5 @@
   "id": "log",
   "name": "Log",
   "rotation": "log",
-  "textures": { "top": "log_top", "bottom": "log_top", "side": "log_side" }
+  "texture_scheme": "log"
 }
