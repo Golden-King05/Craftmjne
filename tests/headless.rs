@@ -9,12 +9,13 @@ use bevy::state::app::StatesPlugin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use craftmjne::blocks::{BlockRegistry, AXIS_Y};
 use craftmjne::config::WorldSettings;
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
 use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
-use craftmjne::world::{ChunkMap, WorldPlugin};
+use craftmjne::world::{BlockSetEvent, ChunkMap, WorldPlugin};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -224,4 +225,88 @@ fn leaving_and_reentering_a_world_persists_edits_and_player_pose() {
 
     // The edited block re-applies once its chunk regenerates.
     assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(edit_pos) == 0, 2000));
+}
+
+/// A saved edit only ever records the *source* block a player placed - the
+/// flowing water it spread into afterward is the simulation's own writes,
+/// never persisted (see `world.rs`'s `set_fluid_cell` doc comment). So
+/// reloading has to re-derive that spread instead of leaving a lone source
+/// with nothing flowing out of it - this is the regression `collect_gen_
+/// tasks`'s fluid-edit handling (re-seeding `FluidQueue` on reapply) guards.
+#[test]
+fn water_source_re_spreads_after_leaving_and_reentering_a_world() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(
+        &mut app,
+        |app| app.world().resource::<ChunkMap>().stats().1 >= 9,
+        2000,
+    ));
+
+    let water = app.world().resource::<BlockRegistry>().id("water");
+
+    // Records every write as a real saved edit (set_block + the same
+    // BlockSetEvent interact.rs fires), so both the pocket we clear and the
+    // source we place reproduce identically after a reload regardless of
+    // what this seed's terrain naturally put there.
+    let edit = |app: &mut App, pos: IVec3, id: u16| {
+        let prev = {
+            let mut map = app.world_mut().resource_mut::<ChunkMap>();
+            map.set_block(pos, id)
+        };
+        if let Some(prev) = prev {
+            app.world_mut().send_event(BlockSetEvent { pos, id, prev, axis: AXIS_Y });
+        }
+    };
+
+    let surface = {
+        let map = app.world().resource::<ChunkMap>();
+        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().clone();
+        map.surface_y(&tables.0, 8, 8).unwrap()
+    };
+    let src = IVec3::new(8, surface + 1, 8);
+    let neighbour = IVec3::new(9, surface + 1, 8);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            edit(&mut app, IVec3::new(8 + dx, surface + 1, 8 + dz), 0);
+        }
+    }
+    edit(&mut app, src, water);
+
+    // Let it spread sideways into its neighbour before saving.
+    assert!(
+        run_until(&mut app, |app| app.world().resource::<ChunkMap>().get_block(neighbour) == water, 500),
+        "water never spread to its neighbour before saving"
+    );
+
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update(); // exit_world writes the save
+
+    let mut app2 = App::new();
+    app2.add_plugins((MinimalPlugins, AssetPlugin::default(), StatesPlugin));
+    app2.init_asset::<Mesh>();
+    app2.init_asset::<Image>();
+    app2.init_asset::<ChunkMaterial>();
+    app2.insert_resource(WorldSettings { seed: 7, render_distance: 2 });
+    app2.insert_resource(SaveStore::at(temp.0.clone()));
+    app2.insert_resource(ChunkMaterials { solid: Handle::default(), water: Handle::default() });
+    app2.init_state::<AppState>();
+    app2.add_plugins(WorldPlugin);
+    app2.world_mut().spawn(Player::default());
+
+    let store = app2.world().resource::<SaveStore>();
+    let (slug, meta) = store.list_worlds().into_iter().next().expect("world was saved");
+    app2.world_mut().insert_resource(ActiveWorld { slug, meta });
+    app2.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+    app2.update();
+
+    // The source itself reapplies immediately, like any other saved edit...
+    assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(src) == water, 2000));
+
+    // ...and the spread neighbour - never itself a saved edit - re-derives
+    // on its own instead of staying missing forever.
+    assert!(
+        run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(neighbour) == water, 2000),
+        "water never re-spread to its neighbour after reload"
+    );
 }

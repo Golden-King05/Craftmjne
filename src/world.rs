@@ -804,6 +804,8 @@ fn collect_gen_tasks(
     mut commands: Commands,
     mut map: ResMut<ChunkMap>,
     mut pending: ResMut<PendingEdits>,
+    tables: Res<BlockTables>,
+    mut fluid_queue: ResMut<FluidQueue>,
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
     for (entity, mut gen_task) in &mut tasks {
@@ -825,6 +827,21 @@ fn collect_gen_tasks(
             for (pos, id, axis) in edits {
                 map.set_block(pos, id);
                 map.set_axis_raw(pos, axis);
+                if tables.0.fluid[id as usize] {
+                    // A saved fluid edit is always the source that got
+                    // placed (interact.rs always starts a player-placed
+                    // fluid as FLUID_SOURCE) - everything it spread into
+                    // was the simulation's own writes, never saved (see
+                    // `set_fluid_cell`'s doc comment), so re-seed the queue
+                    // here to deterministically re-derive that same spread
+                    // instead of leaving a lone source with no flow around
+                    // it until something else happens to touch this cell.
+                    map.set_fluid_level_raw(pos, FLUID_SOURCE);
+                    fluid_queue.0.push_back(pos);
+                    for d in FLUID_NEIGHBORS {
+                        fluid_queue.0.push_back(pos + d);
+                    }
+                }
             }
         }
     }

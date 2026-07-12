@@ -216,6 +216,26 @@ etc.) instead of inventing a new approach:
   bloat every save with thousands of transient cells. Simulated writes get
   their own setter (`ChunkMap::set_fluid_cell`) that updates the grid + marks
   chunks dirty for remeshing, same as `set_block`, but skips the event.
+  **The flip side of this deliberately not persisting**: whatever seeds the
+  simulation in the first place still has to get re-seeded on load, or the
+  "fully re-derivable" state just... doesn't re-derive. This bit fluid
+  specifically - `collect_gen_tasks` reapplied a saved water-source edit's
+  block id on world load, but never reset its `fluid_level` back to
+  `FLUID_SOURCE` and never re-queued it into `FluidQueue`, so a reloaded
+  lake was a lone source block with none of the flow that had spread from it
+  (that flow was never a saved edit - see the point above). Fixed by having
+  the edit-reapply loop do exactly what a live placement does when the
+  reapplied id is a fluid: `set_fluid_level_raw(pos, FLUID_SOURCE)` +
+  push `pos` and its `FLUID_NEIGHBORS` onto `FluidQueue`. General lesson:
+  every "don't persist this, it's re-derivable" decision has an implicit
+  partner obligation - re-derive it, actually, every time the thing that
+  seeds it (a save load, here) happens, not just on the first live
+  placement. Test it by asserting the *derived* state reappears after a
+  save/reload round-trip, not just the literal saved edit (see
+  `water_source_re_spreads_after_leaving_and_reentering_a_world` in
+  `tests/headless.rs` - it fails without the fix even though every plain
+  unit test in `world.rs`/`blocks.rs` still passes, because none of those
+  exercise the actual `collect_gen_tasks` reload path end to end).
 - **A block's per-cell dynamic state (beyond its id) lives in a second
   `Vec` parallel to `Chunk::blocks`**, not packed into the `BlockId` or a
   separate side-table keyed by position. `Chunk::fluid_level: Option<Vec<u8>>`

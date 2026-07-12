@@ -374,6 +374,16 @@ draws a partial "step" wall between same-fluid neighbours at different
 levels instead of culling that face outright, so adjacent flow heights never
 show a gap. See the "Known gaps" note in Roadmap ideas for what's simplified.
 
+**Reloading doesn't re-simulate from a cold start.** `fluid_level` itself
+isn't saved (like terrain, it's fully deterministic from its inputs — saving
+every flowing cell would balloon a save file with a big lake or river's
+worth of transient state for zero benefit). What *is* saved is the one
+source block a player placed; on reload, `collect_gen_tasks` resets that
+cell back to a permanent source and re-seeds `FluidQueue` with it, so the
+exact same spread it had before re-derives on its own — quickly (the same
+budgeted queue as live play, not a blocking recompute) and automatically,
+not "type `/reload` and wait" or "the lake is just gone now."
+
 ## Extending the framework
 
 Write a Bevy plugin and add it in `main.rs`. Content registration happens in
