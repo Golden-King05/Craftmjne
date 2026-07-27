@@ -77,6 +77,14 @@ fn main() {
                     title: "Craftmjne".into(),
                     ..default()
                 }),
+                // `updater::gate_quit` is the sole authority on when the
+                // game actually exits, so a staged update gets a chance to
+                // apply first (see updater.rs's module docs) - both the
+                // default "despawn the window the instant the OS close
+                // button is clicked" and "exit once no windows are open"
+                // behaviors would otherwise race ahead of that.
+                close_when_requested: false,
+                exit_condition: bevy::window::ExitCondition::DontExit,
                 ..default()
             }),
         )

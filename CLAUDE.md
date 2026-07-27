@@ -494,3 +494,40 @@ etc.) instead of inventing a new approach:
   production code is wrong — a quick throwaway probe (temporary test or
   eprintln, removed once the question is answered) is faster than guessing
   which side of the assertion is broken.
+- **The auto-updater used to download-and-swap the `.exe` silently mid-session,
+  the instant a background thread noticed a new release** — reported as "no
+  update window on close, and the exe never actually updates." Diagnosed by
+  reading the actual vendored `self_update`/`self-replace` crate source
+  (`~/.cargo/registry/src/.../self_update-*`, `self-replace-*`) rather than
+  guessing from memory, since the failure mode ("banner said it worked, but
+  relaunching still runs the old build") pointed at something subtler than
+  our own wrapper code. The mechanism itself checked out as correct
+  (same-directory rename dance, no cross-volume issues, no admin rights
+  needed); the far more likely culprit is a real, unfixable-from-our-side
+  one: **a process silently rewriting its own on-disk binary is textbook
+  behavior antivirus/EDR real-time protection is built to catch and
+  revert** - and it can do so *after* our code already reported success,
+  since Windows Defender scans asynchronously on file events. Given that,
+  the fix was architectural: split the updater into "check + download +
+  stage" (still eagerly in the background, `updater::check_and_stage`,
+  using `self_update`'s lower-level `ReleaseList`/`Download`/`Extract`
+  building blocks instead of its monolithic `Update::update()`, since that
+  method inseparably bundles the download with the swap) and "swap"
+  (deferred to the moment the game is actually closing, via
+  `updater::gate_quit`/`apply_update_then_exit`). Both the in-game Quit
+  button and the OS window's close button now route through a
+  `QuitRequested` event instead of writing `AppExit` directly, so a staged
+  update gets exactly one chance to apply - with a real, visible
+  "Updating..."/failure banner held up for a minimum dwell
+  (`MIN_APPLY_VISIBLE`/`_FAILED`) - before the process actually exits. This
+  needed `WindowPlugin { close_when_requested: false, exit_condition:
+  ExitCondition::DontExit, .. }` in `main.rs` to fully take over window-close
+  handling; Bevy's default behavior despawns the window (and thus loses the
+  ability to render an overlay into it) before ever getting a chance to
+  intercept the close request. **Test hazard worth remembering**: never let
+  a test reach the code path that actually calls
+  `self_update::self_replace::self_replace(..)` - it operates on
+  `env::current_exe()`, so calling it from `cargo test` would rewrite the
+  *test binary's own executable* on disk. `updater.rs`'s tests only exercise
+  `gate_quit`'s branching (does a staged update defer the exit or not) and
+  deliberately never add `apply_update_then_exit` to the test schedule.

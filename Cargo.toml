@@ -32,6 +32,11 @@ bevy = { version = "0.16", default-features = false, features = [
   "png", # the CRAFT_SMOKE=1 screenshot, and decoding hand-supplied textures/blocks/*.png (see atlas.rs)
 ] }
 self_update = { version = "0.44.0", default-features = false, features = ["reqwest", "rustls", "archive-zip", "archive-tar", "compression-flate2", "compression-zip-deflate"] }
+# Only for constructing the `Accept: application/octet-stream` header
+# updater.rs needs on GitHub's release-asset API endpoint - the exact same
+# `http` crate self_update itself depends on (see its `http_client` module),
+# so the header types passed to `self_update::Download::set_header` line up.
+http = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

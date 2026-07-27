@@ -11,6 +11,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::config::WorldSettings;
 use crate::save::{GameMode, GraphicsSettings, SaveStore};
 use crate::state::{ActiveWorld, AppState, PauseState};
+use crate::updater::QuitRequested;
 
 const PANEL_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.82);
 const BUTTON_IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
@@ -552,7 +553,7 @@ fn handle_menu_buttons(
     mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     store: Res<SaveStore>,
-    mut exit: EventWriter<AppExit>,
+    mut quit: EventWriter<QuitRequested>,
 ) {
     for (interaction, action) in &mut interactions {
         if *interaction != Interaction::Pressed {
@@ -564,7 +565,7 @@ fn handle_menu_buttons(
             MenuButton::GoMods => next_state.set(AppState::Mods),
             MenuButton::BackToMainMenu => next_state.set(AppState::MainMenu),
             MenuButton::Quit => {
-                exit.write(AppExit::Success);
+                quit.write(QuitRequested);
             }
             MenuButton::ShowCreateForm => *mode = WorldsScreenMode::Create,
             MenuButton::CancelCreate => *mode = WorldsScreenMode::List,

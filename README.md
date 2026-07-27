@@ -232,15 +232,35 @@ Add a command by extending the match in `commands::execute`.
 
 ## Auto-update
 
-`src/updater.rs` is the whole mechanism: on startup, a background thread asks
-GitHub Releases for the latest tag and, if it's newer than the running
-build, downloads the matching platform archive and rewrites the on-disk
-`.exe` — using [`self_update`](https://docs.rs/self_update)'s rename-based
-replace, which works even while that same binary is currently running. The
-game doesn't relaunch itself mid-session (a HUD banner just tells you a new
-version is ready); the swap takes effect next launch, the same model Steam
-and VS Code use. Failures (offline, rate-limited, no releases yet) are
-logged and silently ignored — an update check never blocks or interrupts play.
+`src/updater.rs` is the whole mechanism, split into two deliberately
+separate phases:
+
+1. **On startup**, a background thread asks GitHub Releases for the latest
+   tag and, if it's newer than the running build, downloads the matching
+   platform archive and extracts just the binary into a scratch directory
+   (`%TEMP%\craftmjne-update\` or the OS equivalent) — nothing on the actual
+   install is touched yet. A HUD banner tells you it's ready.
+2. **On quit** (the in-game Quit button or the OS window's close button —
+   both route through `QuitRequested`, see `updater::gate_quit`), if a
+   staged update is waiting, the game shows a real "Updating..." banner,
+   performs the actual on-disk swap right then using
+   [`self_update`](https://docs.rs/self_update)'s re-exported
+   [`self_replace`](https://docs.rs/self_replace) crate — a rename-based
+   replace that works even while that same binary is currently running —
+   and only *then* actually exits. The swap takes effect next launch, the
+   same model Steam and VS Code use.
+
+The swap is deliberately **not** done silently mid-session the moment it's
+downloaded: rewriting your own running executable in the background is
+exactly the kind of behavior antivirus/EDR heuristics are built to flag,
+and a silent swap gives no visible confirmation it actually happened. Doing
+it at the one moment the game is already closing means there's a real,
+visible step to point to, and a much smaller, more predictable window for
+anything to interfere with it.
+
+Failures at either phase (offline, rate-limited, no releases yet, the swap
+itself erroring) are shown in the same banner and logged, but never block
+or delay quitting — a failed update never traps you in the game.
 
 This is why the installer targets `%LOCALAPPDATA%` instead of
 `Program Files`: an unprivileged process can overwrite its own exe there,
@@ -325,7 +345,7 @@ src/
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
 ├── commands.rs  # chat command dispatcher (/mode ...) + the cheats-flag rule
 ├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
-└── updater.rs   # UpdaterPlugin: background GitHub-release check + self-swap
+└── updater.rs   # UpdaterPlugin: background check/stage + swap-on-quit
 blocks/
 └── *.json                # one block definition per file - see "Add a block" below
 textures/blocks/

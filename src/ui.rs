@@ -13,7 +13,7 @@ use crate::player::{cursor_grabbed, Player};
 use crate::render::{AtlasImage, IconAtlasImage};
 use crate::save::GameMode;
 use crate::state::AppState;
-use crate::updater::UpdateState;
+use crate::updater::{PendingExit, UpdateState};
 use crate::world::ChunkMap;
 
 #[derive(Component)]
@@ -225,17 +225,53 @@ fn setup_update_banner(mut commands: Commands) {
     ));
 }
 
-/// Reflects the background update check into a small bottom-of-screen
-/// banner: silent while checking or up to date, a one-line note once a
-/// newer version has been downloaded and is waiting for a restart.
-fn update_banner(state: Res<UpdateState>, mut banners: Query<(&mut Text, &mut Visibility), With<UpdateBanner>>) {
+/// Reflects the background update check into a small top-right banner:
+/// silent while checking or up to date, a note once a newer version has
+/// been staged and is waiting for a restart, and - while the game is
+/// actually closing with a staged update - the live "Updating..."/failure
+/// text `updater::apply_update_then_exit` is racing against (see
+/// `PendingExit`), which always takes priority over the ordinary states
+/// since it means the window is about to disappear either way.
+fn update_banner(
+    state: Res<UpdateState>,
+    pending: Option<Res<PendingExit>>,
+    mut banners: Query<(&mut Text, &mut Visibility, &mut BackgroundColor), With<UpdateBanner>>,
+) {
+    let Ok((mut text, mut vis, mut bg)) = banners.single_mut() else { return };
+    const GREEN: Color = Color::srgba(0.12, 0.45, 0.2, 0.9);
+    const RED: Color = Color::srgba(0.55, 0.15, 0.12, 0.9);
+
+    if let Some(pending) = &pending {
+        *vis = Visibility::Visible;
+        match &pending.outcome {
+            None => {
+                text.0 = "Updating... closing now".into();
+                bg.0 = GREEN;
+            }
+            Some(Ok(())) => {
+                text.0 = "Updated - closing now".into();
+                bg.0 = GREEN;
+            }
+            Some(Err(err)) => {
+                text.0 = format!("Update failed, playing on this version: {err}");
+                bg.0 = RED;
+            }
+        }
+        return;
+    }
+
     if !state.is_changed() {
         return;
     }
-    let Ok((mut text, mut vis)) = banners.single_mut() else { return };
     match &*state {
-        UpdateState::Ready { version } => {
+        UpdateState::Ready { version, .. } => {
             text.0 = format!("Craftmjne {version} downloaded - restart to update");
+            bg.0 = GREEN;
+            *vis = Visibility::Visible;
+        }
+        UpdateState::Failed(err) => {
+            text.0 = format!("Update check failed: {err}");
+            bg.0 = RED;
             *vis = Visibility::Visible;
         }
         _ => *vis = Visibility::Hidden,
