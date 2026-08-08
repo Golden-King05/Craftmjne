@@ -3,8 +3,8 @@
 This is a **Rust + Bevy native game** (see `Cargo.toml`, `src/*.rs`). It is a
 complete, working, well-optimized voxel engine framework with procedurally
 generated 16x16 textures, chunked async terrain generation/meshing, physics,
-a main menu with per-user saves, a Windows installer, and a self-updater.
-Full details: `README.md`.
+a day/night cycle, a main menu with per-user saves, a Windows installer, and
+a self-updater. Full details: `README.md`.
 
 ## Do not rewrite this project
 
@@ -531,3 +531,46 @@ etc.) instead of inventing a new approach:
   *test binary's own executable* on disk. `updater.rs`'s tests only exercise
   `gate_quit`'s branching (does a staged update defer the exit or not) and
   deliberately never add `apply_update_then_exit` to the test schedule.
+- **A fully unlit renderer (see `render.rs`'s module docs - no lights, no
+  normals, lighting pre-baked into vertex colors by the mesher) has no real
+  light source to dim for a day/night cycle.** `sky.rs`'s fix: one global
+  `f32` uniform (`ChunkMaterialParams::sky_light`), written into *both*
+  chunk materials once a frame from `update_sky`, multiplied straight into
+  `chunk.wgsl`'s final lit color alongside the existing baked-AO vertex
+  color. Cheap (two tiny uniform writes, no remeshing) despite touching the
+  whole visible world's apparent brightness at once - the general pattern
+  for "this renderer has no per-fragment lighting pass to hook a new light
+  into" is a single small uniform broadcast to the shared materials, not a
+  new render pass.
+- **A billboard that must face the camera at every possible angle,
+  including straight overhead, breaks `Transform::looking_at` at the
+  overhead instant.** `sky.rs`'s sun/moon orbit passes exactly through the
+  zenith once a cycle (straight up from the camera) - at that instant the
+  look direction is exactly parallel to `Vec3::Y`, `looking_at`'s only
+  degenerate case (forward and up vectors can't both define "which way is
+  right"). Fixed by using `Quat::from_rotation_arc(Vec3::NEG_Z, dir)`
+  instead, which needs no separate up vector at all and so has no pole to
+  break at - safe here specifically because both textures are radially
+  symmetric discs, so the uncontrolled roll `from_rotation_arc` leaves free
+  is never visible. Reach for `looking_at` only when roll actually matters
+  (and the look direction is guaranteed never parallel to `up`); reach for
+  `from_rotation_arc` for anything rotationally symmetric that must face a
+  point from every angle.
+- **Compass directions weren't invented for `sky.rs` - they already existed.**
+  `blocks.rs`'s face-order doc comment (`0:+x east, 1:-x west, 2:+y top,
+  3:-y bottom, 4:+z south, 5:-z north`, driving `TextureScheme::Interface`'s
+  north-face naming) is this engine's one and only definition of which
+  world axis is which cardinal direction. The sun/moon's "rise due east,
+  set due west" reuses it verbatim rather than picking a fresh mapping -
+  worth grepping for before inventing compass semantics anywhere new.
+- **Continuous per-world state that isn't a fluid still needs the same
+  save discipline fluids established.** `sky::DayNightClock` persists via
+  `save::WorldData::time_of_day` (`#[serde(default)]` so a pre-cycle save
+  just resumes at dawn), read in `world::enter_world` and written by both
+  `autosave` and `exit_world` through the same `write_save` every other
+  per-world resource already flows through - not a new persistence
+  mechanism, just one more field riding the existing one. Tested with a
+  plain single-reload round-trip (`tests/headless.rs`'s
+  `time_of_day_persists_across_a_reload`) rather than the fluid-specific
+  two-reload-cycle pattern, since the clock has no "unvisited chunk" concept
+  to lose data through - it's one scalar, not a per-cell scan.

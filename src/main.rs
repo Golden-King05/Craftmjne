@@ -12,7 +12,7 @@ use craftmjne::config::WorldSettings;
 use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::updater::UpdateCheckEnabled;
-use craftmjne::{chat, interact, inventory, menu, player, render, ui, updater, world};
+use craftmjne::{chat, interact, inventory, menu, player, render, sky, ui, updater, world};
 
 struct Args {
     seed: u32,
@@ -85,7 +85,6 @@ fn main() {
                 // behaviors would otherwise race ahead of that.
                 close_when_requested: false,
                 exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
             }),
         )
         .init_state::<AppState>()
@@ -94,6 +93,7 @@ fn main() {
             world::WorldPlugin,
             render::RenderSetupPlugin,
             player::PlayerPlugin,
+            sky::SkyPlugin,
             interact::InteractPlugin,
             inventory::InventoryPlugin,
             chat::ChatPlugin,

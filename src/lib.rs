@@ -16,6 +16,7 @@ pub mod noise;
 pub mod player;
 pub mod render;
 pub mod save;
+pub mod sky;
 pub mod state;
 pub mod terrain;
 pub mod ui;

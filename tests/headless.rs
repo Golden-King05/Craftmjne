@@ -14,6 +14,7 @@ use craftmjne::config::{WorldSettings, CHUNK_SIZE};
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
 use craftmjne::save::{GameMode, SaveStore};
+use craftmjne::sky::DayNightClock;
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::world::{BlockSetEvent, ChunkMap, WorldPlugin};
 
@@ -250,6 +251,28 @@ fn leaving_and_reentering_a_world_persists_edits_and_player_pose() {
 
     // The edited block re-applies once its chunk regenerates.
     assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(edit_pos) == 0, 2000));
+}
+
+/// A fresh world starts its day/night clock at dawn; leaving mid-cycle and
+/// reloading resumes from wherever it was left, rather than resetting - the
+/// same "don't silently lose continuous state on reload" principle as fluid
+/// levels (`water_restores_exactly_after_leaving_and_reentering_a_world`).
+/// `SkyPlugin` itself isn't part of this headless app (it needs rendering
+/// infrastructure this test doesn't set up), so the clock is advanced by
+/// hand here - this test is purely about `world.rs`'s save/load wiring, not
+/// `sky.rs`'s own per-frame advancing (covered by its pure-logic unit tests).
+#[test]
+fn time_of_day_persists_across_a_reload() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert_eq!(app.world().resource::<DayNightClock>().elapsed, 0.0, "a fresh world starts at dawn");
+
+    app.world_mut().resource_mut::<DayNightClock>().elapsed = 543.0;
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update(); // runs `exit_world`, writing the save to disk
+
+    let app2 = reload_app(&temp);
+    assert_eq!(app2.world().resource::<DayNightClock>().elapsed, 543.0);
 }
 
 /// Every fluid cell's exact state (id *and* level) is saved and restored

@@ -66,6 +66,12 @@ Section "Craftmjne" SEC_APP
   File "..\textures\blocks\README.md"
   SetOutPath "$INSTDIR"
 
+  ; Optional custom sun/moon texture folder (see src/sky.rs and
+  ; textures/sky/README.md) - same deal, just the README.
+  SetOutPath "$INSTDIR\textures\sky"
+  File "..\textures\sky\README.md"
+  SetOutPath "$INSTDIR"
+
   WriteRegStr HKCU "Software\Craftmjne" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 

@@ -126,6 +126,11 @@ pub struct WorldData {
     pub edits: Vec<BlockEdit>,
     #[serde(default)]
     pub fluids: Vec<FluidCell>,
+    /// Seconds into the day/night cycle (`sky::DayNightClock::elapsed`) -
+    /// `#[serde(default)]` so a save from before the day/night cycle
+    /// existed just resumes at dawn (`0.0`) instead of failing to load.
+    #[serde(default)]
+    pub time_of_day: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -365,6 +370,7 @@ mod tests {
             player: Some(PlayerSave { x: 1.0, y: 2.0, z: 3.0, yaw: 0.5, pitch: -0.2, fly: true }),
             edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0 }],
             fluids: vec![FluidCell { x: 4, y: 5, z: 6, block: "water".into(), level: 2 }],
+            time_of_day: 456.0,
         };
         store.save_data(&slug, &data).unwrap();
 
@@ -374,6 +380,7 @@ mod tests {
         assert_eq!(loaded.edits[0].block, "stone");
         assert_eq!(loaded.fluids.len(), 1);
         assert_eq!(loaded.fluids[0].level, 2);
+        assert_eq!(loaded.time_of_day, 456.0);
     }
 
     #[test]
@@ -389,6 +396,20 @@ mod tests {
         let data = store.load_data(&slug);
         assert_eq!(data.edits.len(), 1);
         assert!(data.fluids.is_empty());
+    }
+
+    #[test]
+    fn missing_time_of_day_field_in_old_saves_defaults_to_dawn() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("Old World", 1, GameMode::Survival).unwrap();
+        // Simulate a data.json written before the day/night cycle existed.
+        fs::write(
+            store.data_path(&slug),
+            r#"{"player":null,"edits":[],"fluids":[]}"#,
+        )
+        .unwrap();
+        let data = store.load_data(&slug);
+        assert_eq!(data.time_of_day, 0.0);
     }
 
     #[test]

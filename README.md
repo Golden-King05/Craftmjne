@@ -339,6 +339,8 @@ src/
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
 ├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas + icon atlas images, fog
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
+├── sky.rs       # SkyPlugin: day/night clock, sun/moon billboards, sky color + world brightness
+├── celestial.wgsl # the sun/moon fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, pause/cursor, camera
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
@@ -350,6 +352,8 @@ blocks/
 └── *.json                # one block definition per file - see "Add a block" below
 textures/blocks/
 └── *.png                 # optional hand-supplied art overriding a procedural tile - see "Use real texture files" below
+textures/sky/
+└── sun.png / moon.png    # optional hand-supplied sun/moon art - see "Day/night cycle" below
 installer/
 └── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
 .github/workflows/
@@ -415,6 +419,39 @@ session (`world::OriginalFluids`), so an unvisited lake's data is never
 silently dropped either. The tradeoff is exactly what you'd expect from
 "treat it like a real block": a session with a lot of flowing water makes
 for a bigger save file, same as a session with a lot of block edits does.
+
+## Day/night cycle
+
+`src/sky.rs` runs a real-time clock: a **20-minute day** followed by a
+**10-minute night**, repeating forever. The sun rises due east and sets due
+west over the whole day; the moon does the same over the whole night — only
+one is ever up at a time, each completing its entire rise-to-set arc within
+its own phase's duration (a stylized simplification, not a real orbit: no
+latitude, season, or moon phase). "East"/"west" match this engine's
+established compass mapping (`blocks.rs`'s face-order doc: +X east, -X
+west, -Z north, +Z south).
+
+Both are flat, always-camera-facing billboards orbiting the camera at a
+fixed radius (scaled to stay inside the far clip plane regardless of
+`render_distance`) — cheap, since it needs no new chunk geometry and no
+real light source. This is a fully unlit renderer (see "Performance
+design" below), so instead of dimming an actual light, the day/night cycle
+writes one global brightness multiplier into both chunk materials every
+frame (`ChunkMaterialParams::sky_light`) along with the sky/fog color —
+two tiny uniform writes, no remeshing, despite touching the whole world's
+apparent lighting at once.
+
+The sun and moon are procedurally textured by default (a warm gold disc
+and a pale cratered disc), exactly like block textures: drop a
+`textures/sky/sun.png` or `textures/sky/moon.png` to override one with
+real art instead — see `textures/sky/README.md`. Unlike the block atlas,
+there's no shared resolution to keep in sync; each is one standalone
+sprite used at its own native size.
+
+The clock persists per-world (leaving and reloading resumes the same time
+of day rather than resetting to dawn), the same way fluid state does — see
+"Fluid flow" above for the general "don't silently lose continuous state on
+reload" principle this follows.
 
 ## Extending the framework
 

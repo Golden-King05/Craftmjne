@@ -24,6 +24,7 @@ use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
+use crate::sky::DayNightClock;
 use crate::state::{ActiveWorld, AppState};
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
 
@@ -653,6 +654,7 @@ fn enter_world(
 
     commands.insert_resource(AutosaveTimer::default());
     commands.insert_resource(FluidQueue::default());
+    commands.insert_resource(DayNightClock { elapsed: data.time_of_day });
 
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
@@ -695,6 +697,7 @@ fn write_save(
     map: &ChunkMap,
     original_fluids: &OriginalFluids,
     player: Option<&Player>,
+    clock: &DayNightClock,
 ) {
     let edits = log
         .0
@@ -744,9 +747,13 @@ fn write_save(
         pitch: p.pitch,
         fly: p.fly,
     });
-    let _ = store.save_data(&active.slug, &WorldData { player, edits, fluids });
+    let _ = store.save_data(
+        &active.slug,
+        &WorldData { player, edits, fluids, time_of_day: clock.elapsed },
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn autosave(
     time: Res<Time>,
     mut timer: ResMut<AutosaveTimer>,
@@ -758,6 +765,7 @@ fn autosave(
     map: Res<ChunkMap>,
     original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
+    clock: Res<DayNightClock>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < AUTOSAVE_INTERVAL {
@@ -773,6 +781,7 @@ fn autosave(
         &map,
         &original_fluids,
         players.single().ok(),
+        &clock,
     );
 }
 
@@ -796,6 +805,7 @@ fn exit_world(
     players: Query<&Player>,
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
+    clock: Res<DayNightClock>,
 ) {
     write_save(
         &store,
@@ -806,6 +816,7 @@ fn exit_world(
         &map,
         &original_fluids,
         players.single().ok(),
+        &clock,
     );
 
     for e in &tasks {
@@ -1030,6 +1041,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<OriginalFluids>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
+            .init_resource::<DayNightClock>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)
