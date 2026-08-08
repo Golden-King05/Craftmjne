@@ -26,8 +26,18 @@
 //! resolution or tile-packing to keep in sync, since each is one standalone
 //! sprite - any square PNG is used at its own native size.
 //!
-//! The clock persists per-world (`save::WorldData::time_of_day`) so leaving
-//! and reloading resumes rather than resetting to dawn - the same
+//! The moon additionally cycles through 8 phases (new, waxing crescent,
+//! first quarter, waxing gibbous, full, waning gibbous, last quarter,
+//! waning crescent - see [`DayNightClock::moon_phase`]), one per full
+//! day/night cycle, the same 8-phase-per-day convention Minecraft uses.
+//! Each phase is a separately masked copy of the *same* base moon
+//! texture (procedural or `moon.png`) - see [`moon_lit`] - rather than 8
+//! independent images, so a custom `moon.png` override automatically gets
+//! correct phase shapes with no extra files needed.
+//!
+//! The clock (and moon phase) persists per-world (`save::WorldData
+//! ::time_of_day`/`::day_count`) so leaving and reloading resumes rather
+//! than resetting to dawn/new-moon - the same
 //! don't-silently-lose-continuous-state-on-reload lesson as fluids (see
 //! CLAUDE.md).
 
@@ -85,11 +95,16 @@ pub struct DayNightClock {
     /// Seconds into the current `[0, CYCLE_SECONDS)` cycle. `0` is dawn:
     /// the sun exactly on the eastern horizon, about to rise.
     pub elapsed: f32,
+    /// How many full day/night cycles have elapsed since the world began -
+    /// increments the instant `elapsed` wraps back to `0` (`advance_clock`).
+    /// Only ever consulted through [`Self::moon_phase`]; nothing else reads
+    /// it directly.
+    pub day_count: u32,
 }
 
 impl Default for DayNightClock {
     fn default() -> Self {
-        Self { elapsed: 0.0 }
+        Self { elapsed: 0.0, day_count: 0 }
     }
 }
 
@@ -132,6 +147,16 @@ impl DayNightClock {
         } else {
             0.0
         }
+    }
+
+    /// Which of the 8 moon phases is showing tonight: `0` = new, `2` =
+    /// first quarter, `4` = full, `6` = last quarter, with a waxing
+    /// crescent/gibbous at `1`/`3` and waning crescent/gibbous at `7`/`5` -
+    /// advances by one every full day/night cycle (`advance_clock`), the
+    /// same one-phase-per-day convention Minecraft uses. See [`moon_lit`]
+    /// for how a phase index becomes a lit/dark shape.
+    pub fn moon_phase(&self) -> u8 {
+        (self.day_count % 8) as u8
     }
 }
 
@@ -184,7 +209,12 @@ impl Material for CelestialMaterial {
 #[derive(Resource)]
 struct SkyMaterials {
     sun: Handle<CelestialMaterial>,
-    moon: Handle<CelestialMaterial>,
+    /// One material per moon phase (index = `DayNightClock::moon_phase()`,
+    /// always length 8) - a separate material per phase rather than one
+    /// shared material with a swapped texture handle, so the moon's
+    /// `MeshMaterial3d` component can just be reassigned wholesale when the
+    /// phase changes (see `update_sky`), no per-frame `Assets<Image>` churn.
+    moon_phases: Vec<Handle<CelestialMaterial>>,
 }
 
 /// A unit quad in the XY plane, centered on the origin - scaled to its
@@ -332,6 +362,62 @@ fn sky_texture(dir: &Path, name: &str, procedural: fn(usize) -> Vec<u8>) -> (Vec
         .unwrap_or_else(|| (procedural(SKY_TEXTURE_SIZE), SKY_TEXTURE_SIZE as u32))
 }
 
+/// Whether a point `(nx, ny)` on the moon's disc - normalized so the disc
+/// is the unit circle (`nx² + ny² <= 1`) - falls on the illuminated side
+/// for `phase` (`0..8`, see [`DayNightClock::moon_phase`]).
+///
+/// The boundary is a proper elliptical terminator, not a flat chord: at a
+/// given height `ny`, the disc's edge sits at `sqrt(1 - ny²)`, and the lit
+/// boundary at that height is that same edge scaled by `cos(theta)` - which
+/// collapses to a straight vertical line exactly at the quarter phases
+/// (astronomically correct: cos is 0 there) and bows into a proper curved
+/// crescent/gibbous everywhere else. `phase < 4` (new -> full, waxing) is
+/// lit on the `+x` (east/right) side growing inward from nothing; `phase >
+/// 4` (full -> new, waning) is lit on the `-x` (west/left) side shrinking
+/// the same way - `4` and `0` are special-cased rather than trusting
+/// `cos(PI)`/`cos(0)` to land on an exact float boundary.
+fn moon_lit(nx: f32, ny: f32, phase: u8) -> bool {
+    match phase {
+        0 => false,
+        4 => true,
+        _ => {
+            let theta = phase as f32 * PI / 4.0;
+            let edge = (1.0 - ny * ny).max(0.0).sqrt();
+            if phase < 4 {
+                nx >= theta.cos() * edge
+            } else {
+                nx <= -theta.cos() * edge
+            }
+        }
+    }
+}
+
+/// Masks `pixels` (a `size`x`size` RGBA8 buffer, square) down to just the
+/// portion lit for `phase`, forcing everything else fully transparent -
+/// applied to whichever base moon texture is in play (procedural or a
+/// custom `moon.png`), so a single source image yields all 8 phases with no
+/// extra art required.
+fn mask_moon_phase(pixels: &[u8], size: u32, phase: u8) -> Vec<u8> {
+    let size = size as usize;
+    let mut out = pixels.to_vec();
+    let center = (size as f32 - 1.0) * 0.5;
+    let half = size as f32 * 0.5;
+    for y in 0..size {
+        for x in 0..size {
+            let i = (y * size + x) * 4;
+            if out[i + 3] == 0 {
+                continue; // already transparent outside the base disc
+            }
+            let nx = (x as f32 - center) / half;
+            let ny = (y as f32 - center) / half;
+            if !moon_lit(nx, ny, phase) {
+                out[i + 3] = 0;
+            }
+        }
+    }
+    out
+}
+
 fn upload_sky_image(pixels: Vec<u8>, size: u32) -> Image {
     Image::new(
         Extent3d { width: size, height: size, depth_or_array_layers: 1 },
@@ -359,25 +445,42 @@ fn spawn_sky(
     let (moon_pixels, moon_size) = sky_texture(&dir, "moon", generate_moon_pixels);
 
     let sun_handle = images.add(upload_sky_image(sun_pixels, sun_size));
-    let moon_handle = images.add(upload_sky_image(moon_pixels, moon_size));
     let mesh = meshes.add(quad_mesh());
 
     let sun = materials.add(CelestialMaterial {
         texture: sun_handle,
         params: CelestialParams { tint: LinearRgba::WHITE },
     });
-    let moon = materials.add(CelestialMaterial {
-        texture: moon_handle,
-        params: CelestialParams { tint: LinearRgba::WHITE },
-    });
+    let moon_phases: Vec<Handle<CelestialMaterial>> = (0..8u8)
+        .map(|phase| {
+            let masked = mask_moon_phase(&moon_pixels, moon_size, phase);
+            let handle = images.add(upload_sky_image(masked, moon_size));
+            materials.add(CelestialMaterial {
+                texture: handle,
+                params: CelestialParams { tint: LinearRgba::WHITE },
+            })
+        })
+        .collect();
 
     commands.spawn((Sun, Mesh3d(mesh.clone()), MeshMaterial3d(sun.clone()), Visibility::Hidden));
-    commands.spawn((Moon, Mesh3d(mesh), MeshMaterial3d(moon.clone()), Visibility::Hidden));
-    commands.insert_resource(SkyMaterials { sun, moon });
+    commands.spawn((Moon, Mesh3d(mesh), MeshMaterial3d(moon_phases[0].clone()), Visibility::Hidden));
+    commands.insert_resource(SkyMaterials { sun, moon_phases });
+}
+
+/// Advances `elapsed` by `delta` seconds, wrapping into `[0, CYCLE_SECONDS)`
+/// and bumping `day_count` exactly when that wrap happens - pure logic
+/// pulled out of `advance_clock` so it's directly testable without needing
+/// a full Bevy `Time`/`ResMut` system context.
+fn advance(elapsed: f32, day_count: u32, delta: f32) -> (f32, u32) {
+    let next = (elapsed + delta).rem_euclid(CYCLE_SECONDS);
+    let day_count = if next < elapsed { day_count.wrapping_add(1) } else { day_count };
+    (next, day_count)
 }
 
 fn advance_clock(time: Res<Time>, mut clock: ResMut<DayNightClock>) {
-    clock.elapsed = (clock.elapsed + time.delta_secs()).rem_euclid(CYCLE_SECONDS);
+    let (elapsed, day_count) = advance(clock.elapsed, clock.day_count, time.delta_secs());
+    clock.elapsed = elapsed;
+    clock.day_count = day_count;
 }
 
 /// Every frame: positions/orients whichever of the sun or moon is
@@ -394,14 +497,23 @@ fn update_sky(
     chunk_materials: Res<ChunkMaterials>,
     camera: Query<&Transform, (With<Player>, Without<Sun>, Without<Moon>)>,
     mut sun: Query<(&mut Transform, &mut Visibility), (With<Sun>, Without<Moon>, Without<Player>)>,
-    mut moon: Query<(&mut Transform, &mut Visibility), (With<Moon>, Without<Sun>, Without<Player>)>,
+    mut moon: Query<
+        (&mut Transform, &mut Visibility, &mut MeshMaterial3d<CelestialMaterial>),
+        (With<Moon>, Without<Sun>, Without<Player>),
+    >,
     mut clear_color: ResMut<ClearColor>,
     mut celestial_assets: ResMut<Assets<CelestialMaterial>>,
     mut chunk_assets: ResMut<Assets<ChunkMaterial>>,
 ) {
     let Ok(camera_tf) = camera.single() else { return };
     let Ok((mut sun_tf, mut sun_vis)) = sun.single_mut() else { return };
-    let Ok((mut moon_tf, mut moon_vis)) = moon.single_mut() else { return };
+    let Ok((mut moon_tf, mut moon_vis, mut moon_material)) = moon.single_mut() else { return };
+    let moon_phase_material = &sky_materials.moon_phases[clock.moon_phase() as usize];
+    // The moon phase only actually changes once every ~30 minutes, but
+    // reassigning every frame is cheap for one quad and matches how the
+    // Transform/Visibility right below it are already handled - simpler
+    // than change-detecting a value that barely ever changes.
+    *moon_material = MeshMaterial3d(moon_phase_material.clone());
 
     let far = (settings.render_distance * CHUNK_SIZE) as f32 * 2.0;
     let radius = far * ORBIT_FRAC_OF_FAR;
@@ -437,7 +549,7 @@ fn update_sky(
         moon_tf.scale = Vec3::splat(size);
         moon_tf.rotation = facing;
     }
-    if let Some(mat) = celestial_assets.get_mut(&sky_materials.moon) {
+    if let Some(mat) = celestial_assets.get_mut(moon_phase_material) {
         mat.params.tint.alpha = if !is_day { fade } else { 0.0 };
     }
 
@@ -481,11 +593,37 @@ mod tests {
         assert!(clock.is_day());
         assert_eq!(clock.phase_progress(), 0.0);
         assert_eq!(clock.daylight(), 0.0); // sun is exactly on the horizon
+        assert_eq!(clock.moon_phase(), 0); // new moon
+    }
+
+    #[test]
+    fn moon_phase_advances_once_per_day_count_and_wraps_every_eight() {
+        for (day_count, expected) in [(0, 0), (1, 1), (4, 4), (7, 7), (8, 0), (9, 1), (100, 4)] {
+            let clock = DayNightClock { day_count, ..Default::default() };
+            assert_eq!(clock.moon_phase(), expected, "day_count {day_count}");
+        }
+    }
+
+    #[test]
+    fn advance_bumps_day_count_exactly_when_the_cycle_wraps() {
+        let (elapsed, day_count) = advance(CYCLE_SECONDS - 1.0, 3, 0.5);
+        assert!(elapsed > CYCLE_SECONDS - 1.0, "not wrapping yet");
+        assert_eq!(day_count, 3, "must not bump before the wrap actually happens");
+
+        let (elapsed, day_count) = advance(elapsed, day_count, 1.0);
+        assert!(elapsed < 1.0, "this step should have wrapped");
+        assert_eq!(day_count, 4);
+    }
+
+    #[test]
+    fn advance_never_bumps_day_count_mid_cycle() {
+        let (_, day_count) = advance(0.0, 7, DAY_SECONDS);
+        assert_eq!(day_count, 7, "reaching night from dawn is not a wrap");
     }
 
     #[test]
     fn the_clock_stays_within_one_cycle_and_wraps_smoothly() {
-        let mut clock = DayNightClock { elapsed: CYCLE_SECONDS - 1.0 };
+        let mut clock = DayNightClock { elapsed: CYCLE_SECONDS - 1.0, ..Default::default() };
         clock.elapsed = (clock.elapsed + 2.0).rem_euclid(CYCLE_SECONDS);
         assert!((clock.elapsed - 1.0).abs() < 1e-4, "expected to wrap just past 0, got {}", clock.elapsed);
     }
@@ -494,7 +632,7 @@ mod tests {
     fn day_lasts_exactly_twenty_minutes_and_night_ten() {
         assert_eq!(DAY_SECONDS, 1200.0);
         assert_eq!(NIGHT_SECONDS, 600.0);
-        let mut clock = DayNightClock { elapsed: DAY_SECONDS - 0.001 };
+        let mut clock = DayNightClock { elapsed: DAY_SECONDS - 0.001, ..Default::default() };
         assert!(clock.is_day());
         clock.elapsed = DAY_SECONDS;
         assert!(!clock.is_day(), "night must start the instant DAY_SECONDS elapses");
@@ -504,11 +642,11 @@ mod tests {
 
     #[test]
     fn daylight_peaks_at_solar_noon_and_is_zero_all_night() {
-        let noon = DayNightClock { elapsed: DAY_SECONDS / 2.0 };
+        let noon = DayNightClock { elapsed: DAY_SECONDS / 2.0, ..Default::default() };
         assert!((noon.daylight() - 1.0).abs() < 1e-5, "expected full daylight at the midpoint, got {}", noon.daylight());
 
         for frac in [0.0, 0.25, 0.5, 0.75, 0.999] {
-            let night = DayNightClock { elapsed: DAY_SECONDS + NIGHT_SECONDS * frac };
+            let night = DayNightClock { elapsed: DAY_SECONDS + NIGHT_SECONDS * frac, ..Default::default() };
             assert_eq!(night.daylight(), 0.0, "the moon must never brighten the world");
         }
     }
@@ -517,14 +655,14 @@ mod tests {
     fn sunrise_and_sunset_sit_exactly_on_the_east_west_horizon() {
         let radius = 100.0;
 
-        let sunrise = DayNightClock { elapsed: 0.0 };
+        let sunrise = DayNightClock { elapsed: 0.0, ..Default::default() };
         let rise_pos = celestial_offset(sunrise.phase_angle(), radius);
         assert!((rise_pos - Vec3::new(radius, 0.0, 0.0)).length() < 1e-3, "sunrise should sit due east: {rise_pos:?}");
 
         // Just shy of DAY_SECONDS is still day (see
         // `day_lasts_exactly_twenty_minutes_and_night_ten`), with progress
         // essentially at 1 - i.e. the sun an instant from setting.
-        let almost_sunset = DayNightClock { elapsed: DAY_SECONDS - 1e-3 };
+        let almost_sunset = DayNightClock { elapsed: DAY_SECONDS - 1e-3, ..Default::default() };
         assert!(almost_sunset.is_day());
         let set_pos = celestial_offset(almost_sunset.phase_angle(), radius);
         assert!((set_pos - Vec3::new(-radius, 0.0, 0.0)).length() < 1e-3, "sunset should sit due west: {set_pos:?}");
@@ -532,7 +670,7 @@ mod tests {
 
     #[test]
     fn zenith_sits_straight_up_with_no_east_west_drift() {
-        let noon = DayNightClock { elapsed: DAY_SECONDS / 2.0 };
+        let noon = DayNightClock { elapsed: DAY_SECONDS / 2.0, ..Default::default() };
         let pos = celestial_offset(noon.phase_angle(), 100.0);
         assert!(pos.x.abs() < 1e-3, "zenith should have no east/west offset: {pos:?}");
         assert!((pos.y - 100.0).abs() < 1e-3, "zenith should be straight up: {pos:?}");
@@ -562,5 +700,71 @@ mod tests {
     #[test]
     fn load_custom_sky_texture_returns_none_when_the_file_is_missing() {
         assert!(load_custom_sky_texture(Path::new("/nonexistent/dir"), "sun").is_none());
+    }
+
+    #[test]
+    fn new_moon_is_fully_dark_and_full_moon_is_fully_lit() {
+        for &(nx, ny) in &[(0.0, 0.0), (0.9, 0.0), (0.0, 0.9), (-0.9, -0.9)] {
+            assert!(!moon_lit(nx, ny, 0), "new moon should have nothing lit at ({nx}, {ny})");
+            assert!(moon_lit(nx, ny, 4), "full moon should have everything lit at ({nx}, {ny})");
+        }
+    }
+
+    #[test]
+    fn quarter_phases_split_the_disc_exactly_in_half_along_the_equator() {
+        // At the equator (ny=0) a quarter's terminator is an exact vertical
+        // line (cos(PI/2)==0), so this is the one height where a plain
+        // sign check is meaningful without float slop from the curve.
+        assert!(!moon_lit(-0.5, 0.0, 2), "first quarter: west half should be dark");
+        assert!(moon_lit(0.5, 0.0, 2), "first quarter: east half should be lit");
+        assert!(moon_lit(-0.5, 0.0, 6), "last quarter: west half should be lit");
+        assert!(!moon_lit(0.5, 0.0, 6), "last quarter: east half should be dark");
+    }
+
+    #[test]
+    fn waxing_phases_are_lit_toward_the_east_and_waning_toward_the_west() {
+        // Deep in the "far" horizontal extreme opposite of the growth
+        // direction, a thin crescent/gibbous should be unambiguous.
+        assert!(moon_lit(0.95, 0.0, 1), "waxing crescent should show a lit sliver in the east");
+        assert!(!moon_lit(-0.95, 0.0, 1), "waxing crescent's west edge should stay dark");
+        assert!(!moon_lit(-0.95, 0.0, 3), "waxing gibbous's dark sliver should be in the west");
+        assert!(moon_lit(0.95, 0.0, 3), "waxing gibbous should be lit almost everywhere else");
+
+        assert!(moon_lit(-0.95, 0.0, 7), "waning crescent should show a lit sliver in the west");
+        assert!(!moon_lit(0.95, 0.0, 7), "waning crescent's east edge should stay dark");
+        assert!(!moon_lit(0.95, 0.0, 5), "waning gibbous's dark sliver should be in the east");
+        assert!(moon_lit(-0.95, 0.0, 5), "waning gibbous should be lit almost everywhere else");
+    }
+
+    #[test]
+    fn the_terminator_curves_with_the_disc_instead_of_cutting_a_flat_chord() {
+        // A flat vertical chord would put the lit/dark boundary at the same
+        // nx for every ny. The real (elliptical) terminator's threshold is
+        // `cos(theta) * sqrt(1 - ny^2)` - it shrinks toward 0 away from the
+        // equator, so a fixed nx that's dark at the equator can cross into
+        // lit territory further out, which a flat chord never would.
+        assert!(!moon_lit(0.5, 0.0, 1), "x=0.5 should be dark at the equator (< cos(PI/4))");
+        assert!(moon_lit(0.5, 0.75, 1), "the same x should be lit further out, as the threshold shrinks");
+    }
+
+    #[test]
+    fn mask_moon_phase_only_ever_removes_pixels_never_adds_them() {
+        let base = generate_moon_pixels(SKY_TEXTURE_SIZE);
+        for phase in 0..8u8 {
+            let masked = mask_moon_phase(&base, SKY_TEXTURE_SIZE as u32, phase);
+            assert_eq!(masked.len(), base.len());
+            for i in (3..masked.len()).step_by(4) {
+                assert!(masked[i] == 0 || masked[i] == base[i], "phase {phase}: masking must not invent new opacity");
+                if base[i] == 0 {
+                    assert_eq!(masked[i], 0, "phase {phase}: already-transparent pixels must stay transparent");
+                }
+            }
+        }
+        // New moon: literally nothing survives masking.
+        let new_moon = mask_moon_phase(&base, SKY_TEXTURE_SIZE as u32, 0);
+        assert!(new_moon.iter().skip(3).step_by(4).all(|&a| a == 0));
+        // Full moon: masking is a no-op - every already-opaque pixel stays opaque.
+        let full_moon = mask_moon_phase(&base, SKY_TEXTURE_SIZE as u32, 4);
+        assert_eq!(full_moon, base);
     }
 }

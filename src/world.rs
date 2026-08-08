@@ -654,7 +654,7 @@ fn enter_world(
 
     commands.insert_resource(AutosaveTimer::default());
     commands.insert_resource(FluidQueue::default());
-    commands.insert_resource(DayNightClock { elapsed: data.time_of_day });
+    commands.insert_resource(DayNightClock { elapsed: data.time_of_day, day_count: data.day_count });
 
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
@@ -749,7 +749,7 @@ fn write_save(
     });
     let _ = store.save_data(
         &active.slug,
-        &WorldData { player, edits, fluids, time_of_day: clock.elapsed },
+        &WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count },
     );
 }
 

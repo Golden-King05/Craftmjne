@@ -131,6 +131,11 @@ pub struct WorldData {
     /// existed just resumes at dawn (`0.0`) instead of failing to load.
     #[serde(default)]
     pub time_of_day: f32,
+    /// How many full day/night cycles have elapsed (`sky::DayNightClock
+    /// ::day_count`), which the moon phase derives from - `#[serde(default)]`
+    /// for the same reason as `time_of_day`, resuming at a new moon.
+    #[serde(default)]
+    pub day_count: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -371,6 +376,7 @@ mod tests {
             edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0 }],
             fluids: vec![FluidCell { x: 4, y: 5, z: 6, block: "water".into(), level: 2 }],
             time_of_day: 456.0,
+            day_count: 12,
         };
         store.save_data(&slug, &data).unwrap();
 
@@ -381,6 +387,7 @@ mod tests {
         assert_eq!(loaded.fluids.len(), 1);
         assert_eq!(loaded.fluids[0].level, 2);
         assert_eq!(loaded.time_of_day, 456.0);
+        assert_eq!(loaded.day_count, 12);
     }
 
     #[test]
@@ -410,6 +417,7 @@ mod tests {
         .unwrap();
         let data = store.load_data(&slug);
         assert_eq!(data.time_of_day, 0.0);
+        assert_eq!(data.day_count, 0);
     }
 
     #[test]

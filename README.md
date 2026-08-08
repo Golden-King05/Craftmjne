@@ -427,9 +427,18 @@ for a bigger save file, same as a session with a lot of block edits does.
 west over the whole day; the moon does the same over the whole night — only
 one is ever up at a time, each completing its entire rise-to-set arc within
 its own phase's duration (a stylized simplification, not a real orbit: no
-latitude, season, or moon phase). "East"/"west" match this engine's
-established compass mapping (`blocks.rs`'s face-order doc: +X east, -X
-west, -Z north, +Z south).
+latitude or season). "East"/"west" match this engine's established compass
+mapping (`blocks.rs`'s face-order doc: +X east, -X west, -Z north, +Z
+south).
+
+The moon also cycles through the 8 standard phases (new, waxing crescent,
+first quarter, waxing gibbous, full, waning gibbous, last quarter, waning
+crescent), advancing one phase every full day/night cycle — the same
+one-phase-per-day convention Minecraft uses. Every phase is a separately
+masked copy of the *same* base moon texture (procedural or a custom
+`moon.png`) using a proper elliptical terminator (not a flat chord — the
+crescent/gibbous shapes genuinely curve with the disc), so overriding the
+moon's art automatically gets correct phase shapes with no extra files.
 
 Both are flat, always-camera-facing billboards orbiting the camera at a
 fixed radius (scaled to stay inside the far clip plane regardless of
@@ -448,10 +457,11 @@ real art instead — see `textures/sky/README.md`. Unlike the block atlas,
 there's no shared resolution to keep in sync; each is one standalone
 sprite used at its own native size.
 
-The clock persists per-world (leaving and reloading resumes the same time
-of day rather than resetting to dawn), the same way fluid state does — see
-"Fluid flow" above for the general "don't silently lose continuous state on
-reload" principle this follows.
+The clock (and moon phase) persists per-world (leaving and reloading
+resumes the same time of day/phase rather than resetting to dawn and a new
+moon), the same way fluid state does — see "Fluid flow" above for the
+general "don't silently lose continuous state on reload" principle this
+follows.
 
 ## Extending the framework
 

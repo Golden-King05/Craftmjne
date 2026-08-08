@@ -16,6 +16,19 @@ art instead; no code changes, no recompile.
 - **PNG, with alpha.** Fully transparent outside whatever silhouette you
   want visible (a circle, if you want to match the built-in look, but
   nothing requires that) - the shape *is* the alpha channel.
+- **`moon.png` should be a *full* moon** - fully lit, no dark side. The
+  game derives all 8 moon phases from it automatically at startup by
+  masking parts of it transparent (see "Moon phases" below), so you only
+  ever need to supply the one fully-lit image.
+
+## Moon phases
+
+The moon cycles through the 8 standard phases (new, waxing crescent, first
+quarter, waxing gibbous, full, waning gibbous, last quarter, waning
+crescent), advancing one phase every full day/night cycle - the same
+one-phase-per-day convention Minecraft uses. There's nothing to configure:
+whichever image ends up as the moon's base texture (procedural or your own
+`moon.png`) gets masked into all 8 shapes automatically.
 
 ## Where this folder needs to live
 

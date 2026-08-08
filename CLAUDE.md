@@ -565,12 +565,45 @@ etc.) instead of inventing a new approach:
   worth grepping for before inventing compass semantics anywhere new.
 - **Continuous per-world state that isn't a fluid still needs the same
   save discipline fluids established.** `sky::DayNightClock` persists via
-  `save::WorldData::time_of_day` (`#[serde(default)]` so a pre-cycle save
-  just resumes at dawn), read in `world::enter_world` and written by both
-  `autosave` and `exit_world` through the same `write_save` every other
-  per-world resource already flows through - not a new persistence
-  mechanism, just one more field riding the existing one. Tested with a
-  plain single-reload round-trip (`tests/headless.rs`'s
-  `time_of_day_persists_across_a_reload`) rather than the fluid-specific
-  two-reload-cycle pattern, since the clock has no "unvisited chunk" concept
-  to lose data through - it's one scalar, not a per-cell scan.
+  `save::WorldData::time_of_day`/`::day_count` (`#[serde(default)]` so a
+  pre-cycle save just resumes at dawn/a new moon), read in
+  `world::enter_world` and written by both `autosave` and `exit_world`
+  through the same `write_save` every other per-world resource already
+  flows through - not a new persistence mechanism, just two more fields
+  riding the existing one. Tested with a plain single-reload round-trip
+  (`tests/headless.rs`'s `time_of_day_and_moon_phase_persist_across_a_reload`)
+  rather than the fluid-specific two-reload-cycle pattern, since the clock
+  has no "unvisited chunk" concept to lose data through - it's two scalars,
+  not a per-cell scan.
+- **A masked-image "phase" system (moon phases, or anything similar - a
+  card face, a damage-state overlay) is simpler as one base texture plus a
+  per-pixel visibility test than as N independent images.** `sky.rs`'s 8
+  moon phases are all generated from the *same* base moon texture
+  (procedural or a custom `moon.png`) by `mask_moon_phase`, which forces
+  everything `moon_lit` calls dark to fully transparent - so a custom texture
+  override automatically gets correct phase shapes with zero extra files,
+  and adding a 9th "phase" concept later would need one new mask function,
+  not 9 new art assets. Don't reach for N separate override slots when "one
+  base image + a pure per-pixel classifier" covers the same ground with far
+  less to keep in sync.
+- **A real elliptical terminator (lit/dark boundary on a sphere-viewed-as-
+  disc) is barely more code than a flat vertical chord, and looks
+  meaningfully more authentic - work out the closed form before settling
+  for the cheap version.** The disc's own edge at height `ny` sits at
+  `sqrt(1-ny²)`; the terminator at that same height is just that edge
+  scaled by `cos(theta)` (`theta` = phase angle, `0`=new, `PI`=full) -
+  `moon_lit`'s entire boundary test is `nx >= cos(theta) * sqrt(1-ny²)`
+  (mirrored for the waning half). This collapses to an exact vertical line
+  at the quarter phases (`cos(PI/2)==0`, astronomically correct - the
+  terminator really is a straight diameter exactly at quarter moon) and
+  bows into a proper tapering lens shape everywhere else, for one extra
+  multiply over a flat-chord version. Verify trig-heavy pure functions like
+  this with a real calculator/script before trusting hand-derived
+  intuition about the shape - an earlier test draft asserted a fixed screen
+  position went dark moving away from the equator, reasoning "the crescent
+  tapers to a point so it must narrow inward"; running the actual formula
+  through Python showed the opposite (the lit *fraction* of each row is
+  constant across latitude, so a fixed x can cross from dark to lit further
+  from the equator, not the reverse) - the geometry was right the whole
+  time, the intuition-first test was wrong, caught by computing rather than
+  asserting first.
