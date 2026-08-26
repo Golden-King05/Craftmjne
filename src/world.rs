@@ -27,6 +27,7 @@ use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldDa
 use crate::sky::DayNightClock;
 use crate::state::{ActiveWorld, AppState};
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
+use crate::texture_report::TextureReport;
 
 const MAX_GEN_TASKS: usize = 12;
 const MAX_MESH_TASKS: usize = 8;
@@ -578,6 +579,7 @@ pub fn compile_content(
     mut commands: Commands,
     mut registry: ResMut<BlockRegistry>,
     mut painters: ResMut<Painters>,
+    mut texture_report: ResMut<TextureReport>,
 ) {
     // Any texture name a block's `texture_scheme` derives (or `textures`
     // names explicitly) that nobody registered a procedural painter for
@@ -587,6 +589,16 @@ pub fn compile_content(
         painters.ensure_registered(&name);
     }
     let atlas = build_atlas(&painters);
+
+    // A real invariant check for `/texture-report`'s red tier, not a fixed
+    // stub: every name the registry actually needs should have ended up in
+    // the atlas via the loop above - this only comes back non-empty if that
+    // guarantee is ever broken by a future change.
+    let missing: Vec<String> =
+        registry.texture_names().filter(|name| !atlas.indices.contains_key(name)).collect();
+    texture_report.extend(atlas.texture_status.clone());
+    texture_report.set_missing(missing);
+
     let icon_atlas = build_icon_atlas(&registry, &atlas);
     let tables = registry.compile(&atlas.indices, atlas.tile_size);
     commands.insert_resource(Atlas(atlas));
@@ -1042,6 +1054,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
             .init_resource::<DayNightClock>()
+            .init_resource::<TextureReport>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)

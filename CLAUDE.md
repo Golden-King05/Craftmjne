@@ -765,3 +765,83 @@ etc.) instead of inventing a new approach:
   `year_schedule` called fresh, since a caching bug that silently returns
   a *plausible-looking but wrong* schedule is exactly the kind of thing
   that wouldn't fail loudly.
+- **When asked to fix "the texture crash" after the moon-events breakdown
+  flagged sun/moon specifically, the fix covered `atlas.rs`'s block/UI
+  tiles too, not just `sky.rs`.** Both had the *exact same* shape of bug
+  (`load_custom_tile`/`load_custom_sky_texture` panicking on a malformed
+  custom PNG - disallowed size, unreadable/corrupt file), and leaving one
+  fixed while the other still crashed would have directly contradicted the
+  user's stated goal in the very message that triggered this ("I don't
+  want anything to be able to break"). Fixing only the literally-named
+  half of a symmetric problem because that's the half that was asked about
+  is a trap worth watching for - when two subsystems share a bug's shape,
+  fix both and say so, rather than waiting to be asked twice.
+- **A malformed custom texture now degrades to a placeholder instead of
+  panicking, via a genuine tri-state return type, not `Option` plus a
+  swallowed error.** `atlas::CustomTile`/`sky::CustomSkyTexture` are
+  `Absent` (no file - use the procedural default, unchanged), `Malformed`
+  (file exists but failed to decode/validate - use the placeholder, *not*
+  this name's real painter, so a broken custom file stays visibly wrong
+  instead of quietly rendering normal-looking art), and `Loaded(pixels,
+  size)`. Collapsing `Malformed` into `Absent` (both "just use `None`")
+  would have silently hidden a real user mistake behind normal-looking
+  output - the whole point of a *distinct* placeholder color is that it
+  has to stay distinguishable from "intentionally not customized."
+  `atlas.rs` reuses one `painted_tile(paint_fn, name, tile_size)` helper
+  for both a name's real painter (the `Absent` case) and the placeholder
+  painter (the `Malformed` case) rather than duplicating the
+  scratch-buffer-then-upscale dance twice.
+- **Reporting "how many textures are broken" needs a way to tell "no
+  custom art, using the block's own intended procedural painter" (fine)
+  apart from "nobody ever registered a painter for this name, `ensure_
+  registered` silently filled the gap with the placeholder" (not fine) -
+  even though `build_atlas_from_dir` calls the exact same `paint` closure
+  either way by the time it runs.** By the time the atlas is built, a
+  name that got `ensure_registered`'s auto-placeholder and a name with a
+  genuinely hand-written painter are indistinguishable from the *call
+  site* - both are just "call this closure." The fix was tracking the
+  distinction at the moment it's still knowable: `Painters` gained a
+  `placeholders: HashSet<String>` field, populated only inside
+  `ensure_registered` itself, checked when `build_atlas_from_dir` decides
+  each `Absent`-case tile's status. General lesson: when two code paths
+  converge to the same shape before the point where you need to
+  distinguish them, the distinguishing fact has to be captured *at the
+  point they diverge*, not reconstructed later from data that no longer
+  carries it.
+- **`/texture-report`'s red ("completely broken") tier is a real computed
+  invariant check, not a hardcoded zero used to look reassuring.** Once
+  every malformed-file crash path is fixed, there's genuinely no reachable
+  "nothing renders at all" state left - so red *should* always read `0`.
+  Rather than special-casing that as a constant (which would silently lie
+  if some future change broke the guarantee), `world::compile_content`
+  diffs `BlockRegistry::texture_names()` against the atlas's own built
+  `indices` after the fact and reports any name that didn't make it in -
+  currently always empty because `ensure_registered` runs for every
+  required name first, but this recomputes that fact fresh every startup
+  instead of assuming it holds forever. This is the same "give the user
+  a redundancy check they can actually trust" instinct as `MoonScheduleCache`
+  falling back to the plain computation on any mismatch, or the
+  `cached_year_schedule_always_agrees_with_the_uncached_reference` test -
+  don't just assert an invariant once in a comment, give the running game
+  a cheap way to keep proving it.
+- **One shared inline-color-marker mechanism (`text_color.rs`) serves both
+  a system-generated report and free-form player chat, because `ChatLog::
+  push` is the single place any text - typed or generated - enters the
+  scrollback.** `/texture-report` builds its counts with `text_color::
+  colorize(text, hex)` (wraps text in `~(#hex)~...~(#hex)~`); a player can
+  type the exact same syntax by hand. Neither has a separate rendering
+  path - `ChatLog::push` parses every message once via `parse_colored_
+  segments`, and `chat::sync_chat_ui` renders whatever segments came out.
+  **The marker is a toggle, not a matched pair**: the first `~(#hex)~`
+  starts a colored run using that hex, and the next one ends it
+  *regardless of what hex digits it contains* - deliberately, so a player
+  mistyping one digit in the closing marker still closes the span instead
+  of coloring the rest of their message by accident. Bevy's rich-text API
+  for mixing colors within one text block is `TextSpan` child entities
+  under a `Text` root (see `TextSpan`'s own doc example: "children must be
+  `TextSpan`, not `Text`") - `sync_chat_ui` puts segment 0 directly on the
+  existing `ChatLogText` root entity and respawns the rest as `TextSpan`
+  children each frame (`despawn_related::<Children>()` then
+  `with_children`, the same rebuild-the-subtree pattern as `ui::
+  rebuild_hotbar`), which is simple enough at `VISIBLE_MESSAGES`-line
+  scale that diffing instead of respawning isn't worth the complexity.

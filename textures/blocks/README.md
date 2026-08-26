@@ -10,9 +10,11 @@ one specific tile with real art instead; no code changes, no recompile.
   "Texture scheme" below for how a block's `texture_scheme` (in its
   `blocks/*.json` file) picks the names it looks for per face, and
   `blocks.rs`'s module docs for the full schema.
-- **Square, and 16×16, 32×32, or 64×64 pixels.** Startup panics with a
-  clear message if a file is some other size — better than silently
-  stretching or cropping your art.
+- **Square, and 16×16, 32×32, or 64×64 pixels.** A file that isn't (or that
+  won't decode as a PNG at all) never crashes the game - it renders as the
+  same magenta/black checkerboard placeholder described below, and
+  `/texture-report` in chat will call it out as "broken but functioning" so
+  you know to fix it, instead of silently stretching or cropping your art.
 - **PNG, with alpha.** Fully opaque (alpha 255) unless the block itself is
   meant to be transparent (glass, leaves) or translucent (water).
 - **Optional, per-tile.** Only supply the ones you actually have art for —

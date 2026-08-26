@@ -87,25 +87,54 @@ impl TilePainter<'_> {
 
 pub type PaintFn = Box<dyn Fn(&mut TilePainter, &mut dyn FnMut() -> f32) + Send + Sync>;
 
+/// Whether a texture ended up as real art or the auto-generated "missing
+/// texture" placeholder - shared between `atlas.rs` (block/UI tiles) and
+/// `sky.rs` (sun/moon), aggregated by `texture_report::TextureReport` for
+/// `/texture-report` (`commands.rs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextureStatus {
+    /// Real art (procedural, or a valid custom override) - working as
+    /// intended.
+    Working,
+    /// Fell back to the checkerboard placeholder - a custom file existed
+    /// but failed to load, or nothing was ever registered for this name.
+    /// The game keeps running; this is a visible, non-fatal problem.
+    Placeholder,
+}
+
 /// Ordered painter list; atlas tile index = registration order.
-#[derive(Resource)]
-pub struct Painters(pub Vec<(String, PaintFn)>);
+#[derive(Resource, Default)]
+pub struct Painters {
+    entries: Vec<(String, PaintFn)>,
+    /// Names that got the automatic placeholder via `ensure_registered`
+    /// rather than a real hand-written painter - tracked so
+    /// `build_atlas_from_dir` can tell "no custom art, using the block's own
+    /// intended procedural painter" (working as intended) apart from
+    /// "nobody ever wrote a painter for this name" (broken-but-functioning),
+    /// which otherwise look identical by the time `build_atlas` runs
+    /// `paint` for either case.
+    placeholders: std::collections::HashSet<String>,
+}
 
 impl Painters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn register(
         &mut self,
         name: &str,
         f: impl Fn(&mut TilePainter, &mut dyn FnMut() -> f32) + Send + Sync + 'static,
     ) {
         assert!(
-            self.0.iter().all(|(n, _)| n != name),
+            self.entries.iter().all(|(n, _)| n != name),
             "painter {name:?} already registered"
         );
-        self.0.push((name.into(), Box::new(f)));
+        self.entries.push((name.into(), Box::new(f)));
     }
 
     fn contains(&self, name: &str) -> bool {
-        self.0.iter().any(|(n, _)| n == name)
+        self.entries.iter().any(|(n, _)| n == name)
     }
 
     /// Registers the "missing texture" placeholder painter under `name` if
@@ -118,6 +147,7 @@ impl Painters {
     pub fn ensure_registered(&mut self, name: &str) {
         if !self.contains(name) {
             self.register(name, missing_texture_painter);
+            self.placeholders.insert(name.to_string());
         }
     }
 }
@@ -146,6 +176,9 @@ pub struct AtlasData {
     /// The resolution this atlas actually got built at - see the module
     /// docs. One of [`ALLOWED_TILE_SIZES`].
     pub tile_size: usize,
+    /// Per-name load outcome, same order as `painters` was registered in -
+    /// what `world::compile_content` feeds into `texture_report::TextureReport`.
+    pub texture_status: Vec<(String, TextureStatus)>,
 }
 
 impl AtlasData {
@@ -173,31 +206,39 @@ fn find_textures_dir() -> PathBuf {
     PathBuf::from("textures").join("blocks")
 }
 
-/// Loads a hand-supplied tile for `name` from `<dir>/<name>.png`, decoded
-/// to raw RGBA8 plus its native size - `None` (not an error) if the file
-/// just isn't there, since falling back to the procedural painter for
-/// anything not yet supplied is the whole point. Panics on a *malformed*
-/// file (disallowed dimensions, unreadable/corrupt PNG) instead of
-/// silently falling back - a broken file sitting in `textures/blocks/` is
-/// far more likely a mistake worth surfacing loudly than something to
-/// paper over with a procedural placeholder nobody asked for, matching how
-/// `blocks::load_from_dir` treats a malformed block file.
-fn load_custom_tile(dir: &Path, name: &str) -> Option<(Vec<u8>, usize)> {
+/// The outcome of looking for a hand-supplied `<dir>/<name>.png`.
+enum CustomTile {
+    /// No file at this path - fall back to the procedural painter, since
+    /// that's the whole point of the override mechanism existing at all.
+    Absent,
+    /// A file exists but failed to decode, or wasn't square/one of
+    /// [`ALLOWED_TILE_SIZES`] - falls back to the "missing texture"
+    /// placeholder (not the block's real procedural painter, and not a
+    /// crash) so a broken custom file is visibly, distinctly wrong instead
+    /// of either taking down the game or silently rendering normal-looking
+    /// art that would mask the mistake.
+    Malformed,
+    Loaded(Vec<u8>, usize),
+}
+
+/// Loads a hand-supplied tile for `name` from `<dir>/<name>.png`, decoded to
+/// raw RGBA8 plus its native size. See [`CustomTile`] for what each outcome
+/// means - nothing here panics; a malformed file degrades to the
+/// placeholder via `build_atlas_from_dir` instead of crashing the game.
+fn load_custom_tile(dir: &Path, name: &str) -> CustomTile {
     let path = dir.join(format!("{name}.png"));
     if !path.is_file() {
-        return None;
+        return CustomTile::Absent;
     }
-    let img = image::open(&path)
-        .unwrap_or_else(|err| panic!("failed to read texture {path:?}: {err}"))
-        .into_rgba8();
+    let Ok(img) = image::open(&path) else {
+        return CustomTile::Malformed;
+    };
+    let img = img.into_rgba8();
     let (w, h) = (img.width() as usize, img.height() as usize);
     if w != h || !ALLOWED_TILE_SIZES.contains(&w) {
-        panic!(
-            "texture {path:?} is {w}x{h}, but every block texture must be square and one of \
-             {ALLOWED_TILE_SIZES:?}"
-        );
+        return CustomTile::Malformed;
     }
-    Some((img.into_raw(), w))
+    CustomTile::Loaded(img.into_raw(), w)
 }
 
 /// Nearest-neighbor upscales a square `src_size`x`src_size` RGBA8 buffer to
@@ -233,41 +274,50 @@ pub fn build_atlas(painters: &Painters) -> AtlasData {
 /// everywhere else, is unaffected - it always resolves the real directory.
 fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
     assert!(
-        painters.0.len() <= ATLAS_TILES * ATLAS_TILES,
+        painters.entries.len() <= ATLAS_TILES * ATLAS_TILES,
         "too many textures for a {ATLAS_TILES}x{ATLAS_TILES} atlas"
     );
 
     // Every custom tile gets decoded once up front, both to pick the
     // atlas's resolution (the largest one found, `BASE_TILE_SIZE` if none)
     // and so the second pass below never re-reads a file from disk.
-    let custom: Vec<Option<(Vec<u8>, usize)>> =
-        painters.0.iter().map(|(name, _)| load_custom_tile(textures_dir, name)).collect();
+    let custom: Vec<CustomTile> =
+        painters.entries.iter().map(|(name, _)| load_custom_tile(textures_dir, name)).collect();
     let tile_size = custom
         .iter()
-        .filter_map(|c| c.as_ref().map(|(_, size)| *size))
+        .filter_map(|c| match c {
+            CustomTile::Loaded(_, size) => Some(*size),
+            _ => None,
+        })
         .max()
         .unwrap_or(BASE_TILE_SIZE);
 
     let atlas_px = ATLAS_TILES * tile_size;
     let mut pixels = vec![0u8; atlas_px * atlas_px * 4];
     let mut indices = HashMap::new();
-    for (i, (name, paint)) in painters.0.iter().enumerate() {
+    let mut texture_status = Vec::with_capacity(painters.entries.len());
+    for (i, (name, paint)) in painters.entries.iter().enumerate() {
         let x0 = (i % ATLAS_TILES) * tile_size;
         let y0 = (i / ATLAS_TILES) * tile_size;
 
-        let tile_pixels: Vec<u8> = match &custom[i] {
-            Some((pixels, size)) if *size == tile_size => pixels.clone(),
-            Some((pixels, size)) => upscale_nearest(pixels, *size, tile_size),
-            None => {
-                let mut scratch = vec![0u8; BASE_TILE_SIZE * BASE_TILE_SIZE * 4];
-                let mut tile = TilePainter { buf: &mut scratch, x0: 0, y0: 0, stride: BASE_TILE_SIZE };
-                let mut rng = mulberry32(hash_str(name));
-                paint(&mut tile, &mut rng);
-                if tile_size == BASE_TILE_SIZE {
-                    scratch
+        let (tile_pixels, status): (Vec<u8>, TextureStatus) = match &custom[i] {
+            CustomTile::Loaded(pixels, size) if *size == tile_size => (pixels.clone(), TextureStatus::Working),
+            CustomTile::Loaded(pixels, size) => {
+                (upscale_nearest(pixels, *size, tile_size), TextureStatus::Working)
+            }
+            // A broken custom file: paint the placeholder itself (not this
+            // name's real painter) so the problem stays visible instead of
+            // silently rendering normal-looking procedural art.
+            CustomTile::Malformed => {
+                (painted_tile(&missing_texture_painter, name, tile_size), TextureStatus::Placeholder)
+            }
+            CustomTile::Absent => {
+                let status = if painters.placeholders.contains(name) {
+                    TextureStatus::Placeholder
                 } else {
-                    upscale_nearest(&scratch, BASE_TILE_SIZE, tile_size)
-                }
+                    TextureStatus::Working
+                };
+                (painted_tile(&**paint, name, tile_size), status)
             }
         };
         for y in 0..tile_size {
@@ -276,13 +326,31 @@ fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
             pixels[dst..dst + tile_size * 4].copy_from_slice(&tile_pixels[src..src + tile_size * 4]);
         }
         indices.insert(name.clone(), i as u16);
+        texture_status.push((name.clone(), status));
     }
-    AtlasData { pixels, indices, tile_size }
+    AtlasData { pixels, indices, tile_size, texture_status }
+}
+
+/// Runs `paint` into a fresh `BASE_TILE_SIZE` scratch tile (seeded from
+/// `name`, so the same name always paints the same way) and upscales to
+/// `tile_size` if the atlas resolution ended up larger - the one place
+/// this happens, shared by both a name's own painter (the common case) and
+/// the placeholder painter standing in for a malformed custom file.
+fn painted_tile(paint: &(dyn Fn(&mut TilePainter, &mut dyn FnMut() -> f32) + Send + Sync), name: &str, tile_size: usize) -> Vec<u8> {
+    let mut scratch = vec![0u8; BASE_TILE_SIZE * BASE_TILE_SIZE * 4];
+    let mut tile = TilePainter { buf: &mut scratch, x0: 0, y0: 0, stride: BASE_TILE_SIZE };
+    let mut rng = mulberry32(hash_str(name));
+    paint(&mut tile, &mut rng);
+    if tile_size == BASE_TILE_SIZE {
+        scratch
+    } else {
+        upscale_nearest(&scratch, BASE_TILE_SIZE, tile_size)
+    }
 }
 
 /// The default 16x16 pixel-art set for the built-in blocks.
 pub fn default_painters() -> Painters {
-    let mut p = Painters(Vec::new());
+    let mut p = Painters::new();
 
     p.register("stone", |t, rng| t.noisy_fill(rng, [127.0, 127.0, 127.0], 26.0));
 
@@ -499,16 +567,18 @@ mod tests {
 
     #[test]
     fn ensure_registered_only_adds_a_painter_when_the_name_is_missing() {
-        let mut painters = Painters(Vec::new());
+        let mut painters = Painters::new();
         painters.register("stone", |t, rng| t.noisy_fill(rng, [1.0, 1.0, 1.0], 0.0));
-        assert_eq!(painters.0.len(), 1);
+        assert_eq!(painters.entries.len(), 1);
 
         painters.ensure_registered("stone"); // already registered - no-op
-        assert_eq!(painters.0.len(), 1);
+        assert_eq!(painters.entries.len(), 1);
+        assert!(!painters.placeholders.contains("stone"));
 
         painters.ensure_registered("ruby"); // missing - gets the placeholder
-        assert_eq!(painters.0.len(), 2);
+        assert_eq!(painters.entries.len(), 2);
         assert!(painters.contains("ruby"));
+        assert!(painters.placeholders.contains("ruby"));
     }
 
     /// A throwaway scratch directory, removed when the guard drops.
@@ -533,9 +603,9 @@ mod tests {
     }
 
     #[test]
-    fn load_custom_tile_returns_none_when_the_file_is_missing() {
+    fn load_custom_tile_returns_absent_when_the_file_is_missing() {
         let dir = temp_dir();
-        assert!(load_custom_tile(&dir.0, "nonexistent").is_none());
+        assert!(matches!(load_custom_tile(&dir.0, "nonexistent"), CustomTile::Absent));
     }
 
     #[test]
@@ -543,7 +613,9 @@ mod tests {
         let dir = temp_dir();
         let pixel = [10, 20, 30, 255];
         write_png(&dir.0.join("ruby.png"), BASE_TILE_SIZE as u32, BASE_TILE_SIZE as u32, pixel);
-        let (pixels, size) = load_custom_tile(&dir.0, "ruby").expect("file exists and is the right size");
+        let CustomTile::Loaded(pixels, size) = load_custom_tile(&dir.0, "ruby") else {
+            panic!("expected a loaded tile");
+        };
         assert_eq!(size, BASE_TILE_SIZE);
         assert_eq!(pixels.len(), BASE_TILE_SIZE * BASE_TILE_SIZE * 4);
         assert_eq!(&pixels[0..4], &pixel);
@@ -554,17 +626,37 @@ mod tests {
         let dir = temp_dir();
         for &size in &ALLOWED_TILE_SIZES {
             write_png(&dir.0.join("ruby.png"), size as u32, size as u32, [1, 2, 3, 255]);
-            let (_, detected) = load_custom_tile(&dir.0, "ruby").unwrap();
+            let CustomTile::Loaded(_, detected) = load_custom_tile(&dir.0, "ruby") else {
+                panic!("expected a loaded tile at size {size}");
+            };
             assert_eq!(detected, size);
         }
     }
 
     #[test]
-    #[should_panic(expected = "must be square and one of")]
-    fn load_custom_tile_rejects_a_disallowed_size() {
+    fn load_custom_tile_reports_malformed_for_a_disallowed_size() {
         let dir = temp_dir();
         write_png(&dir.0.join("ruby.png"), 20, 20, [10, 20, 30, 255]);
-        load_custom_tile(&dir.0, "ruby");
+        assert!(matches!(load_custom_tile(&dir.0, "ruby"), CustomTile::Malformed));
+    }
+
+    #[test]
+    fn load_custom_tile_reports_malformed_for_an_unreadable_file() {
+        let dir = temp_dir();
+        std::fs::write(dir.0.join("ruby.png"), b"not actually a png").unwrap();
+        assert!(matches!(load_custom_tile(&dir.0, "ruby"), CustomTile::Malformed));
+    }
+
+    #[test]
+    fn a_malformed_custom_texture_falls_back_to_the_placeholder_instead_of_panicking() {
+        let dir = temp_dir();
+        write_png(&dir.0.join("stone.png"), 20, 20, [10, 20, 30, 255]); // disallowed size
+        let atlas = build_atlas_from_dir(&default_painters(), &dir.0);
+
+        let status: std::collections::HashMap<_, _> = atlas.texture_status.iter().cloned().collect();
+        assert_eq!(status["stone"], TextureStatus::Placeholder);
+        // Everything else, untouched by the malformed file, is still working.
+        assert_eq!(status["dirt"], TextureStatus::Working);
     }
 
     #[test]

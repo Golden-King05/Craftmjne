@@ -11,8 +11,11 @@ art instead; no code changes, no recompile.
   whichever's missing keeps using its procedural texture.
 - **Square.** Any size - unlike `textures/blocks/`, there's no shared
   atlas resolution or tile-packing to keep in sync, since the sun and moon
-  are each one standalone sprite rendered at their own native size. Startup
-  panics with a clear message if a file isn't square.
+  are each one standalone sprite rendered at their own native size. A file
+  that isn't square (or that won't decode as a PNG at all) never crashes
+  the game - it falls back to a purple/black checkerboard placeholder
+  instead, and `/texture-report` in chat will call it out as "broken but
+  functioning" so you know to fix it.
 - **PNG, with alpha.** Fully transparent outside whatever silhouette you
   want visible (a circle, if you want to match the built-in look, but
   nothing requires that) - the shape *is* the alpha channel.

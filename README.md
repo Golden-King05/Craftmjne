@@ -216,10 +216,20 @@ lines land in a local scrollback that fades out a few seconds after the box
 closes — there's no multiplayer, so this exists mainly as a place to type
 `/`-prefixed commands.
 
-`src/commands.rs` is the dispatcher. The first (and so far only) command is:
+`src/commands.rs` is the dispatcher. The built-in commands are:
 
 - `/mode <survival|creative>` — also accepts `s`/`c` or `1`/`2`. Changes the
   running world's game mode immediately and persists it to `meta.json`.
+- `/texture-report` — a green/yellow/red breakdown of every texture in the
+  game (block tiles from `atlas.rs`, sun/moon from `sky.rs`): how many are
+  real art or the intended procedural default (green, "working"), how many
+  fell back to the checkerboard placeholder because a custom file existed
+  but failed to load (yellow, "broken but functioning" - the game keeps
+  running), and how many are completely unresolvable (red - a real
+  invariant check against `BlockRegistry::texture_names()`, not a
+  hardcoded zero; see `texture_report::TextureReport`'s doc comment for
+  why it should always read `0`). Below the counts it lists which specific
+  names are yellow/red, in matching colors.
 
 Running *any* recognized command — even one that fails with a usage error —
 permanently sets a `cheats: true` flag on the world's `meta.json`
@@ -229,6 +239,22 @@ achievements system can check it and skip a world that's had commands used in
 it. An unrecognized command name (a typo, not a real command) does not set it.
 
 Add a command by extending the match in `commands::execute`.
+
+### Colored chat text
+
+Any chat message — typed by a player or produced by a command like
+`/texture-report` — can wrap part of itself in `~(#RRGGBB)~text~(#RRGGBB)~`
+to render `text` in that hex color, e.g. `~(#ff0000)~careful!~(#ff0000)~`
+shows "careful!" in red. `src/text_color.rs` is the whole mechanism (shared
+by every caller, not a bespoke path per feature): the marker is a **toggle**,
+not a matched pair — the first `~(#hex)~` a parser sees starts a colored run
+using that hex, and the *next* one ends it regardless of what hex digits it
+contains, so a mistyped closer still closes the span instead of leaving the
+rest of the message colored. `chat::ChatLog::push` parses every message once
+when it's added to the scrollback; rendering splits the parsed segments
+across one Bevy `Text` root entity plus `TextSpan` children (Bevy's
+multi-colored-text API), one call reused for anything a player or a command
+sends to chat.
 
 ## Auto-update
 
@@ -345,7 +371,9 @@ src/
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
-├── commands.rs  # chat command dispatcher (/mode ...) + the cheats-flag rule
+├── commands.rs  # chat command dispatcher (/mode, /texture-report ...) + the cheats-flag rule
+├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
+├── texture_report.rs # TextureReport resource: green/yellow/red texture health, read by /texture-report
 ├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
 └── updater.rs   # UpdaterPlugin: background check/stage + swap-on-quit
 blocks/

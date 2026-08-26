@@ -3,6 +3,15 @@
 //! Escape to cancel. There's no multiplayer yet, but `/`-prefixed messages
 //! are routed to `commands::execute` (see that module for the dispatcher
 //! and the list of commands).
+//!
+//! Any message - typed by the player or produced by a command - can embed
+//! `~(#hex)~ text ~(#hex)~` runs (`text_color`'s shared marker syntax) to
+//! color part of itself; `ChatLog::push` parses every message exactly once
+//! at push time (`text_color::parse_colored_segments`), and `sync_chat_ui`
+//! renders the parsed segments as `TextSpan` children of one `Text` root
+//! entity per frame - Bevy's rich-text API for mixing colors within a
+//! single text block (see `TextSpan`'s own docs: "children must be
+//! `TextSpan`, not `Text`").
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
@@ -14,6 +23,8 @@ use crate::commands;
 use crate::inventory::InventoryState;
 use crate::save::{GameMode, SaveStore};
 use crate::state::{ActiveWorld, AppState, PauseState};
+use crate::text_color::{parse_colored_segments, ColoredSegment};
+use crate::texture_report::TextureReport;
 
 const MAX_MESSAGES: usize = 50;
 const VISIBLE_MESSAGES: usize = 8;
@@ -30,12 +41,15 @@ pub struct ChatState {
 }
 
 struct ChatMessage {
-    text: String,
+    /// Parsed once at push time - see `text_color::parse_colored_segments`.
+    segments: Vec<ColoredSegment>,
     age: f32,
 }
 
-/// Local scrollback. `push` is the only way content gets in - a future
-/// command dispatcher would call it too, same as a plain chat message.
+/// Local scrollback. `push` is the only way content gets in - the command
+/// dispatcher (`commands::execute`) calls it too, same as a plain chat
+/// message, which is exactly what lets `/texture-report`'s colored output
+/// reuse this same parsing/rendering path instead of a bespoke one.
 #[derive(Resource, Default)]
 pub struct ChatLog {
     messages: VecDeque<ChatMessage>,
@@ -43,7 +57,8 @@ pub struct ChatLog {
 
 impl ChatLog {
     pub fn push(&mut self, text: impl Into<String>) {
-        self.messages.push_back(ChatMessage { text: text.into(), age: 0.0 });
+        let segments = parse_colored_segments(&text.into());
+        self.messages.push_back(ChatMessage { segments, age: 0.0 });
         while self.messages.len() > MAX_MESSAGES {
             self.messages.pop_front();
         }
@@ -150,6 +165,7 @@ fn chat_text_input(
     mut mode: ResMut<GameMode>,
     mut active: ResMut<ActiveWorld>,
     store: Res<SaveStore>,
+    texture_report: Res<TextureReport>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     if !chat.open {
@@ -179,7 +195,7 @@ fn chat_text_input(
                 let text = chat.input.trim().to_string();
                 if !text.is_empty() {
                     if let Some(rest) = text.strip_prefix('/') {
-                        let outcome = commands::execute(rest, &mut mode, &mut active, &store);
+                        let outcome = commands::execute(rest, &mut mode, &mut active, &store, &texture_report);
                         log.push(outcome.message());
                     } else {
                         log.push(text);
@@ -215,10 +231,42 @@ fn age_messages(time: Res<Time>, mut log: ResMut<ChatLog>) {
     }
 }
 
+/// Flattens the currently-visible messages (in chronological order) into one
+/// segment list, inserting a plain newline segment between messages - pure
+/// so it's directly testable without spinning up UI entities.
+fn visible_log_segments(chat: &ChatState, log: &ChatLog) -> Vec<ColoredSegment> {
+    let visible: Vec<&ChatMessage> = log
+        .messages
+        .iter()
+        .rev()
+        .filter(|m| chat.open || m.age < FADE_AFTER_SECS)
+        .take(VISIBLE_MESSAGES)
+        .collect();
+
+    let mut combined: Vec<ColoredSegment> = Vec::new();
+    for (i, msg) in visible.into_iter().rev().enumerate() {
+        if i > 0 {
+            combined.push(ColoredSegment { text: "\n".to_string(), color: None });
+        }
+        combined.extend(msg.segments.iter().cloned());
+    }
+    if combined.is_empty() {
+        combined.push(ColoredSegment { text: String::new(), color: None });
+    }
+    combined
+}
+
+/// Rebuilds the log's colored text every frame: span 0 lives directly on the
+/// `ChatLogText` root entity (`Text`/`TextColor`), spans 1+ are respawned as
+/// `TextSpan` children - Bevy's rich-text API for mixing colors within one
+/// text block (see `TextSpan`'s own docs). Cheap: at most `VISIBLE_MESSAGES`
+/// messages' worth of segments, so a full despawn/respawn of the child spans
+/// each frame is simpler than diffing them and not worth optimizing away.
 fn sync_chat_ui(
+    mut commands: Commands,
     chat: Res<ChatState>,
     log: Res<ChatLog>,
-    mut log_texts: Query<&mut Text, (With<ChatLogText>, Without<ChatInputText>)>,
+    log_texts: Query<Entity, (With<ChatLogText>, Without<ChatInputText>)>,
     mut input_texts: Query<&mut Text, (With<ChatInputText>, Without<ChatLogText>)>,
     mut input_rows: Query<&mut Visibility, With<ChatInputRow>>,
 ) {
@@ -228,16 +276,23 @@ fn sync_chat_ui(
     if let Ok(mut text) = input_texts.single_mut() {
         text.0 = format!("> {}_", chat.input);
     }
-    let Ok(mut text) = log_texts.single_mut() else { return };
-    let visible: Vec<&str> = log
-        .messages
-        .iter()
-        .rev()
-        .filter(|m| chat.open || m.age < FADE_AFTER_SECS)
-        .take(VISIBLE_MESSAGES)
-        .map(|m| m.text.as_str())
-        .collect();
-    text.0 = visible.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let Ok(log_entity) = log_texts.single() else { return };
+
+    let segments = visible_log_segments(&chat, &log);
+    let (first, rest) = segments.split_first().expect("visible_log_segments always returns at least one segment");
+
+    let mut entity = commands.entity(log_entity);
+    entity.despawn_related::<Children>();
+    entity.insert((Text::new(first.text.clone()), TextColor(first.color.unwrap_or(Color::WHITE))));
+    entity.with_children(|parent| {
+        for seg in rest {
+            parent.spawn((
+                TextSpan::new(seg.text.clone()),
+                TextFont { font_size: 14.0, ..default() },
+                TextColor(seg.color.unwrap_or(Color::WHITE)),
+            ));
+        }
+    });
 }
 
 pub struct ChatPlugin;
@@ -254,5 +309,74 @@ impl Plugin for ChatPlugin {
                     .chain()
                     .run_if(in_state(AppState::InGame)),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(text: &str, age: f32) -> ChatMessage {
+        ChatMessage { segments: parse_colored_segments(text), age }
+    }
+
+    fn joined_text(segs: &[ColoredSegment]) -> String {
+        segs.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn visible_log_segments_joins_messages_with_a_plain_newline() {
+        let chat = ChatState { open: true, ..Default::default() };
+        let mut log = ChatLog::default();
+        log.push("first");
+        log.push("second");
+        assert_eq!(joined_text(&visible_log_segments(&chat, &log)), "first\nsecond");
+    }
+
+    #[test]
+    fn visible_log_segments_hides_faded_messages_when_chat_is_closed() {
+        let chat = ChatState { open: false, ..Default::default() };
+        let mut log = ChatLog::default();
+        log.messages.push_back(msg("old", FADE_AFTER_SECS + 1.0));
+        log.messages.push_back(msg("new", 0.0));
+        assert_eq!(joined_text(&visible_log_segments(&chat, &log)), "new");
+    }
+
+    #[test]
+    fn visible_log_segments_shows_faded_messages_when_chat_is_open() {
+        let chat = ChatState { open: true, ..Default::default() };
+        let mut log = ChatLog::default();
+        log.messages.push_back(msg("old", FADE_AFTER_SECS + 1.0));
+        assert_eq!(joined_text(&visible_log_segments(&chat, &log)), "old");
+    }
+
+    #[test]
+    fn visible_log_segments_caps_at_the_most_recent_visible_messages() {
+        let chat = ChatState { open: true, ..Default::default() };
+        let mut log = ChatLog::default();
+        for i in 0..VISIBLE_MESSAGES + 3 {
+            log.push(format!("m{i}"));
+        }
+        let joined = joined_text(&visible_log_segments(&chat, &log));
+        let lines: Vec<&str> = joined.split('\n').collect();
+        assert_eq!(lines.len(), VISIBLE_MESSAGES);
+        assert_eq!(lines.last(), Some(&format!("m{}", VISIBLE_MESSAGES + 2)).map(|s| s.as_str()).as_ref());
+    }
+
+    #[test]
+    fn visible_log_segments_preserves_a_messages_own_colored_segments() {
+        let chat = ChatState { open: true, ..Default::default() };
+        let mut log = ChatLog::default();
+        log.push("~(#ff0000)~red~(#ff0000)~");
+        let segs = visible_log_segments(&chat, &log);
+        assert!(segs.iter().any(|s| s.text == "red" && s.color.is_some()));
+    }
+
+    #[test]
+    fn an_empty_log_still_produces_one_segment() {
+        let chat = ChatState::default();
+        let log = ChatLog::default();
+        let segs = visible_log_segments(&chat, &log);
+        assert_eq!(segs, vec![ColoredSegment { text: String::new(), color: None }]);
     }
 }

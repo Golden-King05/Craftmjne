@@ -19,6 +19,8 @@ pub mod save;
 pub mod sky;
 pub mod state;
 pub mod terrain;
+pub mod text_color;
+pub mod texture_report;
 pub mod ui;
 pub mod updater;
 pub mod world;

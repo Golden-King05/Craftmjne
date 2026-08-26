@@ -24,7 +24,14 @@
 //! or `textures/sky/moon.png` to override one with real art instead; no
 //! code changes, no recompile. Unlike the block atlas there's no shared
 //! resolution or tile-packing to keep in sync, since each is one standalone
-//! sprite - any square PNG is used at its own native size.
+//! sprite - any square PNG is used at its own native size. A malformed
+//! custom file (unreadable, or not square) never crashes the game - it
+//! falls back to a purple/black checkerboard placeholder instead (see
+//! [`CustomSkyTexture`]), same graceful-degradation convention as block
+//! textures. Both subsystems report their outcome into the shared
+//! `texture_report::TextureReport` resource, which `/texture-report`
+//! (`commands.rs`) reads to show the player an honest working/broken
+//! breakdown.
 //!
 //! The moon additionally cycles through 8 phases (new, waxing crescent,
 //! first quarter, waxing gibbous, full, waning gibbous, last quarter,
@@ -85,11 +92,13 @@ use bevy::render::render_resource::{
 use std::f32::consts::{PI, TAU};
 use std::path::{Path, PathBuf};
 
+use crate::atlas::TextureStatus;
 use crate::config::{WorldSettings, CHUNK_SIZE, SKY_COLOR};
 use crate::noise::{hash_str, mulberry32};
 use crate::player::Player;
 use crate::render::{ChunkMaterial, ChunkMaterials};
 use crate::state::AppState;
+use crate::texture_report::TextureReport;
 
 pub const DAY_SECONDS: f32 = 20.0 * 60.0;
 pub const NIGHT_SECONDS: f32 = 10.0 * 60.0;
@@ -595,24 +604,63 @@ fn find_sky_dir() -> PathBuf {
     PathBuf::from("textures").join("sky")
 }
 
+/// The outcome of looking for a hand-supplied `<dir>/<name>.png`.
+enum CustomSkyTexture {
+    /// No file at this path - fall back to the procedural texture.
+    Absent,
+    /// A file exists but failed to decode, or wasn't square - falls back to
+    /// the purple/black "missing texture" placeholder instead of crashing
+    /// or silently using the normal procedural disc, so a broken custom
+    /// file stays visibly, distinctly wrong.
+    Malformed,
+    Loaded(Vec<u8>, u32),
+}
+
 /// Loads `<dir>/<name>.png` if present, decoded to raw RGBA8 plus its
-/// (square) size - `None` if the file just isn't there, so the procedural
-/// texture is used instead. Panics on a malformed file (not square,
-/// unreadable/corrupt), matching `atlas::load_custom_tile`'s "a broken file
-/// is a mistake worth surfacing loudly, not papering over" precedent.
-fn load_custom_sky_texture(dir: &Path, name: &str) -> Option<(Vec<u8>, u32)> {
+/// (square) size. See [`CustomSkyTexture`] for what each outcome means -
+/// nothing here panics; a malformed file degrades to the placeholder via
+/// [`sky_texture`] instead of crashing the game, mirroring
+/// `atlas::load_custom_tile`'s same graceful-fallback behavior.
+fn load_custom_sky_texture(dir: &Path, name: &str) -> CustomSkyTexture {
     let path = dir.join(format!("{name}.png"));
     if !path.is_file() {
-        return None;
+        return CustomSkyTexture::Absent;
     }
-    let img = image::open(&path)
-        .unwrap_or_else(|err| panic!("failed to read texture {path:?}: {err}"))
-        .into_rgba8();
+    let Ok(img) = image::open(&path) else {
+        return CustomSkyTexture::Malformed;
+    };
+    let img = img.into_rgba8();
     let (w, h) = (img.width(), img.height());
     if w != h {
-        panic!("texture {path:?} is {w}x{h}, but sun/moon textures must be square");
+        return CustomSkyTexture::Malformed;
     }
-    Some((img.into_raw(), w))
+    CustomSkyTexture::Loaded(img.into_raw(), w)
+}
+
+/// A checkerboard purple/black "missing texture" placeholder for a
+/// malformed custom sky texture - the same classic game-dev convention as
+/// `atlas::missing_texture_painter`, just a different color and generated
+/// directly into an RGBA8 buffer rather than through a [`TilePainter`]
+/// (sky textures aren't atlas tiles). Deliberately a plain opaque square
+/// rather than masked to a disc, so a broken sun/moon texture reads as
+/// unmistakably wrong against the round procedural default instead of
+/// quietly blending in.
+fn generate_sky_placeholder_pixels(size: usize) -> Vec<u8> {
+    let mut rng = mulberry32(hash_str("sky-placeholder"));
+    let mut pixels = vec![0u8; size * size * 4];
+    let cell = (size / 8).max(1);
+    for y in 0..size {
+        for x in 0..size {
+            let j = (rng() - 0.5) * 10.0;
+            let c = if (x / cell + y / cell).is_multiple_of(2) { [140.0, 20.0, 220.0] } else { [10.0, 10.0, 10.0] };
+            let i = (y * size + x) * 4;
+            pixels[i] = (c[0] + j).clamp(0.0, 255.0) as u8;
+            pixels[i + 1] = (c[1] + j).clamp(0.0, 255.0) as u8;
+            pixels[i + 2] = (c[2] + j).clamp(0.0, 255.0) as u8;
+            pixels[i + 3] = 255;
+        }
+    }
+    pixels
 }
 
 /// A checkered-disc "moon crater" placement helper: `n` deterministic
@@ -694,9 +742,14 @@ fn generate_moon_pixels(size: usize) -> Vec<u8> {
     pixels
 }
 
-fn sky_texture(dir: &Path, name: &str, procedural: fn(usize) -> Vec<u8>) -> (Vec<u8>, u32) {
-    load_custom_sky_texture(dir, name)
-        .unwrap_or_else(|| (procedural(SKY_TEXTURE_SIZE), SKY_TEXTURE_SIZE as u32))
+fn sky_texture(dir: &Path, name: &str, procedural: fn(usize) -> Vec<u8>) -> (Vec<u8>, u32, TextureStatus) {
+    match load_custom_sky_texture(dir, name) {
+        CustomSkyTexture::Loaded(pixels, size) => (pixels, size, TextureStatus::Working),
+        CustomSkyTexture::Absent => (procedural(SKY_TEXTURE_SIZE), SKY_TEXTURE_SIZE as u32, TextureStatus::Working),
+        CustomSkyTexture::Malformed => {
+            (generate_sky_placeholder_pixels(SKY_TEXTURE_SIZE), SKY_TEXTURE_SIZE as u32, TextureStatus::Placeholder)
+        }
+    }
 }
 
 /// Whether a point `(nx, ny)` on the moon's disc - normalized so the disc
@@ -776,10 +829,12 @@ fn spawn_sky(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<CelestialMaterial>>,
+    mut texture_report: ResMut<TextureReport>,
 ) {
     let dir = find_sky_dir();
-    let (sun_pixels, sun_size) = sky_texture(&dir, "sun", generate_sun_pixels);
-    let (moon_pixels, moon_size) = sky_texture(&dir, "moon", generate_moon_pixels);
+    let (sun_pixels, sun_size, sun_status) = sky_texture(&dir, "sun", generate_sun_pixels);
+    let (moon_pixels, moon_size, moon_status) = sky_texture(&dir, "moon", generate_moon_pixels);
+    texture_report.extend([("sun".to_string(), sun_status), ("moon".to_string(), moon_status)]);
 
     let sun_handle = images.add(upload_sky_image(sun_pixels, sun_size));
     let mesh = meshes.add(quad_mesh());
@@ -1240,8 +1295,67 @@ mod tests {
     }
 
     #[test]
-    fn load_custom_sky_texture_returns_none_when_the_file_is_missing() {
-        assert!(load_custom_sky_texture(Path::new("/nonexistent/dir"), "sun").is_none());
+    fn load_custom_sky_texture_returns_absent_when_the_file_is_missing() {
+        assert!(matches!(
+            load_custom_sky_texture(Path::new("/nonexistent/dir"), "sun"),
+            CustomSkyTexture::Absent
+        ));
+    }
+
+    /// A throwaway scratch directory, removed when the guard drops - mirrors
+    /// `atlas.rs`'s test helper of the same shape.
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn temp_dir() -> TempDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("craftmjne-sky-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    #[test]
+    fn load_custom_sky_texture_reports_malformed_for_a_non_square_file() {
+        let dir = temp_dir();
+        let img = image::RgbaImage::from_fn(20, 10, |_, _| image::Rgba([1, 2, 3, 255]));
+        img.save(dir.0.join("sun.png")).unwrap();
+        assert!(matches!(load_custom_sky_texture(&dir.0, "sun"), CustomSkyTexture::Malformed));
+    }
+
+    #[test]
+    fn load_custom_sky_texture_reports_malformed_for_an_unreadable_file() {
+        let dir = temp_dir();
+        std::fs::write(dir.0.join("moon.png"), b"not actually a png").unwrap();
+        assert!(matches!(load_custom_sky_texture(&dir.0, "moon"), CustomSkyTexture::Malformed));
+    }
+
+    #[test]
+    fn a_malformed_custom_sky_texture_falls_back_to_the_placeholder_instead_of_panicking() {
+        let dir = temp_dir();
+        let img = image::RgbaImage::from_fn(20, 10, |_, _| image::Rgba([1, 2, 3, 255]));
+        img.save(dir.0.join("sun.png")).unwrap();
+
+        let (pixels, size, status) = sky_texture(&dir.0, "sun", generate_sun_pixels);
+        assert_eq!(status, TextureStatus::Placeholder);
+        assert_eq!(size, SKY_TEXTURE_SIZE as u32);
+        assert_eq!(pixels.len(), SKY_TEXTURE_SIZE * SKY_TEXTURE_SIZE * 4);
+        // Fully opaque, unlike the procedural sun/moon which fade to
+        // transparent outside their circular silhouette - the placeholder
+        // is a plain square on purpose.
+        assert!(pixels.chunks_exact(4).all(|px| px[3] == 255));
+    }
+
+    #[test]
+    fn an_absent_custom_sky_texture_uses_the_procedural_default_and_is_working() {
+        let dir = temp_dir(); // no sun.png/moon.png in here
+        let (_, size, status) = sky_texture(&dir.0, "sun", generate_sun_pixels);
+        assert_eq!(status, TextureStatus::Working);
+        assert_eq!(size, SKY_TEXTURE_SIZE as u32);
     }
 
     #[test]

@@ -1,5 +1,7 @@
-//! Chat command dispatcher. `/mode <survival|creative|s|c|1|2>` is the first
-//! command; add more by extending `execute`'s match.
+//! Chat command dispatcher. `/mode <survival|creative|s|c|1|2>` and
+//! `/texture-report` (green/yellow/red working-texture counts, see
+//! `texture_report::TextureReport`) are the built-in commands; add more by
+//! extending `execute`'s match.
 //!
 //! Successfully invoking *any* recognized command permanently marks the
 //! active world's save with `cheats: true` (`save::WorldMeta::cheats`) - the
@@ -9,6 +11,8 @@
 
 use crate::save::{GameMode, SaveStore};
 use crate::state::ActiveWorld;
+use crate::text_color::colorize;
+use crate::texture_report::TextureReport;
 
 pub enum CommandOutcome {
     /// Recognized and executed.
@@ -46,11 +50,42 @@ fn mode_label(mode: GameMode) -> &'static str {
     }
 }
 
+/// Builds `/texture-report`'s message: green/yellow/red counts up top, then
+/// which specific names are yellow (broken but functioning - showing the
+/// placeholder) or red (completely broken - see `TextureReport`'s doc
+/// comment for what that actually means), each colored to match, using the
+/// exact same `~(#hex)~` marker syntax a player could type themselves -
+/// there's no separate rendering path for system-generated color.
+fn texture_report_message(report: &TextureReport) -> String {
+    let (working, placeholder, missing) = report.counts();
+    let (placeholder_names, missing_names) = report.broken_names();
+
+    let mut lines = vec![format!(
+        "Textures: {}  {}  {}",
+        colorize(&format!("{working} working"), "00ff00"),
+        colorize(&format!("{placeholder} broken but functioning"), "ffff00"),
+        colorize(&format!("{missing} completely broken"), "ff0000"),
+    )];
+    if !placeholder_names.is_empty() {
+        lines.push(colorize(&format!("Broken but functioning: {}", placeholder_names.join(", ")), "ffff00"));
+    }
+    if !missing_names.is_empty() {
+        lines.push(colorize(&format!("Completely broken: {}", missing_names.join(", ")), "ff0000"));
+    }
+    lines.join("\n")
+}
+
 /// Executes a `/`-prefixed chat message, `line` being the text with the
 /// leading slash already stripped (e.g. `"mode creative"`). Mutates the live
 /// `GameMode` resource so the effect is immediate, and persists both the new
 /// mode and the cheats flag to the active world's `meta.json`.
-pub fn execute(line: &str, mode: &mut GameMode, active: &mut ActiveWorld, store: &SaveStore) -> CommandOutcome {
+pub fn execute(
+    line: &str,
+    mode: &mut GameMode,
+    active: &mut ActiveWorld,
+    store: &SaveStore,
+    texture_report: &TextureReport,
+) -> CommandOutcome {
     let mut parts = line.split_whitespace();
     let Some(name) = parts.next() else {
         return CommandOutcome::Unknown(String::new());
@@ -66,6 +101,7 @@ pub fn execute(line: &str, mode: &mut GameMode, active: &mut ActiveWorld, store:
             }
             None => CommandOutcome::Usage("Usage: /mode <survival|creative|s|c|1|2>".to_string()),
         },
+        "texture-report" | "texturereport" => CommandOutcome::Ok(texture_report_message(texture_report)),
         _ => CommandOutcome::Unknown(format!("Unknown command: /{name}")),
     };
 
@@ -111,6 +147,10 @@ mod tests {
         ActiveWorld { slug, meta }
     }
 
+    fn no_report() -> TextureReport {
+        TextureReport::default()
+    }
+
     #[test]
     fn mode_command_accepts_all_alias_forms() {
         for (arg, expected) in [
@@ -124,7 +164,7 @@ mod tests {
             let store = temp_store();
             let mut active = active_world(&store);
             let mut mode = GameMode::Survival;
-            let outcome = execute(&format!("mode {arg}"), &mut mode, &mut active, &store);
+            let outcome = execute(&format!("mode {arg}"), &mut mode, &mut active, &store, &no_report());
             assert!(matches!(outcome, CommandOutcome::Ok(_)));
             assert_eq!(mode, expected, "arg {arg}");
             assert_eq!(active.meta.mode, expected, "arg {arg}");
@@ -136,7 +176,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        execute("mode creative", &mut mode, &mut active, &store);
+        execute("mode creative", &mut mode, &mut active, &store, &no_report());
         assert_eq!(mode, GameMode::Creative);
         assert_eq!(store.load_meta(&active.slug).unwrap().mode, GameMode::Creative);
     }
@@ -148,12 +188,12 @@ mod tests {
         assert!(!active.meta.cheats);
         let mut mode = GameMode::Survival;
 
-        execute("mode creative", &mut mode, &mut active, &store);
+        execute("mode creative", &mut mode, &mut active, &store, &no_report());
         assert!(active.meta.cheats);
         assert!(store.load_meta(&active.slug).unwrap().cheats);
 
         // Switching back to survival doesn't un-set it.
-        execute("mode survival", &mut mode, &mut active, &store);
+        execute("mode survival", &mut mode, &mut active, &store, &no_report());
         assert!(active.meta.cheats);
     }
 
@@ -162,7 +202,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = execute("mode not-a-mode", &mut mode, &mut active, &store);
+        let outcome = execute("mode not-a-mode", &mut mode, &mut active, &store, &no_report());
         assert!(matches!(outcome, CommandOutcome::Usage(_)));
         assert_eq!(mode, GameMode::Survival); // unchanged
         assert!(active.meta.cheats); // but the attempt still counts
@@ -173,8 +213,58 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = execute("teleport 0 0 0", &mut mode, &mut active, &store);
+        let outcome = execute("teleport 0 0 0", &mut mode, &mut active, &store, &no_report());
         assert!(matches!(outcome, CommandOutcome::Unknown(_)));
         assert!(!active.meta.cheats);
+    }
+
+    #[test]
+    fn texture_report_prints_green_yellow_red_counts_and_names() {
+        let mut report = TextureReport::default();
+        report.extend([
+            ("stone".to_string(), crate::atlas::TextureStatus::Working),
+            ("ruby".to_string(), crate::atlas::TextureStatus::Placeholder),
+        ]);
+        report.set_missing(vec!["ghost".to_string()]);
+
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let outcome = execute("texture-report", &mut mode, &mut active, &store, &report);
+        let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok") };
+
+        assert!(message.contains("1 working"));
+        assert!(message.contains("1 broken but functioning"));
+        assert!(message.contains("1 completely broken"));
+        assert!(message.contains("ruby"));
+        assert!(message.contains("ghost"));
+        // The counts and the detail lines are wrapped in the shared color
+        // marker syntax, not a bespoke format.
+        assert!(message.contains("~(#00ff00)~"));
+        assert!(message.contains("~(#ffff00)~"));
+        assert!(message.contains("~(#ff0000)~"));
+    }
+
+    #[test]
+    fn texture_report_omits_detail_lines_when_nothing_is_broken() {
+        let mut report = TextureReport::default();
+        report.extend([("stone".to_string(), crate::atlas::TextureStatus::Working)]);
+
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let outcome = execute("texture-report", &mut mode, &mut active, &store, &report);
+        let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok") };
+
+        assert_eq!(message.lines().count(), 1, "no broken/missing means no detail lines: {message:?}");
+    }
+
+    #[test]
+    fn texture_report_counts_as_a_command_use() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        execute("texture-report", &mut mode, &mut active, &store, &no_report());
+        assert!(active.meta.cheats);
     }
 }
