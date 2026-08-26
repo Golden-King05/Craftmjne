@@ -24,8 +24,10 @@ use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
+use crate::sky::DayNightClock;
 use crate::state::{ActiveWorld, AppState};
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
+use crate::texture_report::TextureReport;
 
 const MAX_GEN_TASKS: usize = 12;
 const MAX_MESH_TASKS: usize = 8;
@@ -577,6 +579,7 @@ pub fn compile_content(
     mut commands: Commands,
     mut registry: ResMut<BlockRegistry>,
     mut painters: ResMut<Painters>,
+    mut texture_report: ResMut<TextureReport>,
 ) {
     // Any texture name a block's `texture_scheme` derives (or `textures`
     // names explicitly) that nobody registered a procedural painter for
@@ -586,6 +589,16 @@ pub fn compile_content(
         painters.ensure_registered(&name);
     }
     let atlas = build_atlas(&painters);
+
+    // A real invariant check for `/texture-report`'s red tier, not a fixed
+    // stub: every name the registry actually needs should have ended up in
+    // the atlas via the loop above - this only comes back non-empty if that
+    // guarantee is ever broken by a future change.
+    let missing: Vec<String> =
+        registry.texture_names().filter(|name| !atlas.indices.contains_key(name)).collect();
+    texture_report.extend(atlas.texture_status.clone());
+    texture_report.set_missing(missing);
+
     let icon_atlas = build_icon_atlas(&registry, &atlas);
     let tables = registry.compile(&atlas.indices, atlas.tile_size);
     commands.insert_resource(Atlas(atlas));
@@ -653,6 +666,7 @@ fn enter_world(
 
     commands.insert_resource(AutosaveTimer::default());
     commands.insert_resource(FluidQueue::default());
+    commands.insert_resource(DayNightClock { elapsed: data.time_of_day, day_count: data.day_count });
 
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
@@ -695,6 +709,7 @@ fn write_save(
     map: &ChunkMap,
     original_fluids: &OriginalFluids,
     player: Option<&Player>,
+    clock: &DayNightClock,
 ) {
     let edits = log
         .0
@@ -744,9 +759,13 @@ fn write_save(
         pitch: p.pitch,
         fly: p.fly,
     });
-    let _ = store.save_data(&active.slug, &WorldData { player, edits, fluids });
+    let _ = store.save_data(
+        &active.slug,
+        &WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count },
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn autosave(
     time: Res<Time>,
     mut timer: ResMut<AutosaveTimer>,
@@ -758,6 +777,7 @@ fn autosave(
     map: Res<ChunkMap>,
     original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
+    clock: Res<DayNightClock>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < AUTOSAVE_INTERVAL {
@@ -773,6 +793,7 @@ fn autosave(
         &map,
         &original_fluids,
         players.single().ok(),
+        &clock,
     );
 }
 
@@ -796,6 +817,7 @@ fn exit_world(
     players: Query<&Player>,
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
+    clock: Res<DayNightClock>,
 ) {
     write_save(
         &store,
@@ -806,6 +828,7 @@ fn exit_world(
         &map,
         &original_fluids,
         players.single().ok(),
+        &clock,
     );
 
     for e in &tasks {
@@ -1030,6 +1053,8 @@ impl Plugin for WorldPlugin {
             .init_resource::<OriginalFluids>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
+            .init_resource::<DayNightClock>()
+            .init_resource::<TextureReport>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)

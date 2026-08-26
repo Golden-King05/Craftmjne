@@ -35,6 +35,11 @@ pub struct ChunkMaterialParams {
     pub base_alpha: f32,
     /// Fragments below this alpha are discarded (leaf/glass cutouts).
     pub alpha_cutoff: f32,
+    /// Multiplied into the final lit color - the day/night cycle's cheap
+    /// stand-in for a real light source in this fully-baked-AO unlit
+    /// renderer: `1.0` at full daylight, dimmer at night. See `sky.rs`'s
+    /// `update_sky`, the only system that ever writes this.
+    pub sky_light: f32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -144,6 +149,7 @@ fn setup_render(
         fog_end: view_dist * 0.95,
         base_alpha,
         alpha_cutoff,
+        sky_light: 1.0, // `sky::update_sky` takes over every frame once a world's loaded
     };
 
     let solid = materials.add(ChunkMaterial {

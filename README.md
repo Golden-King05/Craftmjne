@@ -216,10 +216,20 @@ lines land in a local scrollback that fades out a few seconds after the box
 closes — there's no multiplayer, so this exists mainly as a place to type
 `/`-prefixed commands.
 
-`src/commands.rs` is the dispatcher. The first (and so far only) command is:
+`src/commands.rs` is the dispatcher. The built-in commands are:
 
 - `/mode <survival|creative>` — also accepts `s`/`c` or `1`/`2`. Changes the
   running world's game mode immediately and persists it to `meta.json`.
+- `/texture-report` — a green/yellow/red breakdown of every texture in the
+  game (block tiles from `atlas.rs`, sun/moon from `sky.rs`): how many are
+  real art or the intended procedural default (green, "working"), how many
+  fell back to the checkerboard placeholder because a custom file existed
+  but failed to load (yellow, "broken but functioning" - the game keeps
+  running), and how many are completely unresolvable (red - a real
+  invariant check against `BlockRegistry::texture_names()`, not a
+  hardcoded zero; see `texture_report::TextureReport`'s doc comment for
+  why it should always read `0`). Below the counts it lists which specific
+  names are yellow/red, in matching colors.
 
 Running *any* recognized command — even one that fails with a usage error —
 permanently sets a `cheats: true` flag on the world's `meta.json`
@@ -229,6 +239,22 @@ achievements system can check it and skip a world that's had commands used in
 it. An unrecognized command name (a typo, not a real command) does not set it.
 
 Add a command by extending the match in `commands::execute`.
+
+### Colored chat text
+
+Any chat message — typed by a player or produced by a command like
+`/texture-report` — can wrap part of itself in `~(#RRGGBB)~text~(#RRGGBB)~`
+to render `text` in that hex color, e.g. `~(#ff0000)~careful!~(#ff0000)~`
+shows "careful!" in red. `src/text_color.rs` is the whole mechanism (shared
+by every caller, not a bespoke path per feature): the marker is a **toggle**,
+not a matched pair — the first `~(#hex)~` a parser sees starts a colored run
+using that hex, and the *next* one ends it regardless of what hex digits it
+contains, so a mistyped closer still closes the span instead of leaving the
+rest of the message colored. `chat::ChatLog::push` parses every message once
+when it's added to the scrollback; rendering splits the parsed segments
+across one Bevy `Text` root entity plus `TextSpan` children (Bevy's
+multi-colored-text API), one call reused for anything a player or a command
+sends to chat.
 
 ## Auto-update
 
@@ -339,17 +365,23 @@ src/
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
 ├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas + icon atlas images, fog
 ├── chunk.wgsl   # the chunk fragment shader (embedded asset)
+├── sky.rs       # SkyPlugin: day/night clock, sun/moon billboards, sky color + world brightness
+├── celestial.wgsl # the sun/moon fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, pause/cursor, camera
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
-├── commands.rs  # chat command dispatcher (/mode ...) + the cheats-flag rule
+├── commands.rs  # chat command dispatcher (/mode, /texture-report ...) + the cheats-flag rule
+├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
+├── texture_report.rs # TextureReport resource: green/yellow/red texture health, read by /texture-report
 ├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
 └── updater.rs   # UpdaterPlugin: background check/stage + swap-on-quit
 blocks/
 └── *.json                # one block definition per file - see "Add a block" below
 textures/blocks/
 └── *.png                 # optional hand-supplied art overriding a procedural tile - see "Use real texture files" below
+textures/sky/
+└── sun.png / moon.png    # optional hand-supplied sun/moon art - see "Day/night cycle" below
 installer/
 └── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
 .github/workflows/
@@ -415,6 +447,83 @@ session (`world::OriginalFluids`), so an unvisited lake's data is never
 silently dropped either. The tradeoff is exactly what you'd expect from
 "treat it like a real block": a session with a lot of flowing water makes
 for a bigger save file, same as a session with a lot of block edits does.
+
+## Day/night cycle
+
+`src/sky.rs` runs a real-time clock: a **20-minute day** followed by a
+**10-minute night**, repeating forever. The sun rises due east and sets due
+west over the whole day; the moon does the same over the whole night — only
+one is ever up at a time, each completing its entire rise-to-set arc within
+its own phase's duration (a stylized simplification, not a real orbit: no
+latitude, and the calendar below is a plain 12-month year, not a real
+season length). "East"/"west" match this engine's established compass
+mapping (`blocks.rs`'s face-order doc: +X east, -X west, -Z north, +Z
+south).
+
+The moon also cycles through the 8 standard phases (new, waxing crescent,
+first quarter, waxing gibbous, full, waning gibbous, last quarter, waning
+crescent), advancing one phase every full day/night cycle — the same
+one-phase-per-day convention Minecraft uses. Every phase is a separately
+masked copy of the *same* base moon texture (procedural or a custom
+`moon.png`) using a proper elliptical terminator (not a flat chord — the
+crescent/gibbous shapes genuinely curve with the disc), so overriding the
+moon's art automatically gets correct phase shapes with no extra files.
+
+Both are flat, always-camera-facing billboards orbiting the camera at a
+fixed radius (scaled to stay inside the far clip plane regardless of
+`render_distance`) — cheap, since it needs no new chunk geometry and no
+real light source. This is a fully unlit renderer (see "Performance
+design" below), so instead of dimming an actual light, the day/night cycle
+writes one global brightness multiplier into both chunk materials every
+frame (`ChunkMaterialParams::sky_light`) along with the sky/fog color —
+two tiny uniform writes, no remeshing, despite touching the whole world's
+apparent lighting at once.
+
+The sun and moon are procedurally textured by default (a warm gold disc
+and a pale cratered disc), exactly like block textures: drop a
+`textures/sky/sun.png` or `textures/sky/moon.png` to override one with
+real art instead — see `textures/sky/README.md`. Unlike the block atlas,
+there's no shared resolution to keep in sync; each is one standalone
+sprite used at its own native size.
+
+A full moon occasionally gets a special color — purely cosmetic for now,
+no gameplay effect yet. Twice a year there's a **red moon**, once a year a
+**blue moon** (always in summer, never winter), and once a year a **green
+moon** (always in autumn, never spring). Each is a plain color tint
+multiplied into the moon's existing texture (`sky::moon_event_tint`), not
+a separate sprite. A "month" is defined to match the moon's own 8-day
+phase cycle (so every month's full moon lands on the same day-of-month),
+and a "year" is a plain 12-month calendar — `DayNightClock::season` is a
+pure calendar concept with no other effect yet; it exists solely to make
+the winter/spring exclusion rules real.
+
+Which month(s) each event lands on is re-rolled every year (seeded by the
+world's own seed plus the year number — reproducible, not truly random,
+same as terrain generation) rather than fixed, never collides with another
+event that same year, and never lands right next to one either — including
+across a year boundary (a claimed December is never immediately followed
+by a claimed January). There's always at least one plain-moon month
+between any two specials, so a blue/red/green chain can never land three
+months in a row. All of it — how
+often an event happens, which seasons it's excluded from, whether it even
+needs a full moon, whether it needs that breathing-room month — lives in
+one small declarative table (`sky::MOON_EVENTS`), not hand-written per-event
+logic; adding a fourth event or retuning an existing one is a one-line
+table edit, not new code.
+
+Computing a year's schedule from scratch walks forward from year `0`
+(needed for the boundary rule above), so it's `O(year)` — negligible for
+any realistic save, but `update_sky` avoids paying it every single frame
+anyway via `sky::MoonScheduleCache`: since the game only ever advances one
+year at a time, the cache just remembers the previous year's outcome and
+extends it by one, making the common case `O(1)` regardless of how old a
+save gets.
+
+The clock (and moon phase) persists per-world (leaving and reloading
+resumes the same time of day/phase rather than resetting to dawn and a new
+moon), the same way fluid state does — see "Fluid flow" above for the
+general "don't silently lose continuous state on reload" principle this
+follows.
 
 ## Extending the framework
 

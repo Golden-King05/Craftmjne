@@ -3,8 +3,8 @@
 This is a **Rust + Bevy native game** (see `Cargo.toml`, `src/*.rs`). It is a
 complete, working, well-optimized voxel engine framework with procedurally
 generated 16x16 textures, chunked async terrain generation/meshing, physics,
-a main menu with per-user saves, a Windows installer, and a self-updater.
-Full details: `README.md`.
+a day/night cycle, a main menu with per-user saves, a Windows installer, and
+a self-updater. Full details: `README.md`.
 
 ## Do not rewrite this project
 
@@ -531,3 +531,317 @@ etc.) instead of inventing a new approach:
   *test binary's own executable* on disk. `updater.rs`'s tests only exercise
   `gate_quit`'s branching (does a staged update defer the exit or not) and
   deliberately never add `apply_update_then_exit` to the test schedule.
+- **A fully unlit renderer (see `render.rs`'s module docs - no lights, no
+  normals, lighting pre-baked into vertex colors by the mesher) has no real
+  light source to dim for a day/night cycle.** `sky.rs`'s fix: one global
+  `f32` uniform (`ChunkMaterialParams::sky_light`), written into *both*
+  chunk materials once a frame from `update_sky`, multiplied straight into
+  `chunk.wgsl`'s final lit color alongside the existing baked-AO vertex
+  color. Cheap (two tiny uniform writes, no remeshing) despite touching the
+  whole visible world's apparent brightness at once - the general pattern
+  for "this renderer has no per-fragment lighting pass to hook a new light
+  into" is a single small uniform broadcast to the shared materials, not a
+  new render pass.
+- **A billboard that must face the camera at every possible angle,
+  including straight overhead, breaks `Transform::looking_at` at the
+  overhead instant.** `sky.rs`'s sun/moon orbit passes exactly through the
+  zenith once a cycle (straight up from the camera) - at that instant the
+  look direction is exactly parallel to `Vec3::Y`, `looking_at`'s only
+  degenerate case (forward and up vectors can't both define "which way is
+  right"). Fixed by using `Quat::from_rotation_arc(Vec3::NEG_Z, dir)`
+  instead, which needs no separate up vector at all and so has no pole to
+  break at - safe here specifically because both textures are radially
+  symmetric discs, so the uncontrolled roll `from_rotation_arc` leaves free
+  is never visible. Reach for `looking_at` only when roll actually matters
+  (and the look direction is guaranteed never parallel to `up`); reach for
+  `from_rotation_arc` for anything rotationally symmetric that must face a
+  point from every angle.
+- **Compass directions weren't invented for `sky.rs` - they already existed.**
+  `blocks.rs`'s face-order doc comment (`0:+x east, 1:-x west, 2:+y top,
+  3:-y bottom, 4:+z south, 5:-z north`, driving `TextureScheme::Interface`'s
+  north-face naming) is this engine's one and only definition of which
+  world axis is which cardinal direction. The sun/moon's "rise due east,
+  set due west" reuses it verbatim rather than picking a fresh mapping -
+  worth grepping for before inventing compass semantics anywhere new.
+- **Continuous per-world state that isn't a fluid still needs the same
+  save discipline fluids established.** `sky::DayNightClock` persists via
+  `save::WorldData::time_of_day`/`::day_count` (`#[serde(default)]` so a
+  pre-cycle save just resumes at dawn/a new moon), read in
+  `world::enter_world` and written by both `autosave` and `exit_world`
+  through the same `write_save` every other per-world resource already
+  flows through - not a new persistence mechanism, just two more fields
+  riding the existing one. Tested with a plain single-reload round-trip
+  (`tests/headless.rs`'s `time_of_day_and_moon_phase_persist_across_a_reload`)
+  rather than the fluid-specific two-reload-cycle pattern, since the clock
+  has no "unvisited chunk" concept to lose data through - it's two scalars,
+  not a per-cell scan.
+- **A masked-image "phase" system (moon phases, or anything similar - a
+  card face, a damage-state overlay) is simpler as one base texture plus a
+  per-pixel visibility test than as N independent images.** `sky.rs`'s 8
+  moon phases are all generated from the *same* base moon texture
+  (procedural or a custom `moon.png`) by `mask_moon_phase`, which forces
+  everything `moon_lit` calls dark to fully transparent - so a custom texture
+  override automatically gets correct phase shapes with zero extra files,
+  and adding a 9th "phase" concept later would need one new mask function,
+  not 9 new art assets. Don't reach for N separate override slots when "one
+  base image + a pure per-pixel classifier" covers the same ground with far
+  less to keep in sync.
+- **A real elliptical terminator (lit/dark boundary on a sphere-viewed-as-
+  disc) is barely more code than a flat vertical chord, and looks
+  meaningfully more authentic - work out the closed form before settling
+  for the cheap version.** The disc's own edge at height `ny` sits at
+  `sqrt(1-ny²)`; the terminator at that same height is just that edge
+  scaled by `cos(theta)` (`theta` = phase angle, `0`=new, `PI`=full) -
+  `moon_lit`'s entire boundary test is `nx >= cos(theta) * sqrt(1-ny²)`
+  (mirrored for the waning half). This collapses to an exact vertical line
+  at the quarter phases (`cos(PI/2)==0`, astronomically correct - the
+  terminator really is a straight diameter exactly at quarter moon) and
+  bows into a proper tapering lens shape everywhere else, for one extra
+  multiply over a flat-chord version. Verify trig-heavy pure functions like
+  this with a real calculator/script before trusting hand-derived
+  intuition about the shape - an earlier test draft asserted a fixed screen
+  position went dark moving away from the equator, reasoning "the crescent
+  tapers to a point so it must narrow inward"; running the actual formula
+  through Python showed the opposite (the lit *fraction* of each row is
+  constant across latitude, so a fixed x can cross from dark to lit further
+  from the equator, not the reverse) - the geometry was right the whole
+  time, the intuition-first test was wrong, caught by computing rather than
+  asserting first.
+- **A cosmetic-only calendar/season system is still a real feature worth
+  building deliberately, not a rushed stub - but it also doesn't need to
+  reach further than what it's actually gating.** Asked to add red/blue/
+  green full moons where blue must never fall in winter and green must
+  never fall in spring, the honest blocker was that no season concept
+  existed yet - rather than silently picking arbitrary months and hoping
+  they'd stay non-conflicting forever, or silently building a full
+  temperature/biome-affecting season system nobody asked for, the right
+  move was asking whether to build a minimal one now (see `AskUserQuestion`
+  - this is exactly the kind of scope-defining call that's the user's to
+  make, not an assumption to bake in either direction). `sky::Season` is
+  the result: a pure calendar enum derived from `DayNightClock::day_count`
+  (`DAYS_PER_MONTH=8` intentionally matches the moon's own phase cycle, so
+  a full moon always lands mid-month; `MONTHS_PER_YEAR=12` in the real
+  spring/summer/autumn/winter order), consulted by exactly one thing
+  (`moon_event`) and nothing else - no terrain/temperature/gameplay hook,
+  since none of that was asked for. (A follow-up request replaced the
+  original fixed-month constants with a random-per-year schedule - see the
+  next entry - but `Season` itself and its single consumer are unchanged.)
+- **A recolor-only game event ("this full moon is special") is a tint
+  multiply on the existing material, never a second texture or asset.**
+  `sky::moon_event_tint` returns a plain `LinearRgba`; `update_sky` folds
+  it straight into the same `CelestialParams.tint` uniform already driving
+  the horizon fade (`tint.rgb` = the event color, `tint.a` = the existing
+  fade), applied only to whichever phase material is currently shown - so
+  red/blue/green moons cost nothing beyond three constants and one extra
+  multiply already sitting in the per-frame update, no new draw call, no
+  new mesh, no new image upload. Reach for a tint uniform before a new
+  sprite/material any time the "special" version is still fundamentally
+  the same shape as the normal one.
+- **When a user explicitly asks to avoid rewriting the same rule N times,
+  that's a request for one declarative table + one generic algorithm, not
+  N parallel `if`/`match` arms that happen to look similar.** A follow-up
+  to the red/blue/green moon feature above asked for: only ever on a full
+  moon (a reusable yes/no, defaulting no); season exclusion expressed as a
+  plain list ("spring, summer, ..." with commas for more than one) instead
+  of a hand-picked month + a bespoke test proving it doesn't conflict; red
+  bumped from "every month" to twice a year; and blue/green (now red too)
+  landing on a *different, randomly chosen* month each year instead of a
+  fixed one. `sky::MoonEventDef` is the single declarative shape all three
+  events share (`per_year`, `excluded_seasons: &[Season]`,
+  `requires_full_moon: bool`) collected into one `MOON_EVENTS` table;
+  `year_schedule` is the one generic algorithm that reads it - looping the
+  table, for each entry filtering `0..MONTHS_PER_YEAR` down to months both
+  unclaimed *this year* and not in an excluded season, then drawing
+  `per_year` of them via a seeded RNG and marking them claimed before the
+  next entry runs. Adding a fourth event, or changing red from 2/year to
+  3, is a one-line table edit - no new branch anywhere. **The "random"
+  still has to be the engine's usual seeded-not-true-random**, so a reload
+  shows the same year's schedule and different worlds/years genuinely
+  differ: seeded from `hash_str("moon-events-{world_seed}-{year}")`, with
+  each table entry's own RNG stream derived by offsetting that seed by a
+  large prime times its index (`i * 104_729`) - cheap, no stored/cached
+  schedule needed anywhere, since `year_schedule` is a pure function of
+  `(world_seed, year)` and can just be recomputed on demand (currently:
+  every frame in `update_sky`, negligible cost for 12 months x 3 events).
+  **Claim-as-you-go is what makes collisions structurally impossible**
+  without any cross-event coordination: since each entry's candidate pool
+  excludes every month already claimed by an earlier entry in the same
+  `year_schedule` call, two events can never end up double-booking a
+  month regardless of how their excluded seasons happen to overlap (blue's
+  non-winter pool and green's non-spring pool actually *do* overlap in
+  summer/autumn once expressed this generically - unlike the old fixed-
+  month version where that never came up) - test this invariant directly
+  (`year_schedule_always_places_the_right_counts_with_no_overlap_or_excluded_season`
+  loops several seeds/years and asserts zero double-booked months), don't
+  just trust the algorithm's shape to guarantee it.
+- **"No two X back to back" is a constraint on the *shared claimed set*,
+  not a per-event rule - implement it once, in the one place that already
+  tracks what's claimed.** A follow-up asked that no two special months
+  ever land adjacent (any event next to any other, not just the same kind
+  twice), as a reusable opt-in flag like `requires_full_moon`. The natural
+  place to enforce it is inside `year_schedule`'s own claiming loop
+  (`requires_gap_month` on `MoonEventDef`, checked by `touches_a_claimed_
+  month` against the in-progress `schedule` array) rather than as a
+  separate post-hoc validation pass - the function already recomputes each
+  occurrence's eligible pool fresh against the current claims (needed
+  anyway so an event drawing 2+ occurrences, like red, can't land its own
+  two next to each other either), so the gap check is just one more
+  predicate in that same filter. **Before trusting a greedy sequential
+  picker to always satisfy a new constraint, measure the failure rate
+  rather than assume it from the algorithm's shape** - added a throwaway
+  test that swept 15,000 (seed, year) pairs counting how often the
+  eligible pool ran dry before an event's full quota was drawn, saw zero
+  shortfalls, and only then kept the existing tests' exact-count
+  assertions rather than loosening them defensively; deleted the sweep
+  once it had answered the question (see `no_two_special_months_are_ever_
+  adjacent` for the permanent, narrower regression test that stayed).
+  Originally did *not* wrap year-end into the next year's month `0`
+  (each year was scheduled independently, so Dec of year N next to Jan of
+  year N+1 could still slip through) - documented as a known
+  simplification rather than silently ignored, and fixed in a follow-up
+  once the user confirmed they actually wanted it closed rather than left
+  as a documented gap (see the next entry).
+- **A "documented simplification" is still worth asking about before
+  assuming it's acceptable - the user may have meant "fix it," not
+  "acknowledge it."** The December/January boundary gap above was
+  deliberately left open with a comment explaining why; the very next ask
+  was "make sure checks across boundaries... I don't want that problem."
+  Closing it needed a real (if small) design decision: December's and
+  January's placements are mutually exclusive but neither is inherently
+  "first," so the resolution is to always let the chronologically earlier
+  year win - process years in increasing order and thread forward a single
+  rolling fact (`previous_december_claimed: bool`) from `year_schedule_one_
+  year`'s December outcome into the next year's own scheduling call.
+  Renamed the old single-year function to `year_schedule_one_year` and
+  gave it that new parameter; the public `year_schedule(seed, year)` now
+  walks forward from year `0`, discarding every prior year's full
+  schedule and keeping only that one boolean - `O(year)` tiny 12-month
+  passes per call (recomputed fresh every frame in `update_sky`, like
+  everything else here), not `O(year)` of retained state. This stays
+  negligible for a *very* long-lived save (one in-game year is 48 real
+  hours at 30 minutes per in-game day, so `year` climbing into the
+  thousands would take a real user years of continuous play) - re-ran the
+  same "sweep many (seed, year) pairs, count shortfalls" throwaway-test
+  technique from the entry above (this time also varying `year` up to 20,
+  since a stricter cross-year constraint could plausibly starve the pool
+  differently than the within-year-only version did) before trusting the
+  stricter constraint still hits its exact occurrence counts, saw zero
+  shortfalls across 6,000 pairs, then deleted the sweep and kept a small
+  permanent regression test
+  (`no_special_lands_in_january_right_after_a_claimed_december`) instead.
+- **An `O(year)` cost the user explicitly said would "never realistically
+  be reached" was still worth fixing once asked "just for theoretical" -
+  but the fix should exploit the actual access pattern, not add a generic
+  cache.** `year_schedule` walking forward from year `0` every call is
+  fine for a one-off, but `update_sky` calls it every frame; the naive fix
+  (memoize by `(seed, year)` key, LRU-evict, etc.) would be real new
+  complexity for a problem with a much simpler shape once you notice how
+  the caller actually uses it: `DayNightClock::year()` only ever advances
+  by exactly one at a time during normal play (one in-game year = 48 real
+  hours at this cycle's pacing), so the "cache" only ever needs to
+  remember *one* thing - the immediately preceding year's December outcome
+  - to turn the common case into an `O(1)` incremental step via the same
+  `year_schedule_one_year(seed, year, previous_december_claimed)` building
+  block `year_schedule` itself already uses internally. `MoonScheduleCache`
+  is a single `Option<(seed, year, schedule, december_claimed)>`, not a
+  map: an exact match returns the cached schedule directly, `year + 1`
+  triggers the one-step incremental path, and *anything* else (a fresh
+  world, a different seed, a save loaded straight into an arbitrary year)
+  falls back to the plain `year_schedule` - exactly as expensive as
+  before this cache existed, but now only paid once for that one jump
+  instead of every frame after it. **Splitting "which schedule applies"
+  from "what does this month's schedule mean" made the caching layer
+  purely additive** - `DayNightClock::moon_event_in(&self, schedule)` is
+  the same lookup `moon_event` always did, just taking the schedule as a
+  parameter instead of computing it inline, so every existing test
+  (written against the old `moon_event(seed)`, kept as a thin wrapper
+  around `moon_event_in`) needed zero changes; only `update_sky` itself
+  had to switch call sites, to `cached_year_schedule(&mut cache, seed,
+  clock.year())` feeding `moon_event_in`. Verify a caching layer against
+  its own uncached reference implementation directly, not just "the game
+  still looks right" - `cached_year_schedule_always_agrees_with_the_
+  uncached_reference` walks a fresh cache year-by-year (including
+  re-querying already-cached years) and asserts every single step matches
+  `year_schedule` called fresh, since a caching bug that silently returns
+  a *plausible-looking but wrong* schedule is exactly the kind of thing
+  that wouldn't fail loudly.
+- **When asked to fix "the texture crash" after the moon-events breakdown
+  flagged sun/moon specifically, the fix covered `atlas.rs`'s block/UI
+  tiles too, not just `sky.rs`.** Both had the *exact same* shape of bug
+  (`load_custom_tile`/`load_custom_sky_texture` panicking on a malformed
+  custom PNG - disallowed size, unreadable/corrupt file), and leaving one
+  fixed while the other still crashed would have directly contradicted the
+  user's stated goal in the very message that triggered this ("I don't
+  want anything to be able to break"). Fixing only the literally-named
+  half of a symmetric problem because that's the half that was asked about
+  is a trap worth watching for - when two subsystems share a bug's shape,
+  fix both and say so, rather than waiting to be asked twice.
+- **A malformed custom texture now degrades to a placeholder instead of
+  panicking, via a genuine tri-state return type, not `Option` plus a
+  swallowed error.** `atlas::CustomTile`/`sky::CustomSkyTexture` are
+  `Absent` (no file - use the procedural default, unchanged), `Malformed`
+  (file exists but failed to decode/validate - use the placeholder, *not*
+  this name's real painter, so a broken custom file stays visibly wrong
+  instead of quietly rendering normal-looking art), and `Loaded(pixels,
+  size)`. Collapsing `Malformed` into `Absent` (both "just use `None`")
+  would have silently hidden a real user mistake behind normal-looking
+  output - the whole point of a *distinct* placeholder color is that it
+  has to stay distinguishable from "intentionally not customized."
+  `atlas.rs` reuses one `painted_tile(paint_fn, name, tile_size)` helper
+  for both a name's real painter (the `Absent` case) and the placeholder
+  painter (the `Malformed` case) rather than duplicating the
+  scratch-buffer-then-upscale dance twice.
+- **Reporting "how many textures are broken" needs a way to tell "no
+  custom art, using the block's own intended procedural painter" (fine)
+  apart from "nobody ever registered a painter for this name, `ensure_
+  registered` silently filled the gap with the placeholder" (not fine) -
+  even though `build_atlas_from_dir` calls the exact same `paint` closure
+  either way by the time it runs.** By the time the atlas is built, a
+  name that got `ensure_registered`'s auto-placeholder and a name with a
+  genuinely hand-written painter are indistinguishable from the *call
+  site* - both are just "call this closure." The fix was tracking the
+  distinction at the moment it's still knowable: `Painters` gained a
+  `placeholders: HashSet<String>` field, populated only inside
+  `ensure_registered` itself, checked when `build_atlas_from_dir` decides
+  each `Absent`-case tile's status. General lesson: when two code paths
+  converge to the same shape before the point where you need to
+  distinguish them, the distinguishing fact has to be captured *at the
+  point they diverge*, not reconstructed later from data that no longer
+  carries it.
+- **`/texture-report`'s red ("completely broken") tier is a real computed
+  invariant check, not a hardcoded zero used to look reassuring.** Once
+  every malformed-file crash path is fixed, there's genuinely no reachable
+  "nothing renders at all" state left - so red *should* always read `0`.
+  Rather than special-casing that as a constant (which would silently lie
+  if some future change broke the guarantee), `world::compile_content`
+  diffs `BlockRegistry::texture_names()` against the atlas's own built
+  `indices` after the fact and reports any name that didn't make it in -
+  currently always empty because `ensure_registered` runs for every
+  required name first, but this recomputes that fact fresh every startup
+  instead of assuming it holds forever. This is the same "give the user
+  a redundancy check they can actually trust" instinct as `MoonScheduleCache`
+  falling back to the plain computation on any mismatch, or the
+  `cached_year_schedule_always_agrees_with_the_uncached_reference` test -
+  don't just assert an invariant once in a comment, give the running game
+  a cheap way to keep proving it.
+- **One shared inline-color-marker mechanism (`text_color.rs`) serves both
+  a system-generated report and free-form player chat, because `ChatLog::
+  push` is the single place any text - typed or generated - enters the
+  scrollback.** `/texture-report` builds its counts with `text_color::
+  colorize(text, hex)` (wraps text in `~(#hex)~...~(#hex)~`); a player can
+  type the exact same syntax by hand. Neither has a separate rendering
+  path - `ChatLog::push` parses every message once via `parse_colored_
+  segments`, and `chat::sync_chat_ui` renders whatever segments came out.
+  **The marker is a toggle, not a matched pair**: the first `~(#hex)~`
+  starts a colored run using that hex, and the next one ends it
+  *regardless of what hex digits it contains* - deliberately, so a player
+  mistyping one digit in the closing marker still closes the span instead
+  of coloring the rest of their message by accident. Bevy's rich-text API
+  for mixing colors within one text block is `TextSpan` child entities
+  under a `Text` root (see `TextSpan`'s own doc example: "children must be
+  `TextSpan`, not `Text`") - `sync_chat_ui` puts segment 0 directly on the
+  existing `ChatLogText` root entity and respawns the rest as `TextSpan`
+  children each frame (`despawn_related::<Children>()` then
+  `with_children`, the same rebuild-the-subtree pattern as `ui::
+  rebuild_hotbar`), which is simple enough at `VISIBLE_MESSAGES`-line
+  scale that diffing instead of respawning isn't worth the complexity.
