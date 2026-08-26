@@ -3,8 +3,8 @@
 This is a **Rust + Bevy native game** (see `Cargo.toml`, `src/*.rs`). It is a
 complete, working, well-optimized voxel engine framework with procedurally
 generated 16x16 textures, chunked async terrain generation/meshing, physics,
-a day/night cycle, a main menu with per-user saves, a Windows installer, and
-a self-updater. Full details: `README.md`.
+colored voxel lighting, a day/night cycle, a main menu with per-user saves,
+a Windows installer, and a self-updater. Full details: `README.md`.
 
 ## Do not rewrite this project
 
@@ -895,3 +895,78 @@ etc.) instead of inventing a new approach:
   that opened the box doesn't also get typed" logic (`chat.just_opened`)
   needed no changes at all, since it already clears *all* pending events
   for that frame regardless of which key triggered the open.
+- **A relaxation that reports "changed" when its write silently didn't land
+  is an unbounded work generator, and it looks exactly like a convergence
+  bug.** `light.rs`'s propagation seeds cells one block *outside* a chunk
+  (the far side of each seam), and those can belong to a chunk that isn't
+  loaded yet. `ChunkMap::set_light` originally returned `()` and no-opped
+  for a missing chunk, so `recompute_light_cell` computed a new value, saw
+  `next != current`, and enqueued all 6 neighbours - every single visit,
+  forever, spreading outward through terrain that doesn't exist. The queue
+  grew by a steady ~24k cells/frame and never drained. Fix: `set_light`
+  returns `bool` like `set_fluid_cell` already did, and the "it changed"
+  path is gated on the write actually landing. **The general rule: any
+  setter a propagating simulation drives has to report whether it wrote,
+  because "did this change?" is what decides whether to schedule more
+  work** - a silent no-op turns that question into a permanent yes.
+- **"Every settled cell enqueues neighbours it could improve" (a push rule)
+  does not terminate, even though each individual value is correct.**
+  Written as the mirror of the pull rule it looks obviously right, and the
+  *values* it produces are right - but it fires on every visit of every lit
+  cell, and since a cell gets visited once per neighbour that changed, the
+  queue regenerates work faster than the budget drains it. Measured: 20M+
+  pops on a 2197-cell room that should settle in a few thousand, with every
+  sampled pop reporting no change. What light removal actually needs is far
+  narrower: when `relax` empties a channel rather than downgrading it, that
+  cell re-queues *itself* (one entry, only on an actual drop, and each drop
+  lands it on a strictly lower value so there can only be `MAX_LIGHT` of
+  them). Same effect as the two-pass "clear the region then refill from
+  whatever still has a real supply" BFS voxel engines hand-write, without a
+  second queue. The narrow-vs-general lesson generalizes: in a budgeted
+  queue, a rule that can fire on *unchanged* cells is a red flag, because
+  the queue's only termination argument is "work is proportional to
+  changes."
+- **CLAUDE.md's own "measure before assuming an infinite loop" rule paid off
+  twice here, in opposite directions.** The first light failure looked like
+  slowness (raise the guard?) and was a true non-termination; the fix for
+  it looked like a correctness bug and was also non-termination, from a
+  completely different cause. Both were found the same cheap way - print
+  the pop count, then dump which positions repeat and what they transition
+  to - and neither would have been found by reading the code, because in
+  both cases every individual value being computed was correct. When a
+  propagating sim misbehaves, instrument *what repeats*, not *what's
+  wrong*.
+- **A "does light stop at a wall" test needs a corridor, not a room.** The
+  first version put a single stone block next to a torch in an open carved
+  box and asserted the far side was dark; it was lit, because light
+  correctly travels *around* one block. The production code was right and
+  the test was wrong - the same intuition-first trap as the moon-terminator
+  test. Bore a one-cell-wide tunnel so a single block genuinely seals it.
+- **Separating "how much sky reaches this cell" from "what the sky
+  currently looks like" is what makes a day/night cycle free.** The stored
+  sky-light level describes the world's *shape* and only changes when
+  blocks do; `render::ChunkMaterialParams::sky_light` (now an RGB value,
+  not the old brightness scalar) describes the sky *right now* and is
+  rewritten every frame by `sky::update_sky`. Dawn, dusk, and a red/blue/
+  green moon tinting every outdoor surface therefore cost one uniform
+  write - no relighting, no remeshing. If they'd been baked together into
+  one "final brightness" per cell, every sunrise would have had to relight
+  and remesh the visible world. Worth applying to any future
+  per-cell-value-times-global-state pair (weather, seasons affecting
+  ground color, etc.): store the part that changes with the world, uniform
+  the part that changes with time.
+- **The mesher's vertex alpha channel was free real estate, and that's a
+  fact worth checking before adding a vertex attribute.** Chunk fragments
+  get their alpha from the texture and `base_alpha`, so `in.color.a` was
+  being written (`1.0`) and never read. Sky light now rides there while
+  block light rides in RGB, which is what lets the shader combine them per
+  frame - no new attribute, no bigger vertex buffer, no mesh format change.
+  Grep for what actually *reads* an existing channel before growing the
+  vertex layout.
+- **Four parallel arrays that must always be indexed together are a struct,
+  not four positional parameters.** `mesh_chunk(padded, padded_fluid,
+  padded_axis, tables)` was already at the edge; adding light would have
+  made it five positional slices with nothing stopping a caller swapping
+  two of the same type. `mesher::PaddedChunk` (blocks/fluid/axis/light, plus
+  an `empty()` constructor the tests build on) made `build_padded`'s return
+  type and the mesher's signature both simpler than before the feature.

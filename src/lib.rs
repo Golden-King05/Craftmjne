@@ -10,6 +10,7 @@ pub mod config;
 pub mod icons;
 pub mod interact;
 pub mod inventory;
+pub mod light;
 pub mod menu;
 pub mod mesher;
 pub mod noise;

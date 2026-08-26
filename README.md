@@ -335,11 +335,14 @@ tagging/releasing has to be done from a normal git checkout or the GitHub UI.
 - **Hidden-face culling** — only faces exposed to air/transparent blocks emit
   geometry; same-type transparent neighbours (water–water, glass–glass) are
   culled too.
-- **Baked lighting + custom shader** — directional sky shading and per-vertex
-  ambient occlusion are baked into vertex colors by the mesher. Chunks render
-  with one tiny unlit WGSL fragment shader (`src/chunk.wgsl`) that also does
-  alpha cutout (leaves/glass), water translucency, and distance fog — no
-  lights, no normals, no shadow passes, two pipeline states total.
+- **Baked lighting + custom shader** — directional face shading, per-vertex
+  ambient occlusion and the propagated voxel light (colored block light in the
+  vertex RGB, sky light in the vertex alpha) are all baked into vertex colors
+  by the mesher. Chunks render with one tiny unlit WGSL fragment shader
+  (`src/chunk.wgsl`) that also does alpha cutout (leaves/glass), water
+  translucency, and distance fog — no lights, no normals, no shadow passes,
+  two pipeline states total. The day/night cycle is a single uniform, so the
+  whole world's daylight changes without touching a mesh.
 - **Flat typed tables** — `Vec<u16>` chunk storage (Y-major, so column ops are
   contiguous slice copies) and flat `Vec<bool>` block-property tables in every
   hot loop; the mesher's AO neighbourhood offsets are precomputed integers.
@@ -366,6 +369,7 @@ src/
 ├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
+├── light.rs     # LightPlugin: colored block light + sky light propagation
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
 ├── render.rs    # RenderSetupPlugin: ChunkMaterial, atlas + icon atlas images, fog
@@ -452,6 +456,60 @@ session (`world::OriginalFluids`), so an unvisited lake's data is never
 silently dropped either. The tradeoff is exactly what you'd expect from
 "treat it like a real block": a session with a lot of flowing water makes
 for a bigger save file, same as a session with a lot of block edits does.
+
+## Lighting
+
+`src/light.rs` propagates two independent quantities through every cell of
+the world, both stored per-block alongside the block ids:
+
+- **Block light**, in **color** — three channels (R, G, B) at `0..=16`,
+  emitted by any block whose definition sets a `light`. Each channel
+  propagates on its own and loses one level per block travelled, so a torch
+  16 blocks away is exactly dark and two differently-colored lamps blend
+  properly where they overlap.
+- **Sky light** — one channel at `0..=16`, "how much of the open sky reaches
+  here". Full strength straight down (a shaft stays bright all the way to
+  the bottom), one level per block sideways into caves and under overhangs.
+
+They're combined per fragment as `max(block, sky × sky_color)`, so a torch
+does nothing at high noon and takes over completely at night — and the
+`sky_color` half is a single uniform the day/night cycle rewrites every
+frame. That's what lets **dawn, dusk and a red/blue/green moon change the
+light on every surface in the world** without relighting or remeshing
+anything: only the sky term moves, and the world's *shape* (which is what
+the stored sky-light levels actually describe) never had to be recomputed.
+
+### The torch
+
+`blocks/torch.json` is the built-in light source — level 16, a warm
+near-white, currently a plain solid cube (it's the lighting that makes it a
+torch; a proper torch model comes later). Add your own by giving any block a
+`light`:
+
+```json
+{ "id": "ruby_lamp", "light": { "level": 16, "color": [255, 40, 40] } }
+```
+
+`level` is brightness in light levels; `color` is a 0-255 RGB hue. Worth
+knowing when picking one: because the channels travel independently, a
+saturated color also has a *shorter reach* in whatever channels it dims — a
+pure red lamp casts red 15 blocks but no green or blue at all. Keep `color`
+near white for a light that reaches the same distance in every direction.
+
+### How it's computed
+
+The same budgeted-queue relaxation the fluid simulation uses: cells that
+might be stale go on a queue, a bounded number are re-derived per frame from
+their six neighbours, and only actual changes enqueue more work. Newly
+generated chunks skip most of that — `terrain.rs` fills each column's
+straight-down sunlight during generation, which needs no neighbour
+information and settles everything outdoors, so a chunk's first mesh is
+already correctly lit and the queue only has caves, emitters and chunk seams
+left to resolve.
+
+None of it is saved. Light is a pure function of the block grid, so loading
+a world recomputes it exactly — unlike fluid state, where spread is
+path-dependent and re-deriving it could legitimately land somewhere else.
 
 ## Day/night cycle
 
@@ -568,6 +626,7 @@ by) is required. Everything else defaults sanely:
 | `item_model` | `"default"` | `"default"` \| `"face"` \| `"custom"` — see "Item models" below |
 | `custom_item_model` | *(none)* | path to an external model, required when `item_model` is `"custom"` |
 | `rotation` | `"none"` | `"none"` \| `"log"` — see "Rotation" below |
+| `light` | `{ "level": 0, "color": [255,255,255] }` | makes this block a light source — see "Lighting" below |
 | `textures` | tile named after `id` on every face | `{ "all": "..." }` or `{ "top": "...", "bottom": "...", "side": "..." }` |
 
 `transparent`'s three options all still respect the block's own texture

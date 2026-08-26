@@ -35,6 +35,7 @@
 //!   "item": true,
 //!   "item_model": "default",
 //!   "rotation": "none",
+//!   "light": { "level": 0, "color": [255, 255, 255] },
 //!   "textures": { "all": "coal_ore" }
 //! }
 //! ```
@@ -76,6 +77,14 @@
 //!   the placed block instance, not the definition, so two logs placed
 //!   differently render differently even though they share one `BlockDef` -
 //!   see `Chunk::axis` in `world.rs`.
+//! - `light` makes this block a light source (see [`LightSpec`]). `level` is
+//!   its brightness in light levels (`0`, the default, emits nothing; `16` is
+//!   the maximum and reaches 15 blocks); `color` is a 0-255 RGB hue, white by
+//!   default. The three channels propagate independently (`light.rs`), so a
+//!   strongly-colored light also has a *shorter* range in whichever channels
+//!   its color dims — keep `color` near white for one that should reach the
+//!   same distance in every direction. `blocks/torch.json` is the built-in
+//!   example.
 //! - `texture_scheme` picks which texture *names* get looked up per face,
 //!   without having to spell any of them out by hand in `textures` - see
 //!   [`TextureScheme`]. Defaults to `"default"` (one texture, named after
@@ -90,6 +99,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::light::MAX_LIGHT;
 
 pub type BlockId = u16;
 
@@ -197,6 +208,46 @@ pub enum Rotation {
     None,
     /// Minecraft log behavior - see the module docs' `rotation` entry.
     Log,
+}
+
+/// How much light a block emits, and what color. Blocks that aren't light
+/// sources leave this at its default (`level: 0`), which emits nothing.
+///
+/// `level` is the brightness in light levels (`0..=`[`MAX_LIGHT`], clamped);
+/// `color` is a plain 0-255 RGB hue applied to it. The two combine into a
+/// per-channel emission (see [`Self::emission`]) because `light.rs`
+/// propagates the three channels independently — which is exactly what makes
+/// a red lamp's light stay red as it fades, instead of being one brightness
+/// with a tint stapled on top. The flip side worth knowing when authoring a
+/// block: a channel the color drops to zero has *no range at all*, so a
+/// saturated color is also a shorter-reaching one in those channels. For a
+/// light that should reach the same distance in every direction and every
+/// channel (`torch.json`), keep `color` close to white.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
+pub struct LightSpec {
+    #[serde(default)]
+    pub level: u32,
+    #[serde(default = "default_light_color")]
+    pub color: [u8; 3],
+}
+
+fn default_light_color() -> [u8; 3] {
+    [255, 255, 255]
+}
+
+impl Default for LightSpec {
+    fn default() -> Self {
+        Self { level: 0, color: default_light_color() }
+    }
+}
+
+impl LightSpec {
+    /// This block's per-channel emission, `0..=MAX_LIGHT` each — what
+    /// `Tables::light` stores and `light.rs` actually propagates.
+    pub fn emission(&self) -> [u8; 3] {
+        let level = self.level.min(MAX_LIGHT as u32);
+        self.color.map(|c| ((level * c as u32 + 127) / 255).min(MAX_LIGHT as u32) as u8)
+    }
 }
 
 /// A rotating block's stored orientation (`Chunk::axis`, meaningful only
@@ -374,6 +425,9 @@ pub struct BlockDef {
     /// Whether a placed instance can face different directions. See
     /// [`Rotation`].
     pub rotation: Rotation,
+    /// How much light this block emits, and in what color. See [`LightSpec`];
+    /// defaults to emitting nothing.
+    pub light: LightSpec,
     /// Which texture names an unset face in `textures` falls back to. See
     /// [`TextureScheme`].
     pub texture_scheme: TextureScheme,
@@ -413,6 +467,7 @@ impl Default for BlockDef {
             item_model: ItemModel::default(),
             custom_item_model: None,
             rotation: Rotation::default(),
+            light: LightSpec::default(),
             texture_scheme: TextureScheme::default(),
             textures: FaceTextures::default(),
         }
@@ -462,6 +517,8 @@ struct BlockFile {
     #[serde(default)]
     rotation: Rotation,
     #[serde(default)]
+    light: LightSpec,
+    #[serde(default)]
     texture_scheme: TextureScheme,
     #[serde(default)]
     textures: FaceTextures,
@@ -500,6 +557,7 @@ impl BlockFile {
             item_model: self.item_model,
             custom_item_model: self.custom_item_model,
             rotation: self.rotation,
+            light: self.light,
             texture_scheme: self.texture_scheme,
             textures: self.textures,
         }
@@ -525,6 +583,11 @@ pub struct Tables {
     /// the mesher skip the axis lookup/remap entirely for the vast majority
     /// of blocks that never rotate.
     pub rotates: Vec<bool>,
+    /// Per-channel light emission (`BlockDef::light`, resolved by
+    /// `LightSpec::emission`), `0..=light::MAX_LIGHT` each. `[0; 3]` for
+    /// everything that isn't a light source, which `light.rs` treats as
+    /// "emits nothing" without needing a separate flag.
+    pub light: Vec<[u8; 3]>,
     /// Atlas tile per face: `tiles[id as usize * 6 + face]`.
     pub tiles: Vec<u16>,
     /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
@@ -682,6 +745,7 @@ impl BlockRegistry {
             replaceable: vec![false; n],
             flow_distance: vec![0; n],
             rotates: vec![false; n],
+            light: vec![[0; 3]; n],
             tiles: vec![0; n * 6],
             tile_size,
             uv_pad,
@@ -695,6 +759,7 @@ impl BlockRegistry {
             tables.replaceable[id] = def.replaceable;
             tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
             tables.rotates[id] = def.rotation != Rotation::None;
+            tables.light[id] = def.light.emission();
             for face in 0..6 {
                 let tex = def.texture_name(face);
                 let tile = atlas_index.get(&tex).unwrap_or_else(|| {

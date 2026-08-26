@@ -91,6 +91,7 @@ grass's underside too.
 | `sand.png` | sand (all faces) |
 | `snow.png` | snow (all faces) |
 | `stone.png` | stone (all faces) |
+| `torch.png` | torch (all faces) |
 | `water.png` | water (all faces) |
 
 Adding a brand new block works the same way — a bare `blocks/ruby_block.json`

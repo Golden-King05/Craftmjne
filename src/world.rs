@@ -16,11 +16,12 @@ use std::sync::Arc;
 
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
 use crate::blocks::{
-    BlockId, BlockRegistry, BlockTables, Tables, AIR, AXIS_Y, FLUID_FALLING, FLUID_SOURCE,
+    BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
 };
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
 use crate::icons::{build_icon_atlas, IconAtlasData};
-use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PAD_XZ, PAD_Y};
+use crate::light::{seed_new_chunk, LightCell, LightQueue};
+use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PaddedChunk};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
@@ -72,6 +73,12 @@ pub struct Chunk {
     /// re-derivable, never saved), this *is* player-chosen state and round-
     /// trips through `BlockSetEvent`/`EditLog`/`save::BlockEdit`.
     pub axis: Option<Vec<u8>>,
+    /// Parallel to `blocks`; the propagated colored block light and sky light
+    /// for every cell (see `light.rs`). Always `Some` whenever `blocks` is -
+    /// same lifecycle as `fluid_level`/`axis`. Never saved: unlike fluid
+    /// spread, light is a pure function of the block grid, so loading a world
+    /// recomputes it exactly rather than risking a different answer.
+    pub light: Option<Vec<LightCell>>,
     pub version: u32,
     pub dirty: bool,
     pub meshing: bool,
@@ -108,6 +115,74 @@ impl ChunkMap {
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         )]
+    }
+
+    /// Reads a cell's stored light. Out of the world vertically is the one
+    /// place this isn't just "whatever's stored": above the top of the world
+    /// is open sky (which is what gives the topmost layer its full sky light,
+    /// with no special case needed in `light.rs`'s propagation rule), and
+    /// below the bottom is solid dark. An unloaded chunk reads as dark rather
+    /// than as sky, so light never leaks in from terrain that doesn't exist
+    /// yet - `light::seed_new_chunk` re-queues the seam once it arrives.
+    pub fn get_light(&self, pos: IVec3) -> LightCell {
+        self.get_block_and_light(pos).1
+    }
+
+    /// `get_block` and `get_light` in a single chunk lookup. `light.rs`
+    /// needs both for all 6 neighbours of every cell it relaxes, and that
+    /// inner loop is the whole cost of the lighting sim - fetching them
+    /// together halves its map lookups.
+    pub fn get_block_and_light(&self, pos: IVec3) -> (BlockId, LightCell) {
+        if pos.y >= WORLD_HEIGHT {
+            return (AIR, LightCell::OPEN_SKY);
+        }
+        if pos.y < 0 {
+            return (AIR, LightCell::DARK);
+        }
+        let Some(chunk) = self.chunks.get(&Self::chunk_coord(pos.x, pos.z)) else {
+            return (AIR, LightCell::DARK);
+        };
+        let (Some(blocks), Some(light)) = (&chunk.blocks, &chunk.light) else {
+            return (AIR, LightCell::DARK);
+        };
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        (blocks[idx], light[idx])
+    }
+
+    /// Writes a cell's light, returning whether the write actually landed -
+    /// it can't for a chunk that isn't loaded (or isn't generated yet), and
+    /// `light.rs`'s relaxation *must* know that rather than assume it
+    /// succeeded: a cell whose new value silently goes nowhere would report
+    /// "changed" on every single visit and re-enqueue its neighbours forever,
+    /// generating unbounded work that spreads outward through terrain that
+    /// doesn't exist. Same reason `set_fluid_cell` returns a bool.
+    ///
+    /// Deliberately does *not* dirty the chunk the way `set_block`/
+    /// `set_fluid_cell` do - a single torch rewrites hundreds of cells across
+    /// several chunks as its light converges, and remeshing on each of those
+    /// would be pure waste. `light.rs` batches the settled result into one
+    /// remesh instead.
+    pub fn set_light(&mut self, pos: IVec3, value: LightCell) -> bool {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return false;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        match self.chunks.get_mut(&coord).and_then(|c| c.light.as_mut()) {
+            Some(light) => {
+                light[idx] = value;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Physics-safe solidity: unloaded terrain counts as solid.
@@ -283,13 +358,11 @@ impl ChunkMap {
         true
     }
 
-    /// Copies chunk blocks (+fluid levels +rotation axes) plus a 1-block
-    /// shell from the 8 neighbours into padded arrays. Y-major layout keeps
-    /// this a series of column copies.
-    fn build_padded(&self, coord: IVec2) -> (Vec<BlockId>, Vec<u8>, Vec<u8>) {
-        let mut padded = vec![AIR; PAD_XZ * PAD_XZ * PAD_Y];
-        let mut padded_fluid = vec![FLUID_SOURCE; PAD_XZ * PAD_XZ * PAD_Y];
-        let mut padded_axis = vec![AXIS_Y; PAD_XZ * PAD_XZ * PAD_Y];
+    /// Copies chunk blocks (+fluid levels, rotation axes and light) plus a
+    /// 1-block shell from the 8 neighbours into the padded arrays the mesher
+    /// works on. Y-major layout keeps this a series of column copies.
+    fn build_padded(&self, coord: IVec2) -> PaddedChunk {
+        let mut padded = PaddedChunk::empty();
         for pz in -1..=CHUNK_SIZE {
             let ncz = coord.y + if pz < 0 { -1 } else if pz >= CHUNK_SIZE { 1 } else { 0 };
             let lz = pz.rem_euclid(CHUNK_SIZE) as usize;
@@ -300,18 +373,24 @@ impl ChunkMap {
                 let src = chunk.blocks.as_ref().unwrap();
                 let src_fluid = chunk.fluid_level.as_ref().unwrap();
                 let src_axis = chunk.axis.as_ref().unwrap();
+                let src_light = chunk.light.as_ref().unwrap();
                 let src_base = block_index(lx, 0, lz);
                 let dst_base = padded_index(px, 0, pz);
-                padded[dst_base..dst_base + H].copy_from_slice(&src[src_base..src_base + H]);
-                padded_fluid[dst_base..dst_base + H]
+                padded.blocks[dst_base..dst_base + H].copy_from_slice(&src[src_base..src_base + H]);
+                padded.fluid[dst_base..dst_base + H]
                     .copy_from_slice(&src_fluid[src_base..src_base + H]);
-                padded_axis[dst_base..dst_base + H]
+                padded.axis[dst_base..dst_base + H]
                     .copy_from_slice(&src_axis[src_base..src_base + H]);
-                padded[dst_base - 1] = 1; // below the world: solid, culls bottom faces
-                // above the world stays 0 (air)
+                padded.light[dst_base..dst_base + H]
+                    .copy_from_slice(&src_light[src_base..src_base + H]);
+                padded.blocks[dst_base - 1] = 1; // below the world: solid, culls bottom faces
+                // Above the world stays air, and is open sky - without this
+                // the topmost layer's upward faces would sample an
+                // unlit cell and render black at high noon.
+                padded.light[dst_base + H] = LightCell::OPEN_SKY;
             }
         }
-        (padded, padded_fluid, padded_axis)
+        padded
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -319,6 +398,19 @@ impl ChunkMap {
         let meshed = self.chunks.values().filter(|c| c.meshed).count();
         (generated, meshed)
     }
+}
+
+/// Ordering labels for the chunk data pipeline, so other plugins can slot
+/// systems into it without naming (and thereby publishing) the private
+/// systems and components that make it up. Same role as `player::PlayerSet`.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ChunkPipelineSet {
+    /// Finished generation/meshing tasks land in the `ChunkMap`.
+    Collect,
+    /// Decides what to generate, mesh and unload - and snapshots the padded
+    /// arrays that meshing jobs run on, so anything that wants to influence
+    /// how a chunk meshes has to have finished before this.
+    Stream,
 }
 
 #[derive(Component)]
@@ -666,6 +758,9 @@ fn enter_world(
 
     commands.insert_resource(AutosaveTimer::default());
     commands.insert_resource(FluidQueue::default());
+    // Light is never loaded from the save (it's re-derived from the blocks),
+    // so this only has to drop whatever the previous world left queued.
+    commands.insert_resource(LightQueue::default());
     commands.insert_resource(DayNightClock { elapsed: data.time_of_day, day_count: data.day_count });
 
     if let Ok(mut player) = players.single_mut() {
@@ -908,15 +1003,14 @@ fn stream_chunks(
         if map.mesh_in_flight >= MAX_MESH_TASKS {
             break;
         }
-        let (padded, padded_fluid, padded_axis) = map.build_padded(coord);
+        let padded = map.build_padded(coord);
         let chunk = map.chunks.get_mut(&coord).unwrap();
         chunk.meshing = true;
         chunk.dirty = false;
         let version = chunk.version;
         map.mesh_in_flight += 1;
         let tables = tables.0.clone();
-        let task =
-            pool.spawn(async move { mesh_chunk(&padded, &padded_fluid, &padded_axis, &tables) });
+        let task = pool.spawn(async move { mesh_chunk(&padded, &tables) });
         commands.spawn(MeshTask { coord, version, task });
     }
 
@@ -944,6 +1038,8 @@ fn collect_gen_tasks(
     mut map: ResMut<ChunkMap>,
     mut pending: ResMut<PendingEdits>,
     mut pending_fluids: ResMut<PendingFluids>,
+    tables: Res<BlockTables>,
+    mut lights: ResMut<LightQueue>,
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
     for (entity, mut gen_task) in &mut tasks {
@@ -960,6 +1056,7 @@ fn collect_gen_tasks(
         chunk.blocks = Some(generated.blocks);
         chunk.fluid_level = Some(generated.fluid);
         chunk.axis = Some(generated.axis);
+        chunk.light = Some(generated.light);
         // Re-apply any saved edits for this chunk on top of the fresh terrain.
         if let Some(edits) = pending.0.remove(&gen_task.coord) {
             for (pos, id, axis) in edits {
@@ -978,6 +1075,10 @@ fn collect_gen_tasks(
                 map.set_fluid_level_raw(pos, level);
             }
         }
+        // Last, so it sees the chunk's final blocks - the generator's sky
+        // column pass ran before any of the edits above were reapplied, and
+        // an edit that opened or sealed a column has to be picked up.
+        seed_new_chunk(&map, &tables.0, gen_task.coord, &mut lights);
     }
 }
 
@@ -1053,6 +1154,11 @@ impl Plugin for WorldPlugin {
             .init_resource::<OriginalFluids>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
+            // `LightPlugin` owns the light systems, but `collect_gen_tasks`
+            // (here) seeds the queue, so the resource has to exist even in a
+            // headless harness that only registers `WorldPlugin` - same
+            // reason `DayNightClock` is initialized in both places.
+            .init_resource::<LightQueue>()
             .init_resource::<DayNightClock>()
             .init_resource::<TextureReport>()
             .add_event::<BlockSetEvent>()
@@ -1064,12 +1170,14 @@ impl Plugin for WorldPlugin {
                 Update,
                 (collect_gen_tasks, collect_mesh_tasks)
                     .chain()
+                    .in_set(ChunkPipelineSet::Collect)
                     .run_if(resource_exists::<ChunkMaterials>),
             )
             .add_systems(
                 Update,
                 stream_chunks
-                    .after(collect_mesh_tasks)
+                    .in_set(ChunkPipelineSet::Stream)
+                    .after(ChunkPipelineSet::Collect)
                     .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
             )
             .add_systems(
@@ -1096,6 +1204,7 @@ mod tests {
         Chunk {
             blocks: Some(vec![AIR; CS * CS * H]),
             fluid_level: Some(vec![FLUID_SOURCE; CS * CS * H]),
+            light: Some(vec![LightCell::DARK; CS * CS * H]),
             ..Chunk::default()
         }
     }

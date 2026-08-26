@@ -2,7 +2,11 @@
 //!
 //! Rendering strategy (for speed):
 //!  - All lighting is pre-baked into vertex colors by the mesher, so the chunk
-//!    shader is fully unlit — no lights, no normals, no shadow passes.
+//!    shader is fully unlit — no lights, no normals, no shadow passes. That
+//!    includes the propagated colored voxel light (`light.rs`): block light in
+//!    the vertex RGB, sky light in the vertex alpha, combined per fragment
+//!    against a single `sky_light` uniform so the day/night cycle needs no
+//!    relighting.
 //!  - One shared material for all solid geometry (shader-side alpha discard
 //!    handles leaf/glass cutouts) and one for water: two pipeline states.
 //!  - Distance fog toward the sky color is computed in the same fragment
@@ -29,17 +33,25 @@ use crate::world::{Atlas, IconAtlas};
 #[allow(dead_code)] // the ShaderType derive generates per-field check fns
 pub struct ChunkMaterialParams {
     pub fog_color: LinearRgba,
+    /// The sky's current light color *and* brightness, multiplied into each
+    /// vertex's baked sky-light amount (`mesher.rs` puts that in the vertex
+    /// alpha channel) before it's combined with block light in `chunk.wgsl`.
+    /// White at noon, dim and blue-grey at night, and tinted by a special
+    /// moon - which is how a red moon casts red light over the entire world
+    /// for the cost of one uniform write. Alpha is unused. See `sky.rs`'s
+    /// `update_sky`, the only system that ever writes this.
+    ///
+    /// This is deliberately RGB rather than the plain brightness scalar it
+    /// started as: with real per-cell lighting there's an actual sky light
+    /// term to color, where before there was only one global multiplier
+    /// standing in for having no light source at all.
+    pub sky_light: LinearRgba,
     pub fog_start: f32,
     pub fog_end: f32,
     /// Multiplied into texture alpha (water translucency).
     pub base_alpha: f32,
     /// Fragments below this alpha are discarded (leaf/glass cutouts).
     pub alpha_cutoff: f32,
-    /// Multiplied into the final lit color - the day/night cycle's cheap
-    /// stand-in for a real light source in this fully-baked-AO unlit
-    /// renderer: `1.0` at full daylight, dimmer at night. See `sky.rs`'s
-    /// `update_sky`, the only system that ever writes this.
-    pub sky_light: f32,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -145,11 +157,12 @@ fn setup_render(
     let fog_color = LinearRgba::from(SKY_COLOR);
     let fog = |base_alpha: f32, alpha_cutoff: f32| ChunkMaterialParams {
         fog_color,
+        // `sky::update_sky` takes over every frame once a world's loaded.
+        sky_light: LinearRgba::WHITE,
         fog_start: view_dist * 0.55,
         fog_end: view_dist * 0.95,
         base_alpha,
         alpha_cutoff,
-        sky_light: 1.0, // `sky::update_sky` takes over every frame once a world's loaded
     };
 
     let solid = materials.add(ChunkMaterial {
@@ -170,6 +183,24 @@ fn setup_render(
         icon_size: icon_atlas.0.icon_size,
     });
     commands.insert_resource(ChunkMaterials { solid, water });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::render::render_resource::ShaderSize;
+
+    #[test]
+    fn chunk_params_matches_the_layout_chunk_wgsl_declares() {
+        // `ChunkParams` in `chunk.wgsl` must stay field-for-field identical
+        // to `ChunkMaterialParams`, and a mismatch shows up only as a GPU
+        // binding error at runtime - which no test here can reach without a
+        // real device. Pinning the size is the part that *can* be checked
+        // automatically: two vec4s (fog_color, sky_light) then four f32s.
+        // If this fails, the shader's struct needs the same edit the Rust
+        // one just got.
+        assert_eq!(ChunkMaterialParams::SHADER_SIZE.get(), 16 + 16 + 4 * 4);
+    }
 }
 
 pub struct RenderSetupPlugin;
