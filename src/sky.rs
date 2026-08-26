@@ -298,18 +298,26 @@ fn season_of_month(month_of_year: u32) -> Season {
 }
 
 /// True if `month` sits immediately before or after a month that already
-/// has an event this year - doesn't wrap year-end to next year's month `0`
-/// (each year is scheduled independently, with no visibility into its
-/// neighbours), a deliberate, documented simplification for a purely
-/// cosmetic feature rather than coordinating `year_schedule` calls across
-/// years.
-fn touches_a_claimed_month(month: u32, schedule: &[Option<MoonEvent>; MONTHS_PER_YEAR as usize]) -> bool {
-    (month > 0 && schedule[month as usize - 1].is_some())
-        || (month + 1 < MONTHS_PER_YEAR && schedule[month as usize + 1].is_some())
+/// has an event this year, *or* is month `0` and `previous_december_claimed`.
+/// That second case is the one piece of cross-year information
+/// [`year_schedule`] threads in so the gap rule holds across a year
+/// boundary too (no claimed December immediately followed by a claimed
+/// January), not just within one year.
+fn touches_a_claimed_month(
+    month: u32,
+    schedule: &[Option<MoonEvent>; MONTHS_PER_YEAR as usize],
+    previous_december_claimed: bool,
+) -> bool {
+    let before_claimed = if month == 0 {
+        previous_december_claimed
+    } else {
+        schedule[month as usize - 1].is_some()
+    };
+    before_claimed || (month + 1 < MONTHS_PER_YEAR && schedule[month as usize + 1].is_some())
 }
 
 /// Deterministically (but pseudo-randomly, re-rolled fresh every year)
-/// assigns this year's [`MOON_EVENTS`] occurrences to specific months -
+/// assigns one year's [`MOON_EVENTS`] occurrences to specific months -
 /// `[i]` is which event (if any) month `i` hosts. Seeded from the world's
 /// seed plus the year number, so it's reproducible for a given world and
 /// year (a reload must show the same schedule) but differs world to world
@@ -320,19 +328,24 @@ fn touches_a_claimed_month(month: u32, schedule: &[Option<MoonEvent>; MONTHS_PER
 /// Events are drawn in [`MOON_EVENTS`]'s table order, each occurrence
 /// picking fresh from whatever's currently eligible: not yet claimed this
 /// year, not in one of the event's own excluded seasons, and (if
-/// `requires_gap_month`) not touching an already-claimed month - recomputed
-/// after every single pick, not just once per event, so an event drawing
-/// more than one occurrence (red draws two) can't land its own two months
-/// next to each other either. Table order acts as a priority (earlier
-/// entries get first pick of any months two entries could both use - e.g.
-/// blue's non-winter pool and green's non-spring pool genuinely overlap in
-/// summer/autumn), but claiming as each month is picked is what actually
-/// guarantees no two events ever collide or end up adjacent, regardless of
-/// how much their pools overlap. If an event's eligible pool ever runs dry
-/// before `per_year` is satisfied (possible in principle with a much more
-/// restrictive custom table than the one below), it simply gets fewer
-/// occurrences that year rather than panicking.
-fn year_schedule(world_seed: u32, year: u32) -> [Option<MoonEvent>; MONTHS_PER_YEAR as usize] {
+/// `requires_gap_month`) not touching an already-claimed month, including
+/// the previous year's December via `previous_december_claimed` -
+/// recomputed after every single pick, not just once per event, so an
+/// event drawing more than one occurrence (red draws two) can't land its
+/// own two months next to each other either. Table order acts as a
+/// priority (earlier entries get first pick of any months two entries
+/// could both use - e.g. blue's non-winter pool and green's non-spring
+/// pool genuinely overlap in summer/autumn), but claiming as each month is
+/// picked is what actually guarantees no two events ever collide or end up
+/// adjacent, regardless of how much their pools overlap. If an event's
+/// eligible pool ever runs dry before `per_year` is satisfied (possible in
+/// principle with a much more restrictive custom table than the one
+/// below), it simply gets fewer occurrences that year rather than panicking.
+fn year_schedule_one_year(
+    world_seed: u32,
+    year: u32,
+    previous_december_claimed: bool,
+) -> [Option<MoonEvent>; MONTHS_PER_YEAR as usize] {
     let mut schedule = [None; MONTHS_PER_YEAR as usize];
     let base = hash_str(&format!("moon-events-{world_seed}-{year}"));
     for (i, def) in MOON_EVENTS.iter().enumerate() {
@@ -344,7 +357,8 @@ fn year_schedule(world_seed: u32, year: u32) -> [Option<MoonEvent>; MONTHS_PER_Y
                 .filter(|&m| {
                     schedule[m as usize].is_none()
                         && !def.excluded_seasons.contains(&season_of_month(m))
-                        && (!def.requires_gap_month || !touches_a_claimed_month(m, &schedule))
+                        && (!def.requires_gap_month
+                            || !touches_a_claimed_month(m, &schedule, previous_december_claimed))
                 })
                 .collect();
             if pool.is_empty() {
@@ -353,6 +367,29 @@ fn year_schedule(world_seed: u32, year: u32) -> [Option<MoonEvent>; MONTHS_PER_Y
             let idx = ((rng() * pool.len() as f32) as usize).min(pool.len() - 1);
             schedule[pool[idx] as usize] = Some(def.event);
         }
+    }
+    schedule
+}
+
+/// [`year_schedule_one_year`], but carries the gap rule across year
+/// boundaries too: a claimed December must block the following January
+/// exactly as it would block any other adjacent month, which needs to know
+/// whether *last* year's December was claimed - which itself depends on
+/// the year before that, all the way back to year `0`. Walking forward
+/// from year `0` and keeping only that one rolling fact (never the full
+/// history of every prior year) keeps this cheap regardless of how large
+/// `year` gets over a long-lived save: `O(year)` tiny 12-month passes, not
+/// `O(year)` worth of state kept around. `update_sky` calls this fresh
+/// every frame like everything else in this module - even a save many
+/// real-world years old is nowhere near enough played time (at 30 minutes
+/// per in-game day, one in-game year is 48 real hours) to make that loop
+/// noticeable.
+fn year_schedule(world_seed: u32, target_year: u32) -> [Option<MoonEvent>; MONTHS_PER_YEAR as usize] {
+    let mut schedule = [None; MONTHS_PER_YEAR as usize];
+    let mut previous_december_claimed = false;
+    for year in 0..=target_year {
+        schedule = year_schedule_one_year(world_seed, year, previous_december_claimed);
+        previous_december_claimed = schedule[MONTHS_PER_YEAR as usize - 1].is_some();
     }
     schedule
 }
@@ -938,6 +975,29 @@ mod tests {
                             month + 1
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// The exact scenario this was asked for: a claimed December must
+    /// never be immediately followed by a claimed January the next year -
+    /// checked across many consecutive year pairs, not just within one
+    /// year's own boundaries (`no_two_special_months_are_ever_adjacent`
+    /// above only ever looks inside a single year's 12 months).
+    #[test]
+    fn no_special_lands_in_january_right_after_a_claimed_december() {
+        for world_seed in 0u32..500 {
+            for year in 1u32..8 {
+                let previous_december = year_schedule(world_seed, year - 1)[MONTHS_PER_YEAR as usize - 1];
+                let this_january = year_schedule(world_seed, year)[0];
+                if previous_december.is_some() {
+                    assert!(
+                        this_january.is_none(),
+                        "seed {world_seed}: December of year {} ({previous_december:?}) is immediately \
+                         followed by a claimed January of year {year} ({this_january:?})",
+                        year - 1
+                    );
                 }
             }
         }

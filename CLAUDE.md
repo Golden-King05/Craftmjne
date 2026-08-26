@@ -695,9 +695,37 @@ etc.) instead of inventing a new approach:
   assertions rather than loosening them defensively; deleted the sweep
   once it had answered the question (see `no_two_special_months_are_ever_
   adjacent` for the permanent, narrower regression test that stayed).
-  Deliberately does *not* wrap year-end into the next year's month `0` -
-  each year is scheduled independently with no visibility into its
-  neighbours, so a real edge case (Dec of year N next to Jan of year N+1)
-  can still slip through; documented as a known simplification rather than
-  silently ignored, since coordinating across `year_schedule` calls would
-  be real added complexity for a purely cosmetic feature.
+  Originally did *not* wrap year-end into the next year's month `0`
+  (each year was scheduled independently, so Dec of year N next to Jan of
+  year N+1 could still slip through) - documented as a known
+  simplification rather than silently ignored, and fixed in a follow-up
+  once the user confirmed they actually wanted it closed rather than left
+  as a documented gap (see the next entry).
+- **A "documented simplification" is still worth asking about before
+  assuming it's acceptable - the user may have meant "fix it," not
+  "acknowledge it."** The December/January boundary gap above was
+  deliberately left open with a comment explaining why; the very next ask
+  was "make sure checks across boundaries... I don't want that problem."
+  Closing it needed a real (if small) design decision: December's and
+  January's placements are mutually exclusive but neither is inherently
+  "first," so the resolution is to always let the chronologically earlier
+  year win - process years in increasing order and thread forward a single
+  rolling fact (`previous_december_claimed: bool`) from `year_schedule_one_
+  year`'s December outcome into the next year's own scheduling call.
+  Renamed the old single-year function to `year_schedule_one_year` and
+  gave it that new parameter; the public `year_schedule(seed, year)` now
+  walks forward from year `0`, discarding every prior year's full
+  schedule and keeping only that one boolean - `O(year)` tiny 12-month
+  passes per call (recomputed fresh every frame in `update_sky`, like
+  everything else here), not `O(year)` of retained state. This stays
+  negligible for a *very* long-lived save (one in-game year is 48 real
+  hours at 30 minutes per in-game day, so `year` climbing into the
+  thousands would take a real user years of continuous play) - re-ran the
+  same "sweep many (seed, year) pairs, count shortfalls" throwaway-test
+  technique from the entry above (this time also varying `year` up to 20,
+  since a stricter cross-year constraint could plausibly starve the pool
+  differently than the within-year-only version did) before trusting the
+  stricter constraint still hits its exact occurrence counts, saw zero
+  shortfalls across 6,000 pairs, then deleted the sweep and kept a small
+  permanent regression test
+  (`no_special_lands_in_january_right_after_a_claimed_december`) instead.

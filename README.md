@@ -472,9 +472,11 @@ the winter/spring exclusion rules real.
 Which month(s) each event lands on is re-rolled every year (seeded by the
 world's own seed plus the year number — reproducible, not truly random,
 same as terrain generation) rather than fixed, never collides with another
-event that same year, and never lands right next to one either — there's
-always at least one plain-moon month between any two specials, so a
-blue/red/green chain can never land three months in a row. All of it — how
+event that same year, and never lands right next to one either — including
+across a year boundary (a claimed December is never immediately followed
+by a claimed January). There's always at least one plain-moon month
+between any two specials, so a blue/red/green chain can never land three
+months in a row. All of it — how
 often an event happens, which seasons it's excluded from, whether it even
 needs a full moon, whether it needs that breathing-room month — lives in
 one small declarative table (`sky::MOON_EVENTS`), not hand-written per-event
