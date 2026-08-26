@@ -293,6 +293,18 @@ fn enter_game_grab(mut paused: ResMut<PauseState>, mut windows: Query<&mut Windo
     window.cursor_options.visible = false;
 }
 
+/// `OnExit(AppState::InGame)`: the mirror image of `enter_game_grab` - the
+/// menu is plain point-and-click UI, so leaving a world (however that
+/// happens - "Back to Main Menu" from the pause screen, or the world list's
+/// own quit path) must release the cursor exactly like the pause menu does,
+/// or it stays locked/invisible and the main menu looks unresponsive to the
+/// mouse.
+fn exit_game_release_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    let Ok(mut window) = windows.single_mut() else { return };
+    window.cursor_options.grab_mode = CursorGrabMode::None;
+    window.cursor_options.visible = true;
+}
+
 /// Escape toggles the pause menu (see `menu::sync_pause_screen` for the
 /// overlay itself): first press frees the cursor and pauses, second press
 /// re-grabs and resumes. `menu::handle_menu_buttons` does the same re-grab
@@ -429,6 +441,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<PauseState>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(AppState::InGame), enter_game_grab)
+            .add_systems(OnExit(AppState::InGame), exit_game_release_cursor)
             .add_systems(
                 Update,
                 (cursor_grab, mouse_look, player_update)
