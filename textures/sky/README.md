@@ -30,6 +30,14 @@ one-phase-per-day convention Minecraft uses. There's nothing to configure:
 whichever image ends up as the moon's base texture (procedural or your own
 `moon.png`) gets masked into all 8 shapes automatically.
 
+## Special full moons
+
+Most full moons are a **red moon**; once a year there's a **blue moon**
+(always in summer) and a **green moon** (always in autumn). These are a
+plain color tint multiplied on top of whatever the moon's base texture
+is (procedural or your own `moon.png`) - not separate art, and nothing
+to configure here either. Purely cosmetic for now.
+
 ## Where this folder needs to live
 
 Same rule as `blocks/` and `textures/blocks/`: next to the game's `.exe`

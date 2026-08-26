@@ -35,6 +35,17 @@
 //! independent images, so a custom `moon.png` override automatically gets
 //! correct phase shapes with no extra files needed.
 //!
+//! Full moons also get an occasional special color, purely cosmetic for now
+//! (no gameplay effect - see [`DayNightClock::moon_event`]): a **red moon**
+//! most months (`MoonEvent::Red`), a **blue moon** once a year in
+//! [`Season::Summer`] (never [`Season::Winter`]), and a **green moon** once
+//! a year in [`Season::Autumn`] (never [`Season::Spring`]) - see
+//! [`BLUE_MOON_MONTH`]/[`GREEN_MOON_MONTH`]. Each is a plain color tint
+//! multiplied into the moon's existing texture (`update_sky`), not a
+//! separate sprite. [`Season`] itself is a pure calendar concept with no
+//! other effect yet - it exists solely to make those two exclusion rules
+//! real and checkable instead of a permanent no-op.
+//!
 //! The clock (and moon phase) persists per-world (`save::WorldData
 //! ::time_of_day`/`::day_count`) so leaving and reloading resumes rather
 //! than resetting to dawn/new-moon - the same
@@ -63,6 +74,22 @@ use crate::state::AppState;
 pub const DAY_SECONDS: f32 = 20.0 * 60.0;
 pub const NIGHT_SECONDS: f32 = 10.0 * 60.0;
 pub const CYCLE_SECONDS: f32 = DAY_SECONDS + NIGHT_SECONDS;
+
+/// A "month" is defined to exactly match the moon's own 8-phase cycle, so
+/// every month's full moon (`moon_phase() == 4`) always falls on the same
+/// day-of-month. A "year" is a plain 12-month calendar, same ordering as
+/// the real one (`Season::Spring` first) - see `DayNightClock::season`.
+pub const DAYS_PER_MONTH: u32 = 8;
+pub const MONTHS_PER_YEAR: u32 = 12;
+/// The one month a year whose full moon is a blue moon instead of red -
+/// month `4` falls in `Season::Summer` (months `3..=5`), guaranteeing it's
+/// never `Season::Winter` regardless of how the seasons themselves are
+/// tuned (see `season_never_lands_a_special_moon_in_its_excluded_season`).
+const BLUE_MOON_MONTH: u32 = 4;
+/// The one month a year whose full moon is a green moon instead of red -
+/// month `7` falls in `Season::Autumn` (months `6..=8`), guaranteeing it's
+/// never `Season::Spring`.
+const GREEN_MOON_MONTH: u32 = 7;
 
 /// Night's sky/fog color and the world's darkest brightness floor - never
 /// fully black, matching the softly-lit look everything else in this
@@ -157,6 +184,84 @@ impl DayNightClock {
     /// for how a phase index becomes a lit/dark shape.
     pub fn moon_phase(&self) -> u8 {
         (self.day_count % 8) as u8
+    }
+
+    /// How many full [`DAYS_PER_MONTH`]-day months have elapsed - a "month"
+    /// is defined to exactly match the moon's own phase cycle, so a full
+    /// moon (`moon_phase() == 4`) always lands in the middle of every month.
+    fn month(&self) -> u32 {
+        self.day_count / DAYS_PER_MONTH
+    }
+
+    /// `month()`, wrapped to a `[0, MONTHS_PER_YEAR)` position within the
+    /// current year - what [`Self::season`] and [`Self::moon_event`] key off.
+    fn month_of_year(&self) -> u32 {
+        self.month() % MONTHS_PER_YEAR
+    }
+
+    /// The current calendar season - a pure calendar concept with no other
+    /// gameplay effect yet (see the module docs): it exists solely so blue
+    /// moon (never winter) and green moon (never spring) are real,
+    /// checkable rules instead of a permanent no-op.
+    pub fn season(&self) -> Season {
+        match self.month_of_year() {
+            0..=2 => Season::Spring,
+            3..=5 => Season::Summer,
+            6..=8 => Season::Autumn,
+            _ => Season::Winter, // 9..=11
+        }
+    }
+
+    /// Tonight's special moon coloring, if any - always `None` except on a
+    /// full moon (`moon_phase() == 4`), and even then only a plain
+    /// [`MoonEvent::Red`] most months: [`BLUE_MOON_MONTH`]/
+    /// [`GREEN_MOON_MONTH`] each override it once a year. Purely cosmetic
+    /// for now (see the module docs) - `update_sky` is the only consumer,
+    /// tinting whichever phase material is currently shown.
+    pub fn moon_event(&self) -> Option<MoonEvent> {
+        if self.moon_phase() != 4 {
+            return None;
+        }
+        Some(match self.month_of_year() {
+            BLUE_MOON_MONTH => MoonEvent::Blue,
+            GREEN_MOON_MONTH => MoonEvent::Green,
+            _ => MoonEvent::Red,
+        })
+    }
+}
+
+/// A pure calendar concept (see [`DayNightClock::season`]'s doc comment) -
+/// no other system reads this yet.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Season {
+    Spring,
+    Summer,
+    Autumn,
+    Winter,
+}
+
+/// A special full-moon coloring - see [`DayNightClock::moon_event`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MoonEvent {
+    /// Every full moon that isn't a blue or green moon - "once a month".
+    Red,
+    /// Once a year ([`BLUE_MOON_MONTH`], always [`Season::Summer`] - never
+    /// [`Season::Winter`]).
+    Blue,
+    /// Once a year ([`GREEN_MOON_MONTH`], always [`Season::Autumn`] - never
+    /// [`Season::Spring`]).
+    Green,
+}
+
+/// The tint multiplied into the moon's texture color for a [`MoonEvent`] -
+/// `None` (an ordinary full moon night never reached via [`MoonEvent`]
+/// itself, but also what every *non*-full-moon night uses) is a no-op white.
+fn moon_event_tint(event: Option<MoonEvent>) -> LinearRgba {
+    match event {
+        None => LinearRgba::WHITE,
+        Some(MoonEvent::Red) => LinearRgba::new(1.0, 0.35, 0.3, 1.0),
+        Some(MoonEvent::Blue) => LinearRgba::new(0.4, 0.55, 1.0, 1.0),
+        Some(MoonEvent::Green) => LinearRgba::new(0.45, 0.95, 0.5, 1.0),
     }
 }
 
@@ -550,7 +655,9 @@ fn update_sky(
         moon_tf.rotation = facing;
     }
     if let Some(mat) = celestial_assets.get_mut(moon_phase_material) {
-        mat.params.tint.alpha = if !is_day { fade } else { 0.0 };
+        let color = moon_event_tint(clock.moon_event());
+        let alpha = if !is_day { fade } else { 0.0 };
+        mat.params.tint = LinearRgba::new(color.red, color.green, color.blue, alpha);
     }
 
     let daylight = clock.daylight();
@@ -602,6 +709,94 @@ mod tests {
             let clock = DayNightClock { day_count, ..Default::default() };
             assert_eq!(clock.moon_phase(), expected, "day_count {day_count}");
         }
+    }
+
+    #[test]
+    fn month_of_year_wraps_every_twelve_months() {
+        for (month, expected) in [(0, 0), (1, 1), (11, 11), (12, 0), (13, 1), (24, 0), (100, 4)] {
+            let clock = DayNightClock { day_count: month * DAYS_PER_MONTH, ..Default::default() };
+            assert_eq!(clock.month_of_year(), expected, "month {month}");
+        }
+    }
+
+    #[test]
+    fn season_follows_the_real_spring_summer_autumn_winter_ordering() {
+        let season_of = |month_of_year: u32| {
+            DayNightClock { day_count: month_of_year * DAYS_PER_MONTH, ..Default::default() }.season()
+        };
+        for m in 0..=2 {
+            assert_eq!(season_of(m), Season::Spring, "month {m}");
+        }
+        for m in 3..=5 {
+            assert_eq!(season_of(m), Season::Summer, "month {m}");
+        }
+        for m in 6..=8 {
+            assert_eq!(season_of(m), Season::Autumn, "month {m}");
+        }
+        for m in 9..=11 {
+            assert_eq!(season_of(m), Season::Winter, "month {m}");
+        }
+        // And it must wrap back to spring for the next year, not keep
+        // counting new seasons forever.
+        assert_eq!(season_of(12), Season::Spring);
+    }
+
+    #[test]
+    fn a_non_full_moon_never_has_a_special_event_regardless_of_month() {
+        for phase in [0u8, 1, 2, 3, 5, 6, 7] {
+            // day_count = BLUE_MOON_MONTH's month, but offset to a
+            // non-full phase - even the "special" month must stay a plain
+            // moon on every night that isn't its one full moon.
+            let day_count = BLUE_MOON_MONTH * DAYS_PER_MONTH + phase as u32;
+            let clock = DayNightClock { day_count, ..Default::default() };
+            assert_eq!(clock.moon_phase(), phase);
+            assert_eq!(clock.moon_event(), None, "phase {phase} must never be a special event");
+        }
+    }
+
+    #[test]
+    fn most_full_moons_are_red_but_one_a_year_is_blue_and_one_is_green() {
+        // A red moon "once a month" - every full moon except the two
+        // special ones.
+        for month in [0, 1, 2, 3, 5, 6, 8, 9, 10, 11] {
+            let day_count = month * DAYS_PER_MONTH + 4; // +4 = that month's full moon
+            let clock = DayNightClock { day_count, ..Default::default() };
+            assert_eq!(clock.moon_event(), Some(MoonEvent::Red), "month {month}");
+        }
+
+        let blue = DayNightClock { day_count: BLUE_MOON_MONTH * DAYS_PER_MONTH + 4, ..Default::default() };
+        assert_eq!(blue.moon_event(), Some(MoonEvent::Blue));
+        let green = DayNightClock { day_count: GREEN_MOON_MONTH * DAYS_PER_MONTH + 4, ..Default::default() };
+        assert_eq!(green.moon_event(), Some(MoonEvent::Green));
+
+        // And it recurs every year, not just the first one.
+        let blue_next_year =
+            DayNightClock { day_count: (MONTHS_PER_YEAR + BLUE_MOON_MONTH) * DAYS_PER_MONTH + 4, ..Default::default() };
+        assert_eq!(blue_next_year.moon_event(), Some(MoonEvent::Blue));
+    }
+
+    #[test]
+    fn blue_and_green_moon_never_land_in_their_excluded_season() {
+        let blue_season = DayNightClock { day_count: BLUE_MOON_MONTH * DAYS_PER_MONTH, ..Default::default() }.season();
+        assert_ne!(blue_season, Season::Winter, "blue moon must never fall in winter");
+
+        let green_season = DayNightClock { day_count: GREEN_MOON_MONTH * DAYS_PER_MONTH, ..Default::default() }.season();
+        assert_ne!(green_season, Season::Spring, "green moon must never fall in spring");
+    }
+
+    #[test]
+    fn moon_event_tint_is_a_plain_white_no_op_for_an_ordinary_moon() {
+        assert_eq!(moon_event_tint(None), LinearRgba::WHITE);
+    }
+
+    #[test]
+    fn each_moon_event_gets_a_visually_distinct_tint() {
+        let red = moon_event_tint(Some(MoonEvent::Red));
+        let blue = moon_event_tint(Some(MoonEvent::Blue));
+        let green = moon_event_tint(Some(MoonEvent::Green));
+        assert!(red.red > red.green && red.red > red.blue, "red moon should read red");
+        assert!(blue.blue > blue.red && blue.blue > blue.green, "blue moon should read blue");
+        assert!(green.green > green.red && green.green > green.blue, "green moon should read green");
     }
 
     #[test]

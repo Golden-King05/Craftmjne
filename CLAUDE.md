@@ -607,3 +607,35 @@ etc.) instead of inventing a new approach:
   from the equator, not the reverse) - the geometry was right the whole
   time, the intuition-first test was wrong, caught by computing rather than
   asserting first.
+- **A cosmetic-only calendar/season system is still a real feature worth
+  building deliberately, not a rushed stub - but it also doesn't need to
+  reach further than what it's actually gating.** Asked to add red/blue/
+  green full moons where blue must never fall in winter and green must
+  never fall in spring, the honest blocker was that no season concept
+  existed yet - rather than silently picking arbitrary months and hoping
+  they'd stay non-conflicting forever, or silently building a full
+  temperature/biome-affecting season system nobody asked for, the right
+  move was asking whether to build a minimal one now (see `AskUserQuestion`
+  - this is exactly the kind of scope-defining call that's the user's to
+  make, not an assumption to bake in either direction). `sky::Season` is
+  the result: a pure calendar enum derived from `DayNightClock::day_count`
+  (`DAYS_PER_MONTH=8` intentionally matches the moon's own phase cycle, so
+  a full moon always lands mid-month; `MONTHS_PER_YEAR=12` in the real
+  spring/summer/autumn/winter order), consulted by exactly one thing
+  (`moon_event`) and nothing else - no terrain/temperature/gameplay hook,
+  since none of that was asked for. `BLUE_MOON_MONTH`/`GREEN_MOON_MONTH`
+  are fixed constants chosen to trivially satisfy their exclusion
+  (`season_follows_the_real_spring_summer_autumn_winter_ordering` and
+  `blue_and_green_moon_never_land_in_their_excluded_season` both guard this
+  as a real, re-checked invariant rather than a comment promising it).
+- **A recolor-only game event ("this full moon is special") is a tint
+  multiply on the existing material, never a second texture or asset.**
+  `sky::moon_event_tint` returns a plain `LinearRgba`; `update_sky` folds
+  it straight into the same `CelestialParams.tint` uniform already driving
+  the horizon fade (`tint.rgb` = the event color, `tint.a` = the existing
+  fade), applied only to whichever phase material is currently shown - so
+  red/blue/green moons cost nothing beyond three constants and one extra
+  multiply already sitting in the per-frame update, no new draw call, no
+  new mesh, no new image upload. Reach for a tint uniform before a new
+  sprite/material any time the "special" version is still fundamentally
+  the same shape as the normal one.

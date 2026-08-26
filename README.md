@@ -427,7 +427,8 @@ for a bigger save file, same as a session with a lot of block edits does.
 west over the whole day; the moon does the same over the whole night — only
 one is ever up at a time, each completing its entire rise-to-set arc within
 its own phase's duration (a stylized simplification, not a real orbit: no
-latitude or season). "East"/"west" match this engine's established compass
+latitude, and the calendar below is a plain 12-month year, not a real
+season length). "East"/"west" match this engine's established compass
 mapping (`blocks.rs`'s face-order doc: +X east, -X west, -Z north, +Z
 south).
 
@@ -456,6 +457,17 @@ and a pale cratered disc), exactly like block textures: drop a
 real art instead — see `textures/sky/README.md`. Unlike the block atlas,
 there's no shared resolution to keep in sync; each is one standalone
 sprite used at its own native size.
+
+A full moon occasionally gets a special color — purely cosmetic for now,
+no gameplay effect yet. Most full moons are a **red moon**; once a year
+there's a **blue moon** (always in summer, never winter) and a **green
+moon** (always in autumn, never spring). Each is a plain color tint
+multiplied into the moon's existing texture (`sky::moon_event_tint`), not
+a separate sprite. A "month" is defined to match the moon's own 8-day
+phase cycle (so every month's full moon lands on the same day-of-month),
+and a "year" is a plain 12-month calendar — `DayNightClock::season` is a
+pure calendar concept with no other effect yet; it exists solely to make
+the winter/spring exclusion rules real.
 
 The clock (and moon phase) persists per-world (leaving and reloading
 resumes the same time of day/phase rather than resetting to dawn and a new
