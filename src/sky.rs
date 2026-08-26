@@ -41,17 +41,20 @@
 //! [`Season::Winter`]), and a **green moon** once a year in
 //! [`Season::Autumn`] (never [`Season::Spring`]). Which month(s) each
 //! lands on is re-rolled every year (seeded, not truly random - see
-//! [`year_schedule`]), never the same month as another event that year.
-//! Each is a plain color tint multiplied into the moon's existing texture
+//! [`year_schedule`]), never the same month as another event that year and
+//! never immediately next to one either - there's always at least one
+//! plain-moon month of breathing room between any two specials, so a
+//! blue/red/green chain can never land three months in a row. Each is a
+//! plain color tint multiplied into the moon's existing texture
 //! (`update_sky`), not a separate sprite.
 //!
-//! All three rules - frequency, excluded seasons, whether an event even
-//! needs a full moon - live in one declarative table ([`MOON_EVENTS`]),
-//! not per-event code: adding a fourth event, or changing an existing
-//! one's frequency/season, means editing that table. [`Season`] itself is
-//! a pure calendar concept with no other effect yet - it exists solely to
-//! make the excluded-season rules real and checkable instead of a
-//! permanent no-op.
+//! All of that - frequency, excluded seasons, whether an event even needs
+//! a full moon, whether it needs a gap month - lives in one declarative
+//! table ([`MOON_EVENTS`]), not per-event code: adding a fourth event, or
+//! changing an existing one's frequency/season/gap rule, means editing
+//! that table. [`Season`] itself is a pure calendar concept with no other
+//! effect yet - it exists solely to make the excluded-season rules real
+//! and checkable instead of a permanent no-op.
 //!
 //! The clock (and moon phase) persists per-world (`save::WorldData
 //! ::time_of_day`/`::day_count`) so leaving and reloading resumes rather
@@ -111,31 +114,43 @@ struct MoonEventDef {
     /// out (showing all month instead) without `moon_event` needing to
     /// special-case it by name.
     requires_full_moon: bool,
+    /// If `true` (every event below sets it), this event's month(s) can
+    /// never land immediately before or after *any* other special month
+    /// already claimed that year (any event, not just its own kind) - so
+    /// as long as every event in the table sets this, there's always at
+    /// least one plain-moon month between any two specials, and a
+    /// blue/red/green chain can never land three months in a row. Defaults
+    /// to being opted into by every event here, but exists as its own flag
+    /// so a future event that's fine appearing right next to another one
+    /// can skip it - same reasoning as `requires_full_moon`.
+    requires_gap_month: bool,
 }
 
 /// The whole special-moon-event schedule, in one place. Blue and green
 /// each get one guaranteed-in-season month a year; red gets two completely
 /// unrestricted months (so "once a month" from the original ask becomes
-/// "the two months a year that aren't already blue/green/an ordinary full
-/// moon" - see the module docs).
+/// "twice a year" - see the module docs).
 const MOON_EVENTS: &[MoonEventDef] = &[
     MoonEventDef {
         event: MoonEvent::Blue,
         per_year: 1,
         excluded_seasons: &[Season::Winter],
         requires_full_moon: true,
+        requires_gap_month: true,
     },
     MoonEventDef {
         event: MoonEvent::Green,
         per_year: 1,
         excluded_seasons: &[Season::Spring],
         requires_full_moon: true,
+        requires_gap_month: true,
     },
     MoonEventDef {
         event: MoonEvent::Red,
         per_year: 2,
         excluded_seasons: &[],
         requires_full_moon: true,
+        requires_gap_month: true,
     },
 ];
 
@@ -282,6 +297,17 @@ fn season_of_month(month_of_year: u32) -> Season {
     }
 }
 
+/// True if `month` sits immediately before or after a month that already
+/// has an event this year - doesn't wrap year-end to next year's month `0`
+/// (each year is scheduled independently, with no visibility into its
+/// neighbours), a deliberate, documented simplification for a purely
+/// cosmetic feature rather than coordinating `year_schedule` calls across
+/// years.
+fn touches_a_claimed_month(month: u32, schedule: &[Option<MoonEvent>; MONTHS_PER_YEAR as usize]) -> bool {
+    (month > 0 && schedule[month as usize - 1].is_some())
+        || (month + 1 < MONTHS_PER_YEAR && schedule[month as usize + 1].is_some())
+}
+
 /// Deterministically (but pseudo-randomly, re-rolled fresh every year)
 /// assigns this year's [`MOON_EVENTS`] occurrences to specific months -
 /// `[i]` is which event (if any) month `i` hosts. Seeded from the world's
@@ -289,15 +315,23 @@ fn season_of_month(month_of_year: u32) -> Season {
 /// year (a reload must show the same schedule) but differs world to world
 /// and year to year - the same seeded-not-truly-random determinism every
 /// other procedural piece of this engine (terrain, block texture jitter)
-/// already follows. Events are drawn in [`MOON_EVENTS`]'s table order, each
-/// only picking from months neither already claimed by an earlier event
-/// this year nor in one of its own excluded seasons - so table order acts
-/// as a priority (earlier entries get first pick of eligible months) but
-/// never actually matters for the three events here, since blue and
-/// green's excluded seasons don't overlap and red has none to conflict
-/// with. If an event's eligible pool ever runs out before `per_year` is
-/// satisfied (only possible with a very restrictive custom table), it
-/// simply gets fewer occurrences that year rather than panicking.
+/// already follows.
+///
+/// Events are drawn in [`MOON_EVENTS`]'s table order, each occurrence
+/// picking fresh from whatever's currently eligible: not yet claimed this
+/// year, not in one of the event's own excluded seasons, and (if
+/// `requires_gap_month`) not touching an already-claimed month - recomputed
+/// after every single pick, not just once per event, so an event drawing
+/// more than one occurrence (red draws two) can't land its own two months
+/// next to each other either. Table order acts as a priority (earlier
+/// entries get first pick of any months two entries could both use - e.g.
+/// blue's non-winter pool and green's non-spring pool genuinely overlap in
+/// summer/autumn), but claiming as each month is picked is what actually
+/// guarantees no two events ever collide or end up adjacent, regardless of
+/// how much their pools overlap. If an event's eligible pool ever runs dry
+/// before `per_year` is satisfied (possible in principle with a much more
+/// restrictive custom table than the one below), it simply gets fewer
+/// occurrences that year rather than panicking.
 fn year_schedule(world_seed: u32, year: u32) -> [Option<MoonEvent>; MONTHS_PER_YEAR as usize] {
     let mut schedule = [None; MONTHS_PER_YEAR as usize];
     let base = hash_str(&format!("moon-events-{world_seed}-{year}"));
@@ -305,15 +339,19 @@ fn year_schedule(world_seed: u32, year: u32) -> [Option<MoonEvent>; MONTHS_PER_Y
         // A large prime offset per event index gives each its own
         // independent pseudo-random stream from the same year's base seed.
         let mut rng = mulberry32(base.wrapping_add(i as u32 * 104_729));
-        let mut pool: Vec<u32> = (0..MONTHS_PER_YEAR)
-            .filter(|&m| schedule[m as usize].is_none() && !def.excluded_seasons.contains(&season_of_month(m)))
-            .collect();
         for _ in 0..def.per_year {
+            let pool: Vec<u32> = (0..MONTHS_PER_YEAR)
+                .filter(|&m| {
+                    schedule[m as usize].is_none()
+                        && !def.excluded_seasons.contains(&season_of_month(m))
+                        && (!def.requires_gap_month || !touches_a_claimed_month(m, &schedule))
+                })
+                .collect();
             if pool.is_empty() {
                 break;
             }
             let idx = ((rng() * pool.len() as f32) as usize).min(pool.len() - 1);
-            schedule[pool.remove(idx) as usize] = Some(def.event);
+            schedule[pool[idx] as usize] = Some(def.event);
         }
     }
     schedule
@@ -875,6 +913,30 @@ mod tests {
                             assert_ne!(season, Season::Spring, "seed {world_seed} year {year}: green moon in spring")
                         }
                         _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every event in `MOON_EVENTS` sets `requires_gap_month: true`, so no
+    /// two special months should ever be adjacent - regardless of which
+    /// events they are (a blue moon right after a red moon is just as
+    /// disallowed as two reds in a row). Swept over many more seeds than
+    /// the other schedule tests since this is exactly the kind of
+    /// off-by-one a single hand-picked example could miss.
+    #[test]
+    fn no_two_special_months_are_ever_adjacent() {
+        for world_seed in 0u32..500 {
+            for year in 0u32..5 {
+                let schedule = year_schedule(world_seed, year);
+                for month in 0..MONTHS_PER_YEAR as usize {
+                    if schedule[month].is_some() && month + 1 < schedule.len() {
+                        assert!(
+                            schedule[month + 1].is_none(),
+                            "seed {world_seed} year {year}: months {month} and {} are both special",
+                            month + 1
+                        );
                     }
                 }
             }

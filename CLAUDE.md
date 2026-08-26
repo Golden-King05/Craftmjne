@@ -674,3 +674,30 @@ etc.) instead of inventing a new approach:
   (`year_schedule_always_places_the_right_counts_with_no_overlap_or_excluded_season`
   loops several seeds/years and asserts zero double-booked months), don't
   just trust the algorithm's shape to guarantee it.
+- **"No two X back to back" is a constraint on the *shared claimed set*,
+  not a per-event rule - implement it once, in the one place that already
+  tracks what's claimed.** A follow-up asked that no two special months
+  ever land adjacent (any event next to any other, not just the same kind
+  twice), as a reusable opt-in flag like `requires_full_moon`. The natural
+  place to enforce it is inside `year_schedule`'s own claiming loop
+  (`requires_gap_month` on `MoonEventDef`, checked by `touches_a_claimed_
+  month` against the in-progress `schedule` array) rather than as a
+  separate post-hoc validation pass - the function already recomputes each
+  occurrence's eligible pool fresh against the current claims (needed
+  anyway so an event drawing 2+ occurrences, like red, can't land its own
+  two next to each other either), so the gap check is just one more
+  predicate in that same filter. **Before trusting a greedy sequential
+  picker to always satisfy a new constraint, measure the failure rate
+  rather than assume it from the algorithm's shape** - added a throwaway
+  test that swept 15,000 (seed, year) pairs counting how often the
+  eligible pool ran dry before an event's full quota was drawn, saw zero
+  shortfalls, and only then kept the existing tests' exact-count
+  assertions rather than loosening them defensively; deleted the sweep
+  once it had answered the question (see `no_two_special_months_are_ever_
+  adjacent` for the permanent, narrower regression test that stayed).
+  Deliberately does *not* wrap year-end into the next year's month `0` -
+  each year is scheduled independently with no visibility into its
+  neighbours, so a real edge case (Dec of year N next to Jan of year N+1)
+  can still slip through; documented as a known simplification rather than
+  silently ignored, since coordinating across `year_schedule` calls would
+  be real added complexity for a purely cosmetic feature.
