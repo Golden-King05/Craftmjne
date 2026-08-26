@@ -623,11 +623,9 @@ etc.) instead of inventing a new approach:
   a full moon always lands mid-month; `MONTHS_PER_YEAR=12` in the real
   spring/summer/autumn/winter order), consulted by exactly one thing
   (`moon_event`) and nothing else - no terrain/temperature/gameplay hook,
-  since none of that was asked for. `BLUE_MOON_MONTH`/`GREEN_MOON_MONTH`
-  are fixed constants chosen to trivially satisfy their exclusion
-  (`season_follows_the_real_spring_summer_autumn_winter_ordering` and
-  `blue_and_green_moon_never_land_in_their_excluded_season` both guard this
-  as a real, re-checked invariant rather than a comment promising it).
+  since none of that was asked for. (A follow-up request replaced the
+  original fixed-month constants with a random-per-year schedule - see the
+  next entry - but `Season` itself and its single consumer are unchanged.)
 - **A recolor-only game event ("this full moon is special") is a tint
   multiply on the existing material, never a second texture or asset.**
   `sky::moon_event_tint` returns a plain `LinearRgba`; `update_sky` folds
@@ -639,3 +637,40 @@ etc.) instead of inventing a new approach:
   new mesh, no new image upload. Reach for a tint uniform before a new
   sprite/material any time the "special" version is still fundamentally
   the same shape as the normal one.
+- **When a user explicitly asks to avoid rewriting the same rule N times,
+  that's a request for one declarative table + one generic algorithm, not
+  N parallel `if`/`match` arms that happen to look similar.** A follow-up
+  to the red/blue/green moon feature above asked for: only ever on a full
+  moon (a reusable yes/no, defaulting no); season exclusion expressed as a
+  plain list ("spring, summer, ..." with commas for more than one) instead
+  of a hand-picked month + a bespoke test proving it doesn't conflict; red
+  bumped from "every month" to twice a year; and blue/green (now red too)
+  landing on a *different, randomly chosen* month each year instead of a
+  fixed one. `sky::MoonEventDef` is the single declarative shape all three
+  events share (`per_year`, `excluded_seasons: &[Season]`,
+  `requires_full_moon: bool`) collected into one `MOON_EVENTS` table;
+  `year_schedule` is the one generic algorithm that reads it - looping the
+  table, for each entry filtering `0..MONTHS_PER_YEAR` down to months both
+  unclaimed *this year* and not in an excluded season, then drawing
+  `per_year` of them via a seeded RNG and marking them claimed before the
+  next entry runs. Adding a fourth event, or changing red from 2/year to
+  3, is a one-line table edit - no new branch anywhere. **The "random"
+  still has to be the engine's usual seeded-not-true-random**, so a reload
+  shows the same year's schedule and different worlds/years genuinely
+  differ: seeded from `hash_str("moon-events-{world_seed}-{year}")`, with
+  each table entry's own RNG stream derived by offsetting that seed by a
+  large prime times its index (`i * 104_729`) - cheap, no stored/cached
+  schedule needed anywhere, since `year_schedule` is a pure function of
+  `(world_seed, year)` and can just be recomputed on demand (currently:
+  every frame in `update_sky`, negligible cost for 12 months x 3 events).
+  **Claim-as-you-go is what makes collisions structurally impossible**
+  without any cross-event coordination: since each entry's candidate pool
+  excludes every month already claimed by an earlier entry in the same
+  `year_schedule` call, two events can never end up double-booking a
+  month regardless of how their excluded seasons happen to overlap (blue's
+  non-winter pool and green's non-spring pool actually *do* overlap in
+  summer/autumn once expressed this generically - unlike the old fixed-
+  month version where that never came up) - test this invariant directly
+  (`year_schedule_always_places_the_right_counts_with_no_overlap_or_excluded_season`
+  loops several seeds/years and asserts zero double-booked months), don't
+  just trust the algorithm's shape to guarantee it.

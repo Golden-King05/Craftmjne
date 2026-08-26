@@ -459,8 +459,8 @@ there's no shared resolution to keep in sync; each is one standalone
 sprite used at its own native size.
 
 A full moon occasionally gets a special color — purely cosmetic for now,
-no gameplay effect yet. Most full moons are a **red moon**; once a year
-there's a **blue moon** (always in summer, never winter) and a **green
+no gameplay effect yet. Twice a year there's a **red moon**, once a year a
+**blue moon** (always in summer, never winter), and once a year a **green
 moon** (always in autumn, never spring). Each is a plain color tint
 multiplied into the moon's existing texture (`sky::moon_event_tint`), not
 a separate sprite. A "month" is defined to match the moon's own 8-day
@@ -468,6 +468,15 @@ phase cycle (so every month's full moon lands on the same day-of-month),
 and a "year" is a plain 12-month calendar — `DayNightClock::season` is a
 pure calendar concept with no other effect yet; it exists solely to make
 the winter/spring exclusion rules real.
+
+Which month(s) each event lands on is re-rolled every year (seeded by the
+world's own seed plus the year number — reproducible, not truly random,
+same as terrain generation) rather than fixed, and never collides with
+another event that same year. All of it — how often an event happens, which
+seasons it's excluded from, whether it even needs a full moon — lives in
+one small declarative table (`sky::MOON_EVENTS`), not hand-written per-event
+logic; adding a fourth event or retuning an existing one is a one-line
+table edit, not new code.
 
 The clock (and moon phase) persists per-world (leaving and reloading
 resumes the same time of day/phase rather than resetting to dawn and a new

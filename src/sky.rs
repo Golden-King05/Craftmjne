@@ -37,14 +37,21 @@
 //!
 //! Full moons also get an occasional special color, purely cosmetic for now
 //! (no gameplay effect - see [`DayNightClock::moon_event`]): a **red moon**
-//! most months (`MoonEvent::Red`), a **blue moon** once a year in
-//! [`Season::Summer`] (never [`Season::Winter`]), and a **green moon** once
-//! a year in [`Season::Autumn`] (never [`Season::Spring`]) - see
-//! [`BLUE_MOON_MONTH`]/[`GREEN_MOON_MONTH`]. Each is a plain color tint
-//! multiplied into the moon's existing texture (`update_sky`), not a
-//! separate sprite. [`Season`] itself is a pure calendar concept with no
-//! other effect yet - it exists solely to make those two exclusion rules
-//! real and checkable instead of a permanent no-op.
+//! twice a year, a **blue moon** once a year in [`Season::Summer`] (never
+//! [`Season::Winter`]), and a **green moon** once a year in
+//! [`Season::Autumn`] (never [`Season::Spring`]). Which month(s) each
+//! lands on is re-rolled every year (seeded, not truly random - see
+//! [`year_schedule`]), never the same month as another event that year.
+//! Each is a plain color tint multiplied into the moon's existing texture
+//! (`update_sky`), not a separate sprite.
+//!
+//! All three rules - frequency, excluded seasons, whether an event even
+//! needs a full moon - live in one declarative table ([`MOON_EVENTS`]),
+//! not per-event code: adding a fourth event, or changing an existing
+//! one's frequency/season, means editing that table. [`Season`] itself is
+//! a pure calendar concept with no other effect yet - it exists solely to
+//! make the excluded-season rules real and checkable instead of a
+//! permanent no-op.
 //!
 //! The clock (and moon phase) persists per-world (`save::WorldData
 //! ::time_of_day`/`::day_count`) so leaving and reloading resumes rather
@@ -81,15 +88,56 @@ pub const CYCLE_SECONDS: f32 = DAY_SECONDS + NIGHT_SECONDS;
 /// the real one (`Season::Spring` first) - see `DayNightClock::season`.
 pub const DAYS_PER_MONTH: u32 = 8;
 pub const MONTHS_PER_YEAR: u32 = 12;
-/// The one month a year whose full moon is a blue moon instead of red -
-/// month `4` falls in `Season::Summer` (months `3..=5`), guaranteeing it's
-/// never `Season::Winter` regardless of how the seasons themselves are
-/// tuned (see `season_never_lands_a_special_moon_in_its_excluded_season`).
-const BLUE_MOON_MONTH: u32 = 4;
-/// The one month a year whose full moon is a green moon instead of red -
-/// month `7` falls in `Season::Autumn` (months `6..=8`), guaranteeing it's
-/// never `Season::Spring`.
-const GREEN_MOON_MONTH: u32 = 7;
+
+/// One declarative special-moon-event rule. Adding a new event, or
+/// changing an existing one's frequency/season/full-moon requirement,
+/// means editing [`MOON_EVENTS`] below - never writing new scheduling
+/// logic, since [`year_schedule`] and [`DayNightClock::moon_event`] are
+/// both generic over this table.
+struct MoonEventDef {
+    event: MoonEvent,
+    /// How many *different* months a year get this event - see
+    /// `year_schedule` for how they're chosen (randomly, fresh every year,
+    /// never the same month as another event that same year).
+    per_year: u32,
+    /// Seasons this event can never land in - `&[]` for no restriction.
+    /// A comma-separated list, same as it reads: `&[Season::Winter]`,
+    /// `&[Season::Winter, Season::Spring]`, etc.
+    excluded_seasons: &'static [Season],
+    /// If `true` (every event below sets it), the event only actually
+    /// shows on its chosen month's full moon (`moon_phase() == 4`) - every
+    /// other night that month is a plain moon. Exists as its own flag
+    /// purely so a future event that isn't tied to the full moon can opt
+    /// out (showing all month instead) without `moon_event` needing to
+    /// special-case it by name.
+    requires_full_moon: bool,
+}
+
+/// The whole special-moon-event schedule, in one place. Blue and green
+/// each get one guaranteed-in-season month a year; red gets two completely
+/// unrestricted months (so "once a month" from the original ask becomes
+/// "the two months a year that aren't already blue/green/an ordinary full
+/// moon" - see the module docs).
+const MOON_EVENTS: &[MoonEventDef] = &[
+    MoonEventDef {
+        event: MoonEvent::Blue,
+        per_year: 1,
+        excluded_seasons: &[Season::Winter],
+        requires_full_moon: true,
+    },
+    MoonEventDef {
+        event: MoonEvent::Green,
+        per_year: 1,
+        excluded_seasons: &[Season::Spring],
+        requires_full_moon: true,
+    },
+    MoonEventDef {
+        event: MoonEvent::Red,
+        per_year: 2,
+        excluded_seasons: &[],
+        requires_full_moon: true,
+    },
+];
 
 /// Night's sky/fog color and the world's darkest brightness floor - never
 /// fully black, matching the softly-lit look everything else in this
@@ -200,34 +248,75 @@ impl DayNightClock {
     }
 
     /// The current calendar season - a pure calendar concept with no other
-    /// gameplay effect yet (see the module docs): it exists solely so blue
-    /// moon (never winter) and green moon (never spring) are real,
-    /// checkable rules instead of a permanent no-op.
+    /// gameplay effect yet (see the module docs): it exists solely so
+    /// [`MoonEventDef::excluded_seasons`] is a real, checkable rule instead
+    /// of a permanent no-op.
     pub fn season(&self) -> Season {
-        match self.month_of_year() {
-            0..=2 => Season::Spring,
-            3..=5 => Season::Summer,
-            6..=8 => Season::Autumn,
-            _ => Season::Winter, // 9..=11
-        }
+        season_of_month(self.month_of_year())
     }
 
-    /// Tonight's special moon coloring, if any - always `None` except on a
-    /// full moon (`moon_phase() == 4`), and even then only a plain
-    /// [`MoonEvent::Red`] most months: [`BLUE_MOON_MONTH`]/
-    /// [`GREEN_MOON_MONTH`] each override it once a year. Purely cosmetic
+    /// Tonight's special moon coloring, if any - see [`MOON_EVENTS`] for
+    /// the full rules (frequency, excluded seasons, whether it needs a
+    /// full moon). `world_seed` is `WorldSettings::seed`, threaded in
+    /// rather than stored on the clock itself, since nothing else about
+    /// the clock needs to know which world it belongs to. Purely cosmetic
     /// for now (see the module docs) - `update_sky` is the only consumer,
     /// tinting whichever phase material is currently shown.
-    pub fn moon_event(&self) -> Option<MoonEvent> {
-        if self.moon_phase() != 4 {
+    pub fn moon_event(&self, world_seed: u32) -> Option<MoonEvent> {
+        let year = self.month() / MONTHS_PER_YEAR;
+        let event = year_schedule(world_seed, year)[self.month_of_year() as usize]?;
+        let def = MOON_EVENTS.iter().find(|d| d.event == event)?;
+        if def.requires_full_moon && self.moon_phase() != 4 {
             return None;
         }
-        Some(match self.month_of_year() {
-            BLUE_MOON_MONTH => MoonEvent::Blue,
-            GREEN_MOON_MONTH => MoonEvent::Green,
-            _ => MoonEvent::Red,
-        })
+        Some(event)
     }
+}
+
+fn season_of_month(month_of_year: u32) -> Season {
+    match month_of_year {
+        0..=2 => Season::Spring,
+        3..=5 => Season::Summer,
+        6..=8 => Season::Autumn,
+        _ => Season::Winter, // 9..=11
+    }
+}
+
+/// Deterministically (but pseudo-randomly, re-rolled fresh every year)
+/// assigns this year's [`MOON_EVENTS`] occurrences to specific months -
+/// `[i]` is which event (if any) month `i` hosts. Seeded from the world's
+/// seed plus the year number, so it's reproducible for a given world and
+/// year (a reload must show the same schedule) but differs world to world
+/// and year to year - the same seeded-not-truly-random determinism every
+/// other procedural piece of this engine (terrain, block texture jitter)
+/// already follows. Events are drawn in [`MOON_EVENTS`]'s table order, each
+/// only picking from months neither already claimed by an earlier event
+/// this year nor in one of its own excluded seasons - so table order acts
+/// as a priority (earlier entries get first pick of eligible months) but
+/// never actually matters for the three events here, since blue and
+/// green's excluded seasons don't overlap and red has none to conflict
+/// with. If an event's eligible pool ever runs out before `per_year` is
+/// satisfied (only possible with a very restrictive custom table), it
+/// simply gets fewer occurrences that year rather than panicking.
+fn year_schedule(world_seed: u32, year: u32) -> [Option<MoonEvent>; MONTHS_PER_YEAR as usize] {
+    let mut schedule = [None; MONTHS_PER_YEAR as usize];
+    let base = hash_str(&format!("moon-events-{world_seed}-{year}"));
+    for (i, def) in MOON_EVENTS.iter().enumerate() {
+        // A large prime offset per event index gives each its own
+        // independent pseudo-random stream from the same year's base seed.
+        let mut rng = mulberry32(base.wrapping_add(i as u32 * 104_729));
+        let mut pool: Vec<u32> = (0..MONTHS_PER_YEAR)
+            .filter(|&m| schedule[m as usize].is_none() && !def.excluded_seasons.contains(&season_of_month(m)))
+            .collect();
+        for _ in 0..def.per_year {
+            if pool.is_empty() {
+                break;
+            }
+            let idx = ((rng() * pool.len() as f32) as usize).min(pool.len() - 1);
+            schedule[pool.remove(idx) as usize] = Some(def.event);
+        }
+    }
+    schedule
 }
 
 /// A pure calendar concept (see [`DayNightClock::season`]'s doc comment) -
@@ -240,16 +329,13 @@ pub enum Season {
     Winter,
 }
 
-/// A special full-moon coloring - see [`DayNightClock::moon_event`].
+/// A special full-moon coloring - see [`DayNightClock::moon_event`] and
+/// [`MOON_EVENTS`] for the actual rules; this enum is just the set of
+/// colors that exist.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MoonEvent {
-    /// Every full moon that isn't a blue or green moon - "once a month".
     Red,
-    /// Once a year ([`BLUE_MOON_MONTH`], always [`Season::Summer`] - never
-    /// [`Season::Winter`]).
     Blue,
-    /// Once a year ([`GREEN_MOON_MONTH`], always [`Season::Autumn`] - never
-    /// [`Season::Spring`]).
     Green,
 }
 
@@ -655,7 +741,7 @@ fn update_sky(
         moon_tf.rotation = facing;
     }
     if let Some(mat) = celestial_assets.get_mut(moon_phase_material) {
-        let color = moon_event_tint(clock.moon_event());
+        let color = moon_event_tint(clock.moon_event(settings.seed));
         let alpha = if !is_day { fade } else { 0.0 };
         mat.params.tint = LinearRgba::new(color.red, color.green, color.blue, alpha);
     }
@@ -743,45 +829,71 @@ mod tests {
 
     #[test]
     fn a_non_full_moon_never_has_a_special_event_regardless_of_month() {
-        for phase in [0u8, 1, 2, 3, 5, 6, 7] {
-            // day_count = BLUE_MOON_MONTH's month, but offset to a
-            // non-full phase - even the "special" month must stay a plain
-            // moon on every night that isn't its one full moon.
-            let day_count = BLUE_MOON_MONTH * DAYS_PER_MONTH + phase as u32;
-            let clock = DayNightClock { day_count, ..Default::default() };
-            assert_eq!(clock.moon_phase(), phase);
-            assert_eq!(clock.moon_event(), None, "phase {phase} must never be a special event");
+        // Try every month (some of which will be this seed/year's actual
+        // blue/green/red months) at every non-full phase - even a
+        // "special" month must stay a plain moon on every night that
+        // isn't its one full moon.
+        for month in 0..MONTHS_PER_YEAR {
+            for phase in [0u8, 1, 2, 3, 5, 6, 7] {
+                let day_count = month * DAYS_PER_MONTH + phase as u32;
+                let clock = DayNightClock { day_count, ..Default::default() };
+                assert_eq!(clock.moon_phase(), phase);
+                assert_eq!(clock.moon_event(42), None, "month {month} phase {phase} must never be a special event");
+            }
+        }
+    }
+
+    /// Exercises `year_schedule` directly (rather than `moon_event`, which
+    /// only ever returns `Some` on the exact full-moon night) so the whole
+    /// year's assignment can be checked at once: exactly 2 red + 1 blue +
+    /// 1 green, no month double-booked, and the season exclusions hold -
+    /// across a spread of seeds/years, since the schedule is now random
+    /// per (seed, year) rather than a fixed month.
+    #[test]
+    fn year_schedule_always_places_the_right_counts_with_no_overlap_or_excluded_season() {
+        for world_seed in [0u32, 1, 42, 12345, u32::MAX] {
+            for year in 0u32..5 {
+                let schedule = year_schedule(world_seed, year);
+
+                let count = |event: MoonEvent| schedule.iter().filter(|&&m| m == Some(event)).count();
+                assert_eq!(count(MoonEvent::Red), 2, "seed {world_seed} year {year}: expected 2 red moons");
+                assert_eq!(count(MoonEvent::Blue), 1, "seed {world_seed} year {year}: expected 1 blue moon");
+                assert_eq!(count(MoonEvent::Green), 1, "seed {world_seed} year {year}: expected 1 green moon");
+                assert_eq!(
+                    schedule.iter().filter(|m| m.is_some()).count(),
+                    4,
+                    "seed {world_seed} year {year}: no month should host two events"
+                );
+
+                for (month, event) in schedule.iter().enumerate() {
+                    let season = season_of_month(month as u32);
+                    match event {
+                        Some(MoonEvent::Blue) => {
+                            assert_ne!(season, Season::Winter, "seed {world_seed} year {year}: blue moon in winter")
+                        }
+                        Some(MoonEvent::Green) => {
+                            assert_ne!(season, Season::Spring, "seed {world_seed} year {year}: green moon in spring")
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn most_full_moons_are_red_but_one_a_year_is_blue_and_one_is_green() {
-        // A red moon "once a month" - every full moon except the two
-        // special ones.
-        for month in [0, 1, 2, 3, 5, 6, 8, 9, 10, 11] {
-            let day_count = month * DAYS_PER_MONTH + 4; // +4 = that month's full moon
-            let clock = DayNightClock { day_count, ..Default::default() };
-            assert_eq!(clock.moon_event(), Some(MoonEvent::Red), "month {month}");
-        }
-
-        let blue = DayNightClock { day_count: BLUE_MOON_MONTH * DAYS_PER_MONTH + 4, ..Default::default() };
-        assert_eq!(blue.moon_event(), Some(MoonEvent::Blue));
-        let green = DayNightClock { day_count: GREEN_MOON_MONTH * DAYS_PER_MONTH + 4, ..Default::default() };
-        assert_eq!(green.moon_event(), Some(MoonEvent::Green));
-
-        // And it recurs every year, not just the first one.
-        let blue_next_year =
-            DayNightClock { day_count: (MONTHS_PER_YEAR + BLUE_MOON_MONTH) * DAYS_PER_MONTH + 4, ..Default::default() };
-        assert_eq!(blue_next_year.moon_event(), Some(MoonEvent::Blue));
+    fn year_schedule_is_deterministic_for_the_same_seed_and_year() {
+        assert_eq!(year_schedule(7, 3), year_schedule(7, 3));
     }
 
     #[test]
-    fn blue_and_green_moon_never_land_in_their_excluded_season() {
-        let blue_season = DayNightClock { day_count: BLUE_MOON_MONTH * DAYS_PER_MONTH, ..Default::default() }.season();
-        assert_ne!(blue_season, Season::Winter, "blue moon must never fall in winter");
-
-        let green_season = DayNightClock { day_count: GREEN_MOON_MONTH * DAYS_PER_MONTH, ..Default::default() }.season();
-        assert_ne!(green_season, Season::Spring, "green moon must never fall in spring");
+    fn a_full_moon_shows_whatever_its_scheduled_month_says() {
+        let world_seed = 999;
+        let schedule = year_schedule(world_seed, 0);
+        for (month, expected) in schedule.iter().enumerate() {
+            let clock = DayNightClock { day_count: month as u32 * DAYS_PER_MONTH + 4, ..Default::default() };
+            assert_eq!(clock.moon_event(world_seed), *expected, "month {month}");
+        }
     }
 
     #[test]
