@@ -72,6 +72,8 @@ The mouse locks automatically the moment you enter a world — no click needed.
 | 1–9 / mouse wheel | hotbar selection |
 | E | open/close inventory |
 | T | open chat |
+| / | open chat with `/` already typed (command shortcut) |
+| Ctrl+A / Ctrl+C / Ctrl+V | select all / copy / paste, while chat is open |
 | F3 | debug overlay |
 | Esc | pause (Resume / Quit to Menu / Quit Game); Esc again resumes; also closes the inventory/chat if one is open |
 
@@ -211,10 +213,13 @@ second rotating block someday needs zero mesher changes.
 
 ## Chat and commands
 
-Press `T` to open a one-line chat box; `Enter` sends, `Escape` cancels. Sent
-lines land in a local scrollback that fades out a few seconds after the box
-closes — there's no multiplayer, so this exists mainly as a place to type
-`/`-prefixed commands.
+Press `T` to open a one-line chat box, or `/` to open it with `/` already
+typed (the standard command-shortcut convention); `Enter` sends, `Escape`
+cancels. Ctrl+A selects the whole input, Ctrl+C copies it, and Ctrl+V pastes
+from the OS clipboard (replacing the selection, or appending if nothing's
+selected). Sent lines land in a local scrollback that fades out a few
+seconds after the box closes — there's no multiplayer, so this exists
+mainly as a place to type `/`-prefixed commands.
 
 `src/commands.rs` is the dispatcher. The built-in commands are:
 

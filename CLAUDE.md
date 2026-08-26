@@ -845,3 +845,53 @@ etc.) instead of inventing a new approach:
   `with_children`, the same rebuild-the-subtree pattern as `ui::
   rebuild_hotbar`), which is simple enough at `VISIBLE_MESSAGES`-line
   scale that diffing instead of respawning isn't worth the complexity.
+- **`OnEnter(AppState::InGame)` cursor-grab systems need an `OnExit` mirror,
+  or leaving the state leaves the cursor exactly as the last frame in that
+  state left it.** `player::enter_game_grab` locks and hides the cursor the
+  moment a world loads; nothing undid that when leaving back to the main
+  menu (`MenuButton::BackToMainMenu`/the pause screen's quit path both just
+  `next_state.set(AppState::MainMenu)`), so the menu - plain point-and-click
+  UI - was left with an invisible, locked cursor and looked unresponsive to
+  the mouse. Fixed with `player::exit_game_release_cursor` on
+  `OnExit(AppState::InGame)`, the direct mirror of `enter_game_grab`. General
+  lesson: an `OnEnter` system that mutates shared, persistent state (window
+  settings, not a per-world resource that naturally resets) needs a
+  same-plugin `OnExit` counterpart considered explicitly, not assumed to be
+  someone else's problem just because the mutation happened in a different
+  plugin than the state transition trigger.
+- **A "select all" in a single-line input with no real cursor/selection
+  range doesn't need one built to make Ctrl+A/C/V work - a whole-input-or-
+  nothing boolean is enough.** `chat::ChatState::selected` (set by Ctrl+A)
+  is consulted by exactly three places: Ctrl+C only copies when it's set
+  (matches how a real text field does nothing on Ctrl+C with no selection,
+  rather than always copying and giving Ctrl+A no real effect), Backspace
+  clears the whole input instead of popping one character while it's set,
+  and typing (or Ctrl+V) replaces the whole input instead of appending.
+  Every one of those also clears the flag afterward, so a stale "everything
+  selected" from an earlier Ctrl+A never lingers into an unrelated later
+  edit. This is deliberately *not* a real selection range (no anchor/cursor
+  positions, no shift+arrow, no click-drag) - the existing input widget has
+  no cursor position concept at all (append-only, Backspace always pops
+  from the end), and building one just for Ctrl+A support would be a much
+  bigger feature than what was actually asked for.
+- **OS clipboard access needs a real crate (`arboard`) - Bevy/winit doesn't
+  expose one.** Added with `default-features = false` (skips arboard's
+  optional `image-data` feature, which pulls in `image`'s own clipboard-
+  image support that nothing here needs - text-only get/set is always
+  available regardless of that feature). `Clipboard::new()` can fail (no
+  display/clipboard server - e.g. a headless CI run), so `chat::
+  clipboard_copy`/`clipboard_paste` both treat that as a silent no-op via
+  `.ok()`/`if let Ok(..)` rather than unwrapping, matching this project's
+  established "never crash on an external environment failure" stance
+  (same instinct as the updater's self-replace guard and the texture-
+  loading placeholder fallback).
+- **A command-open hotkey (`/`) is a second *trigger* for the same open
+  path, not a second input box.** `chat::toggle_chat` already checked one
+  key (`T`); adding `/` was extending the same trigger check
+  (`keys.just_pressed(KeyCode::Slash)` alongside the existing `KeyT` check)
+  and, only when it was the slash that opened it, pre-filling `chat.input`
+  with `"/"` before the box appears - not a parallel code path. The
+  existing "swallow this frame's pending KeyboardInput events so the key
+  that opened the box doesn't also get typed" logic (`chat.just_opened`)
+  needed no changes at all, since it already clears *all* pending events
+  for that frame regardless of which key triggered the open.

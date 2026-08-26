@@ -1,8 +1,12 @@
-//! In-world chat: press T to open a one-line input box, Enter to send
-//! (appended to a local scrollback that fades out after a few seconds),
-//! Escape to cancel. There's no multiplayer yet, but `/`-prefixed messages
-//! are routed to `commands::execute` (see that module for the dispatcher
-//! and the list of commands).
+//! In-world chat: press T to open a one-line input box (or `/`, which opens
+//! it with `/` already typed - the standard "command hotkey" shortcut),
+//! Enter to send (appended to a local scrollback that fades out after a few
+//! seconds), Escape to cancel. Ctrl+A selects the whole input, Ctrl+C
+//! copies it, Ctrl+V pastes over the selection (or appends, if nothing's
+//! selected) - see `clipboard_copy`/`clipboard_paste`. There's no
+//! multiplayer yet, but `/`-prefixed messages are routed to
+//! `commands::execute` (see that module for the dispatcher and the list of
+//! commands).
 //!
 //! Any message - typed by the player or produced by a command - can embed
 //! `~(#hex)~ text ~(#hex)~` runs (`text_color`'s shared marker syntax) to
@@ -38,6 +42,13 @@ pub struct ChatState {
     pub input: String,
     just_opened: bool,
     was_grabbed: bool,
+    /// Set by Ctrl+A ("select all") - there's no real cursor/selection
+    /// range in this single-line input, so this is the whole-input-or-
+    /// nothing stand-in for one: while set, the next keystroke either
+    /// replaces the entire input (typing, or Ctrl+V) or clears it
+    /// (Backspace), and Ctrl+C copies the whole input instead of being a
+    /// no-op. Cleared by any edit, and by opening the box fresh.
+    selected: bool,
 }
 
 struct ChatMessage {
@@ -121,10 +132,13 @@ fn despawn_chat(mut commands: Commands, roots: Query<Entity, With<ChatRoot>>) {
     }
 }
 
-/// T opens the box (unless it's already open, or the pause menu / inventory
-/// screen is up) and frees the cursor so it can be clicked into; the prior
-/// grab state is remembered so closing restores it exactly, whether the
-/// mouse was locked or already released.
+/// T opens the box empty; `/` opens it with `/` already typed - the
+/// standard "command hotkey" shortcut (Minecraft does the same) so you
+/// don't have to open chat and type the slash separately. Either way this
+/// requires the pause menu / inventory screen to be closed, and frees the
+/// cursor so it can be clicked into; the prior grab state is remembered so
+/// closing restores it exactly, whether the mouse was locked or already
+/// released.
 fn toggle_chat(
     keys: Res<ButtonInput<KeyCode>>,
     paused: Res<PauseState>,
@@ -132,14 +146,22 @@ fn toggle_chat(
     mut chat: ResMut<ChatState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || paused.open || inventory.open || !keys.just_pressed(KeyCode::KeyT) {
+    if chat.open || paused.open || inventory.open {
+        return;
+    }
+    let opens_with_slash = keys.just_pressed(KeyCode::Slash);
+    if !keys.just_pressed(KeyCode::KeyT) && !opens_with_slash {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
     chat.was_grabbed = window.cursor_options.grab_mode != CursorGrabMode::None;
     chat.open = true;
     chat.just_opened = true;
+    chat.selected = false;
     chat.input.clear();
+    if opens_with_slash {
+        chat.input.push('/');
+    }
     window.cursor_options.grab_mode = CursorGrabMode::None;
     window.cursor_options.visible = true;
 }
@@ -154,12 +176,31 @@ fn restore_grab(chat: &ChatState, windows: &mut Query<&mut Window, With<PrimaryW
     }
 }
 
+/// Copies `text` to the OS clipboard, silently doing nothing if there's no
+/// clipboard to talk to (e.g. a headless/CI environment) - matches this
+/// project's general "never crash on an external environment failure"
+/// stance elsewhere (updater, save loading, texture loading).
+fn clipboard_copy(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_string());
+    }
+}
+
+/// Reads text from the OS clipboard, `None` if there's no clipboard to talk
+/// to or it doesn't currently hold text.
+fn clipboard_paste() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
 /// Runs after `toggle_chat`. Reads raw `KeyboardInput` events (rather than
 /// `ButtonInput`) so it sees the actual typed characters, same approach as
-/// the create-world text fields in `menu.rs`.
+/// the create-world text fields in `menu.rs`. `keys` is only consulted for
+/// the Ctrl modifier (held-state, not a discrete event) that Ctrl+A/C/V ride
+/// on.
 #[allow(clippy::too_many_arguments)]
 fn chat_text_input(
     mut events: EventReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut chat: ResMut<ChatState>,
     mut log: ResMut<ChatLog>,
     mut mode: ResMut<GameMode>,
@@ -172,14 +213,15 @@ fn chat_text_input(
         events.clear();
         return;
     }
-    // The same T press that opened the box this frame is still a pending
-    // KeyboardInput event; swallow it so it doesn't become the first
-    // character typed.
+    // The same T/slash press that opened the box this frame is still a
+    // pending KeyboardInput event; swallow it so it doesn't become the
+    // first character typed (the slash itself is pre-filled by toggle_chat).
     if chat.just_opened {
         chat.just_opened = false;
         events.clear();
         return;
     }
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     for ev in events.read() {
         if ev.state != ButtonState::Pressed {
             continue;
@@ -207,12 +249,53 @@ fn chat_text_input(
                 return;
             }
             KeyCode::Backspace => {
-                chat.input.pop();
+                if chat.selected {
+                    chat.input.clear();
+                    chat.selected = false;
+                } else {
+                    chat.input.pop();
+                }
+                continue;
+            }
+            KeyCode::KeyA if ctrl => {
+                chat.selected = true;
+                continue;
+            }
+            // Only copies when something is actually "selected" (Ctrl+A) -
+            // there's no partial-selection concept to copy otherwise, same
+            // as a real text field doing nothing on Ctrl+C with no
+            // selection.
+            KeyCode::KeyC if ctrl => {
+                if chat.selected {
+                    clipboard_copy(&chat.input);
+                }
+                continue;
+            }
+            KeyCode::KeyV if ctrl => {
+                if let Some(pasted) = clipboard_paste() {
+                    if chat.selected {
+                        chat.input.clear();
+                        chat.selected = false;
+                    }
+                    for ch in pasted.chars() {
+                        if ch.is_control() {
+                            continue;
+                        }
+                        if chat.input.len() >= MAX_INPUT_LEN {
+                            break;
+                        }
+                        chat.input.push(ch);
+                    }
+                }
                 continue;
             }
             _ => {}
         }
         if let Some(text) = ev.text.clone() {
+            if chat.selected {
+                chat.input.clear();
+                chat.selected = false;
+            }
             for ch in text.chars() {
                 if ch.is_control() {
                     continue;
