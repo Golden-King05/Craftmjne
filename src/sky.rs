@@ -56,6 +56,16 @@
 //! effect yet - it exists solely to make the excluded-season rules real
 //! and checkable instead of a permanent no-op.
 //!
+//! [`year_schedule`] itself walks forward from year `0` (needed for the
+//! gap rule to hold across year boundaries too), which is `O(year)` -
+//! fine for a one-off call, but `update_sky` needs this every frame, so it
+//! goes through [`MoonScheduleCache`]/`cached_year_schedule` instead: since
+//! the game only ever advances one year at a time, the cache just needs to
+//! remember the previous year's outcome to make each frame's lookup `O(1)`
+//! in the common case, falling back to the full walk only on a genuine
+//! jump (a fresh world, a different seed, a save loaded into an arbitrary
+//! year).
+//!
 //! The clock (and moon phase) persists per-world (`save::WorldData
 //! ::time_of_day`/`::day_count`) so leaving and reloading resumes rather
 //! than resetting to dawn/new-moon - the same
@@ -270,21 +280,42 @@ impl DayNightClock {
         season_of_month(self.month_of_year())
     }
 
-    /// Tonight's special moon coloring, if any - see [`MOON_EVENTS`] for
-    /// the full rules (frequency, excluded seasons, whether it needs a
-    /// full moon). `world_seed` is `WorldSettings::seed`, threaded in
-    /// rather than stored on the clock itself, since nothing else about
-    /// the clock needs to know which world it belongs to. Purely cosmetic
-    /// for now (see the module docs) - `update_sky` is the only consumer,
-    /// tinting whichever phase material is currently shown.
-    pub fn moon_event(&self, world_seed: u32) -> Option<MoonEvent> {
-        let year = self.month() / MONTHS_PER_YEAR;
-        let event = year_schedule(world_seed, year)[self.month_of_year() as usize]?;
+    /// Which year (`year_schedule`'s `year` parameter) this clock is
+    /// currently in.
+    fn year(&self) -> u32 {
+        self.month() / MONTHS_PER_YEAR
+    }
+
+    /// Tonight's special moon coloring, given `schedule` - the current
+    /// year's schedule, as returned by [`year_schedule`] or, in the live
+    /// game, `update_sky`'s cached equivalent (see [`MoonScheduleCache`]).
+    /// Split out from actually computing that schedule so this half - "is
+    /// there an event this month, and does it need a full moon" - stays
+    /// cheap and pure regardless of how the (more expensive) schedule
+    /// itself was obtained.
+    pub fn moon_event_in(&self, schedule: &[Option<MoonEvent>; MONTHS_PER_YEAR as usize]) -> Option<MoonEvent> {
+        let event = schedule[self.month_of_year() as usize]?;
         let def = MOON_EVENTS.iter().find(|d| d.event == event)?;
         if def.requires_full_moon && self.moon_phase() != 4 {
             return None;
         }
         Some(event)
+    }
+
+    /// Tonight's special moon coloring, if any - see [`MOON_EVENTS`] for
+    /// the full rules (frequency, excluded seasons, whether it needs a
+    /// full moon). `world_seed` is `WorldSettings::seed`, threaded in
+    /// rather than stored on the clock itself, since nothing else about
+    /// the clock needs to know which world it belongs to. Purely cosmetic
+    /// for now (see the module docs).
+    ///
+    /// Computes this year's schedule fresh every call (see
+    /// [`year_schedule`]) - fine for tests and anywhere this runs once,
+    /// but `update_sky` (called every frame) uses [`MoonScheduleCache`]
+    /// instead of this method, to avoid redoing that work 60 times a
+    /// second for no reason.
+    pub fn moon_event(&self, world_seed: u32) -> Option<MoonEvent> {
+        self.moon_event_in(&year_schedule(world_seed, self.year()))
     }
 }
 
@@ -391,6 +422,46 @@ fn year_schedule(world_seed: u32, target_year: u32) -> [Option<MoonEvent>; MONTH
         schedule = year_schedule_one_year(world_seed, year, previous_december_claimed);
         previous_december_claimed = schedule[MONTHS_PER_YEAR as usize - 1].is_some();
     }
+    schedule
+}
+
+/// Remembers the last year [`cached_year_schedule`] computed (and whether
+/// that year's December was claimed), so advancing to the very next year -
+/// the only way `DayNightClock::year()` ever actually changes in a running
+/// game, one in-game year at a time - is an `O(1)` incremental step instead
+/// of re-walking from year `0` every time. `SkyPlugin` initializes this to
+/// `None` (nothing cached yet); every other transition (a fresh world, a
+/// different seed, a save loaded straight into some arbitrary year) just
+/// falls back to the plain `O(year)` `year_schedule` once, self-correcting
+/// with no reset logic needed anywhere.
+#[derive(Resource, Default)]
+struct MoonScheduleCache(Option<(u32, u32, [Option<MoonEvent>; MONTHS_PER_YEAR as usize], bool)>);
+
+/// [`year_schedule`], but reuses `cache` when possible instead of always
+/// walking forward from year `0`: an exact repeat of the last call is a
+/// plain lookup, and advancing to `target_year == cached_year + 1` for the
+/// same world only costs one [`year_schedule_one_year`] call (using the
+/// cached December fact) rather than the whole history again. Anything
+/// else - a different seed, a year that jumped or went backwards - falls
+/// back to [`year_schedule`] itself, exactly as expensive as before this
+/// cache existed, but paid once for that one jump rather than every frame.
+fn cached_year_schedule(
+    cache: &mut MoonScheduleCache,
+    world_seed: u32,
+    target_year: u32,
+) -> [Option<MoonEvent>; MONTHS_PER_YEAR as usize] {
+    if let Some((seed, year, schedule, december_claimed)) = cache.0 {
+        if seed == world_seed && year == target_year {
+            return schedule;
+        }
+        if seed == world_seed && year + 1 == target_year {
+            let schedule = year_schedule_one_year(world_seed, target_year, december_claimed);
+            cache.0 = Some((world_seed, target_year, schedule, schedule[MONTHS_PER_YEAR as usize - 1].is_some()));
+            return schedule;
+        }
+    }
+    let schedule = year_schedule(world_seed, target_year);
+    cache.0 = Some((world_seed, target_year, schedule, schedule[MONTHS_PER_YEAR as usize - 1].is_some()));
     schedule
 }
 
@@ -770,6 +841,7 @@ fn update_sky(
     mut clear_color: ResMut<ClearColor>,
     mut celestial_assets: ResMut<Assets<CelestialMaterial>>,
     mut chunk_assets: ResMut<Assets<ChunkMaterial>>,
+    mut moon_schedule_cache: ResMut<MoonScheduleCache>,
 ) {
     let Ok(camera_tf) = camera.single() else { return };
     let Ok((mut sun_tf, mut sun_vis)) = sun.single_mut() else { return };
@@ -816,7 +888,8 @@ fn update_sky(
         moon_tf.rotation = facing;
     }
     if let Some(mat) = celestial_assets.get_mut(moon_phase_material) {
-        let color = moon_event_tint(clock.moon_event(settings.seed));
+        let schedule = cached_year_schedule(&mut moon_schedule_cache, settings.seed, clock.year());
+        let color = moon_event_tint(clock.moon_event_in(&schedule));
         let alpha = if !is_day { fade } else { 0.0 };
         mat.params.tint = LinearRgba::new(color.red, color.green, color.blue, alpha);
     }
@@ -841,6 +914,7 @@ impl Plugin for SkyPlugin {
         embedded_asset!(app, "celestial.wgsl");
         app.add_plugins(MaterialPlugin::<CelestialMaterial>::default())
             .init_resource::<DayNightClock>()
+            .init_resource::<MoonScheduleCache>()
             .add_systems(Startup, spawn_sky)
             .add_systems(
                 Update,
@@ -1006,6 +1080,45 @@ mod tests {
     #[test]
     fn year_schedule_is_deterministic_for_the_same_seed_and_year() {
         assert_eq!(year_schedule(7, 3), year_schedule(7, 3));
+    }
+
+    /// The whole point of `cached_year_schedule` is to be a faster path to
+    /// the *exact same answer* `year_schedule` gives - never an
+    /// approximation. Walks a fresh cache forward one year at a time
+    /// (repeating some years, to exercise the "already cached" branch too)
+    /// and checks every single step against the plain, uncached function.
+    #[test]
+    fn cached_year_schedule_always_agrees_with_the_uncached_reference() {
+        for world_seed in [0u32, 1, 42, 12345] {
+            let mut cache = MoonScheduleCache::default();
+            for year in 0..15u32 {
+                let expected = year_schedule(world_seed, year);
+                assert_eq!(cached_year_schedule(&mut cache, world_seed, year), expected, "seed {world_seed} year {year}");
+                // Re-querying the same year again must hit the "already
+                // cached" branch and still agree.
+                assert_eq!(cached_year_schedule(&mut cache, world_seed, year), expected, "seed {world_seed} year {year} (repeat)");
+            }
+        }
+    }
+
+    #[test]
+    fn cached_year_schedule_falls_back_correctly_on_a_seed_change_or_year_jump() {
+        let mut cache = MoonScheduleCache::default();
+        let first = cached_year_schedule(&mut cache, 1, 5);
+        assert_eq!(first, year_schedule(1, 5));
+
+        // Different seed at the "same" year - must not reuse seed 1's schedule.
+        let different_seed = cached_year_schedule(&mut cache, 2, 5);
+        assert_eq!(different_seed, year_schedule(2, 5));
+
+        // A year that jumps forward by more than one (e.g. a save loaded
+        // straight into a much later year) - must not extrapolate wrongly.
+        let jumped = cached_year_schedule(&mut cache, 2, 20);
+        assert_eq!(jumped, year_schedule(2, 20));
+
+        // And jumping backward must also recover correctly.
+        let backward = cached_year_schedule(&mut cache, 2, 3);
+        assert_eq!(backward, year_schedule(2, 3));
     }
 
     #[test]

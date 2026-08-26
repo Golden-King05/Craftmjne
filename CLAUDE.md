@@ -729,3 +729,39 @@ etc.) instead of inventing a new approach:
   shortfalls across 6,000 pairs, then deleted the sweep and kept a small
   permanent regression test
   (`no_special_lands_in_january_right_after_a_claimed_december`) instead.
+- **An `O(year)` cost the user explicitly said would "never realistically
+  be reached" was still worth fixing once asked "just for theoretical" -
+  but the fix should exploit the actual access pattern, not add a generic
+  cache.** `year_schedule` walking forward from year `0` every call is
+  fine for a one-off, but `update_sky` calls it every frame; the naive fix
+  (memoize by `(seed, year)` key, LRU-evict, etc.) would be real new
+  complexity for a problem with a much simpler shape once you notice how
+  the caller actually uses it: `DayNightClock::year()` only ever advances
+  by exactly one at a time during normal play (one in-game year = 48 real
+  hours at this cycle's pacing), so the "cache" only ever needs to
+  remember *one* thing - the immediately preceding year's December outcome
+  - to turn the common case into an `O(1)` incremental step via the same
+  `year_schedule_one_year(seed, year, previous_december_claimed)` building
+  block `year_schedule` itself already uses internally. `MoonScheduleCache`
+  is a single `Option<(seed, year, schedule, december_claimed)>`, not a
+  map: an exact match returns the cached schedule directly, `year + 1`
+  triggers the one-step incremental path, and *anything* else (a fresh
+  world, a different seed, a save loaded straight into an arbitrary year)
+  falls back to the plain `year_schedule` - exactly as expensive as
+  before this cache existed, but now only paid once for that one jump
+  instead of every frame after it. **Splitting "which schedule applies"
+  from "what does this month's schedule mean" made the caching layer
+  purely additive** - `DayNightClock::moon_event_in(&self, schedule)` is
+  the same lookup `moon_event` always did, just taking the schedule as a
+  parameter instead of computing it inline, so every existing test
+  (written against the old `moon_event(seed)`, kept as a thin wrapper
+  around `moon_event_in`) needed zero changes; only `update_sky` itself
+  had to switch call sites, to `cached_year_schedule(&mut cache, seed,
+  clock.year())` feeding `moon_event_in`. Verify a caching layer against
+  its own uncached reference implementation directly, not just "the game
+  still looks right" - `cached_year_schedule_always_agrees_with_the_
+  uncached_reference` walks a fresh cache year-by-year (including
+  re-querying already-cached years) and asserts every single step matches
+  `year_schedule` called fresh, since a caching bug that silently returns
+  a *plausible-looking but wrong* schedule is exactly the kind of thing
+  that wouldn't fail loudly.

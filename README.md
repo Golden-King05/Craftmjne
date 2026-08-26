@@ -483,6 +483,14 @@ one small declarative table (`sky::MOON_EVENTS`), not hand-written per-event
 logic; adding a fourth event or retuning an existing one is a one-line
 table edit, not new code.
 
+Computing a year's schedule from scratch walks forward from year `0`
+(needed for the boundary rule above), so it's `O(year)` — negligible for
+any realistic save, but `update_sky` avoids paying it every single frame
+anyway via `sky::MoonScheduleCache`: since the game only ever advances one
+year at a time, the cache just remembers the previous year's outcome and
+extends it by one, making the common case `O(1)` regardless of how old a
+save gets.
+
 The clock (and moon phase) persists per-world (leaving and reloading
 resumes the same time of day/phase rather than resetting to dawn and a new
 moon), the same way fluid state does — see "Fluid flow" above for the
