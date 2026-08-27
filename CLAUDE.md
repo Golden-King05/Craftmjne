@@ -942,6 +942,58 @@ etc.) instead of inventing a new approach:
   queue, a rule that can fire on *unchanged* cells is a red flag, because
   the queue's only termination argument is "work is proportional to
   changes."
+- **A percentage-shaped knob needs a storage scale fine enough to hold it -
+  otherwise the schema silently becomes a switch.** Adding per-block light
+  `transmission` ("glass passes 98%, water 65% of red") looked like it only
+  needed a new field, but the light scale was `0..=16`, so 2% of a full
+  level rounded to zero: a hundred panes of glass would have blocked
+  *nothing*, and anything that did round up to 1 was indistinguishable from
+  dense leaves. Two scales now exist deliberately - `MAX_LEVEL` (16) is what
+  `blocks/*.json` authors emission in and still equals a distance in blocks,
+  `MAX_LIGHT` (255) is what's stored, at 1/16th-of-a-level resolution, with
+  `LEVEL_STEP` (16) the per-block falloff so the *range* is unchanged.
+  Keeping authoring in levels while storing in finer units meant making
+  light more precise invalidated zero existing block files. The general
+  shape: when a new field is a fraction/percentage, check what it multiplies
+  against before designing the field, because the quantisation of the
+  *target* decides whether the field can express anything at all.
+- **Transmission is multiplicative, not a subtracted number of levels,
+  because that's what makes stacking compose.** Light crossing glass and
+  then water is scaled by each in turn, so the pair genuinely differs from
+  either alone (the case that motivated the feature). It's per-channel
+  `[r,g,b]` so a medium can absorb colors *unequally* - water eats red and
+  keeps blue, so a pool floor reads blue-green at noon rather than merely
+  darker. `attenuate` returns its input untouched for a transmission of 255,
+  so a clear medium is an exact no-op and every pre-existing lighting
+  expectation is unchanged - same "make the general formula reduce to the
+  old behavior" shape as `mesher.rs`'s `rotated_tile`. Opaque blocks resolve
+  to `[0;3]` in `Tables::transmission` at compile time, so nothing downstream
+  has to consult two fields that could disagree.
+- **Sky light needed three channels to be *tintable*, and the third and
+  fourth floats came from an unused attribute rather than a new one.** A
+  single stored sky value can only ever be scaled, i.e. made darker - it
+  cannot be made bluer, which is exactly what light through water has to be.
+  `LightCell::sky` is `[u8;3]` now (cell storage 4 -> 6 bytes). The vertex
+  side needed three interpolated floats where there was one: red stays in the
+  vertex color's alpha, green and blue ride in `Mesh::ATTRIBUTE_UV_1`
+  (`MeshBucket::sky_gb`), which chunks don't otherwise use since they sample
+  a single atlas. Inserting that attribute is *also* what makes Bevy define
+  `VERTEX_UVS_B` and pass `uv_b` through to the fragment stage, so this
+  needed no custom vertex shader and no `specialize` change - worth
+  preferring precisely because a rendering mistake can't be seen from a
+  remote session with no display. **Do not be tempted to bit-pack three
+  channels into the one spare float**: vertex attributes are interpolated
+  across each triangle, and interpolating packed integers produces garbage
+  between vertices. Each channel needs its own float.
+- **When a lighting change breaks a test, check whether the test's *scene*
+  is what changed meaning.** Two headless tests started failing with values
+  like `[166, 219, 242]` - which is exactly water's transmission applied to
+  full sky. `ChunkMap::surface_y` returns the topmost **solid** block and
+  water isn't solid, so `surface_y + 1` is a *water* cell on any lake
+  column; the tests had always been probing water and it simply hadn't
+  mattered until media started attenuating light. The fix was a
+  `open_air_above_ground` helper that scans for a genuinely dry column
+  rather than trusting a hardcoded one, not touching the production code.
 - **CLAUDE.md's own "measure before assuming an infinite loop" rule paid off
   twice here, in opposite directions.** The first light failure looked like
   slowness (raise the guard?) and was a true non-termination; the fix for

@@ -1,5 +1,6 @@
 {
   "id": "glass",
   "name": "Glass",
-  "transparent": "partial"
+  "transparent": "partial",
+  "transmission": 0.98
 }
