@@ -1094,6 +1094,37 @@ etc.) instead of inventing a new approach:
   that only appeared sometimes. Every temp-dir helper in this repo uses an
   `AtomicU64` counter for exactly this reason; copy that, don't key the
   name on the fixture's contents.
+- **A "query everything registered, including future mods" feature needs a
+  registry to query, not a second hardcoded list next to the first one.**
+  Command autocomplete could have been built as its own name list inside
+  `chat.rs`, kept in sync with `commands.rs`'s dispatch `match` by hand - the
+  two would drift the first time either changed without the other.
+  `commands::CommandRegistry` (mirroring `BlockRegistry`'s already-
+  established shape: `with_defaults()` seeds the built-ins, `.register()` is
+  the same call a mod's `build()` would make) is the single source both
+  `execute` and `chat.rs`'s dropdown read from - a command is discoverable
+  in the dropdown *because* it's real, invocable data, not a separately
+  maintained fact about it. The cheats flag moved from `execute`'s call site
+  into `CommandRegistry::execute` itself for the same reason: a mod's
+  command needs to trip it too, and putting the check in every handler would
+  be exactly the kind of fact a mod author could forget to include.
+- **A test whose input coincidentally satisfies the guard some *other* way
+  isn't testing the guard.** The chat autocomplete dropdown stops offering
+  suggestions once a space appears (composing an argument, not still typing
+  the command name) - `command_suggestions`' `rest.contains(char::
+  is_whitespace)` check. The first test written for this used `"/mode c"`/
+  `"/mode "` as inputs and passed - but deleting the guard entirely left it
+  passing too, because no built-in command name contains a space, so
+  `starts_with`'s own length check already rejects any prefix longer than a
+  real name regardless of the guard. The guard only has an observable effect
+  when some registered name's own text would otherwise still prefix-match
+  past the space - reproduced with a test command literally named `"big
+  heal"`, where `"big "` genuinely is a valid prefix of it and only the
+  explicit whitespace check stops it being suggested. Same lesson as
+  CLAUDE.md's other regression-test entries, generalized: before trusting a
+  new test, break the thing it claims to guard and confirm the test actually
+  turns red - a test that stays green either way isn't a regression test,
+  it's a coincidence with good intentions.
 - **The launcher exposed a real packaging bug that had been latent for
   months: the Windows release zip contained only `craftmjne.exe`.** That was
   fine while the only consumer was the old in-game updater, which extracted
