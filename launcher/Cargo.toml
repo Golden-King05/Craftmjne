@@ -3,20 +3,28 @@ name = "craftmjne-launcher"
 # Versioned independently of the game: the launcher updates itself from its
 # own branch (see src/selfupdate.rs), so bumping this is what publishes a
 # launcher update, and it has nothing to do with the game's release tags.
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Downloads, manages and launches Craftmjne versions"
 license = "MIT"
 
 [dependencies]
-# `wgpu` rather than the default `glow` backend: the game already brings wgpu
-# in, so a developer building the whole workspace pays for one graphics stack
-# instead of two. `x11` is not optional - winit 0.30 fails to compile at all
+# `wgpu` is preferred at runtime (the game already brings it in, so a
+# developer building the whole workspace shares one graphics stack), with
+# `glow` kept as a fallback - see the note on that feature below, and `main`'s
+# renderer loop. `x11` is not optional - winit 0.30 fails to compile at all
 # with no platform backend selected, which is what `default-features = false`
 # would otherwise leave it with.
 eframe = { version = "0.32", default-features = false, features = [
   "default_fonts",
   "wgpu",
+  # OpenGL fallback. wgpu alone means a machine that can't provide a
+  # DX12/Vulkan/Metal adapter (older GPU, VM with no 3D acceleration, remote
+  # desktop session, driver needing an update) has no way to open a window at
+  # all; `main` tries wgpu first and falls back to this. OpenGL is a much
+  # lower bar, so this is the difference between "slower window" and "the
+  # launcher does not start".
+  "glow",
   "x11",
   "wayland",
 ] }
@@ -39,3 +47,13 @@ self_update = { version = "0.44.0", default-features = false, features = [
 http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# For `diagnostics.rs`: a native message box, and reattaching stdio to the
+# terminal that launched us. Already in the tree via winit/wgpu, so this adds
+# nothing to the download - it just makes the APIs callable directly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_UI_WindowsAndMessaging",
+] }
