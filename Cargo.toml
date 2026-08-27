@@ -1,3 +1,6 @@
+[workspace]
+members = ["launcher"]
+
 [package]
 name = "craftmjne"
 version = "1.2.2"

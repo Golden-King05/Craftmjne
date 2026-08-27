@@ -1,0 +1,433 @@
+//! The launcher window.
+//!
+//! Two tabs: **Instances** (named, editable launch configurations) and
+//! **Versions** (what's published on GitHub, and what's downloaded here).
+//! All state lives in [`LauncherApp`]; every slow operation goes through
+//! `jobs` so the window never stops responding.
+
+use eframe::egui;
+
+use crate::instances::{Instance, Instances};
+use crate::jobs::{Downloads, JobDone, Jobs};
+use crate::launch;
+use crate::library::Library;
+use crate::paths::Paths;
+use crate::remote::{self, RemoteVersion};
+use crate::selfupdate::{self, SelfUpdate};
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Tab {
+    Instances,
+    Versions,
+}
+
+enum Releases {
+    Loading,
+    Loaded(Vec<RemoteVersion>),
+    Failed(String),
+}
+
+pub struct LauncherApp {
+    paths: Paths,
+    library: Library,
+    instances: Instances,
+    selected: Option<usize>,
+    tab: Tab,
+    releases: Releases,
+    jobs: Jobs,
+    downloads: Downloads,
+    /// Result of the startup launcher self-check, once it lands.
+    self_update: Option<SelfUpdate>,
+    status: String,
+}
+
+impl LauncherApp {
+    pub fn new(paths: Paths) -> Self {
+        let instances = Instances::load(&paths.instances_file());
+        let jobs = Jobs::default();
+
+        // Both startup checks go out immediately and in parallel: what
+        // versions exist, and whether the launcher itself is out of date.
+        jobs.spawn(|| JobDone::Releases(remote::fetch_releases()));
+        let staging = paths.staging_dir();
+        jobs.spawn(move || JobDone::SelfUpdate(selfupdate::check_and_apply(staging)));
+
+        Self {
+            library: Library::new(paths.clone()),
+            paths,
+            instances,
+            selected: None,
+            tab: Tab::Instances,
+            releases: Releases::Loading,
+            jobs,
+            downloads: Downloads::default(),
+            self_update: None,
+            status: String::new(),
+        }
+    }
+
+    fn save_instances(&mut self) {
+        if let Err(err) = self.instances.save(&self.paths.instances_file()) {
+            self.status = format!("Couldn't save instances: {err}");
+        }
+    }
+
+    fn poll_jobs(&mut self) {
+        for done in self.jobs.drain() {
+            match done {
+                JobDone::Releases(Ok(list)) => self.releases = Releases::Loaded(list),
+                JobDone::Releases(Err(err)) => self.releases = Releases::Failed(err),
+                JobDone::Installed { version, result } => {
+                    self.downloads.finish(&version);
+                    self.status = match result {
+                        Ok(()) => format!("Craftmjne {version} is ready to play."),
+                        Err(err) => format!("Couldn't install {version}: {err}"),
+                    };
+                }
+                JobDone::SelfUpdate(state) => {
+                    if let SelfUpdate::Failed(err) = &state {
+                        // Never blocking: the launcher works fine on the
+                        // version you already have.
+                        self.status = format!("Launcher update check failed: {err}");
+                    }
+                    self.self_update = Some(state);
+                }
+            }
+        }
+    }
+
+    fn start_download(&mut self, version: &RemoteVersion) {
+        if self.downloads.progress(&version.version).is_some() {
+            return;
+        }
+        let progress = self.downloads.start(&version.version);
+        let dest = self.paths.version_dir(&version.version);
+        let url = version.download_url.clone();
+        let name = version.version.clone();
+        self.status = format!("Downloading Craftmjne {name}...");
+        self.jobs.spawn(move || JobDone::Installed {
+            result: remote::install(&url, &dest, &progress),
+            version: name,
+        });
+    }
+
+    fn play(&mut self, index: usize) {
+        let Some(instance) = self.instances.items.get(index).cloned() else { return };
+        self.status = match launch::launch(&self.library, &instance) {
+            Ok(()) => format!("Started {} on Craftmjne {}.", instance.name, instance.version),
+            Err(err) => err,
+        };
+    }
+}
+
+impl eframe::App for LauncherApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_jobs();
+        // Downloads report progress from another thread, which egui has no
+        // way to know about - keep repainting while any are in flight so the
+        // byte counter actually moves.
+        if self.downloads.is_busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+
+        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.heading("Craftmjne");
+                ui.label(
+                    egui::RichText::new(format!("Launcher {}", selfupdate::CURRENT_VERSION))
+                        .weak(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.selectable_value(&mut self.tab, Tab::Versions, "Versions");
+                    ui.selectable_value(&mut self.tab, Tab::Instances, "Instances");
+                });
+            });
+            ui.add_space(6.0);
+        });
+
+        if let Some(SelfUpdate::Applied { version, notes }) = &self.self_update {
+            egui::TopBottomPanel::top("launcher-update").show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Launcher updated to {version}."))
+                            .strong()
+                            .color(egui::Color32::from_rgb(120, 220, 120)),
+                    );
+                    ui.label("Restart the launcher to use it.");
+                    if let Some(notes) = notes {
+                        ui.label(egui::RichText::new(notes).weak());
+                    }
+                });
+                ui.add_space(4.0);
+            });
+        }
+
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(if self.status.is_empty() { "Ready." } else { &self.status });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} installed · {}",
+                            self.library.installed().len(),
+                            remote::format_bytes(self.library.total_bytes())
+                        ))
+                        .weak(),
+                    );
+                });
+            });
+            ui.add_space(4.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Instances => self.instances_tab(ui),
+            Tab::Versions => self.versions_tab(ui),
+        });
+    }
+}
+
+impl LauncherApp {
+    fn instances_tab(&mut self, ui: &mut egui::Ui) {
+        let installed = self.library.installed();
+
+        ui.horizontal(|ui| {
+            if ui.button("New instance").clicked() {
+                let version = installed
+                    .first()
+                    .cloned()
+                    .or_else(|| match &self.releases {
+                        Releases::Loaded(list) => list.first().map(|r| r.version.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+                self.instances.add(Instance::new("New Instance", version));
+                self.selected = Some(self.instances.items.len() - 1);
+                self.save_instances();
+            }
+            if installed.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "No versions downloaded yet - open the Versions tab first.",
+                    )
+                    .weak(),
+                );
+            }
+        });
+        ui.separator();
+
+        if self.instances.items.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label("No instances yet.");
+                ui.label(
+                    egui::RichText::new(
+                        "An instance is a name, a game version, and the options to start it with.",
+                    )
+                    .weak(),
+                );
+            });
+            return;
+        }
+
+        egui::SidePanel::left("instance-list").resizable(true).show_inside(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (i, instance) in self.instances.items.iter().enumerate() {
+                    let ready = self.library.is_installed(&instance.version);
+                    let label = if ready {
+                        format!("{}  ({})", instance.name, instance.version)
+                    } else {
+                        format!("{}  ({} - not downloaded)", instance.name, instance.version)
+                    };
+                    if ui.selectable_label(self.selected == Some(i), label).clicked() {
+                        self.selected = Some(i);
+                    }
+                }
+            });
+        });
+
+        let Some(index) = self.selected.filter(|i| *i < self.instances.items.len()) else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label("Select an instance to edit it.");
+            });
+            return;
+        };
+
+        let mut changed = false;
+        let mut delete = false;
+        let mut play = false;
+
+        {
+            let instance = &mut self.instances.items[index];
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                changed |= ui.text_edit_singleline(&mut instance.name).changed();
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Version");
+                let current = instance.version.clone();
+                egui::ComboBox::from_id_salt("instance-version")
+                    .selected_text(&current)
+                    .show_ui(ui, |ui| {
+                        for version in &installed {
+                            changed |= ui
+                                .selectable_value(&mut instance.version, version.clone(), version)
+                                .changed();
+                        }
+                        if installed.is_empty() {
+                            ui.label(egui::RichText::new("nothing downloaded").weak());
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                let mut on = instance.render_distance.is_some();
+                if ui.checkbox(&mut on, "Render distance").changed() {
+                    instance.render_distance = on.then_some(8);
+                    changed = true;
+                }
+                if let Some(rd) = &mut instance.render_distance {
+                    changed |= ui.add(egui::Slider::new(rd, 2..=24)).changed();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                let mut on = instance.seed.is_some();
+                if ui.checkbox(&mut on, "Fixed world seed").changed() {
+                    instance.seed = on.then_some(1337);
+                    changed = true;
+                }
+                if let Some(seed) = &mut instance.seed {
+                    changed |= ui.add(egui::DragValue::new(seed)).changed();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Extra arguments");
+                changed |= ui.text_edit_singleline(&mut instance.extra_args).changed();
+            });
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let ready = self.library.is_installed(&instance.version);
+                play = ui
+                    .add_enabled(ready, egui::Button::new("  Play  "))
+                    .on_disabled_hover_text("This instance's version isn't downloaded yet.")
+                    .clicked();
+                delete = ui.button("Delete instance").clicked();
+            });
+        }
+
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "Worlds are shared by every instance: {}",
+                self.paths.saves_dir().display()
+            ))
+            .weak(),
+        );
+
+        if play {
+            self.play(index);
+        }
+        if delete {
+            self.instances.remove(index);
+            self.selected = None;
+            changed = true;
+        }
+        if changed {
+            self.save_instances();
+        }
+    }
+
+    fn versions_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Refresh").clicked() {
+                self.releases = Releases::Loading;
+                self.jobs.spawn(|| JobDone::Releases(remote::fetch_releases()));
+            }
+            ui.label(
+                egui::RichText::new("Downloaded versions are kept, so each one is fetched once.")
+                    .weak(),
+            );
+        });
+        ui.separator();
+
+        let mut to_download: Option<RemoteVersion> = None;
+        let mut to_remove: Option<String> = None;
+
+        match &self.releases {
+            Releases::Loading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Looking for published versions...");
+                });
+            }
+            Releases::Failed(err) => {
+                ui.colored_label(egui::Color32::from_rgb(230, 130, 130), "Couldn't reach GitHub.");
+                ui.label(egui::RichText::new(err).weak());
+                ui.add_space(8.0);
+                ui.label("Versions you've already downloaded still work offline:");
+                for version in self.library.installed() {
+                    ui.label(format!("  • {version}"));
+                }
+            }
+            Releases::Loaded(list) if list.is_empty() => {
+                ui.label("No published versions have a build for this platform yet.");
+            }
+            Releases::Loaded(list) => {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for release in list {
+                        let installed = self.library.is_installed(&release.version);
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(&release.version).strong());
+                                if !release.name.is_empty() && release.name != release.version {
+                                    ui.label(egui::RichText::new(&release.name).weak());
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if let Some(progress) =
+                                            self.downloads.progress(&release.version)
+                                        {
+                                            ui.spinner();
+                                            ui.label(remote::format_bytes(progress.bytes()));
+                                        } else if installed {
+                                            if ui.button("Remove").clicked() {
+                                                to_remove = Some(release.version.clone());
+                                            }
+                                            ui.label(
+                                                egui::RichText::new("Downloaded")
+                                                    .color(egui::Color32::from_rgb(120, 220, 120)),
+                                            );
+                                        } else if ui.button("Download").clicked() {
+                                            to_download = Some(release.clone());
+                                        }
+                                    },
+                                );
+                            });
+                            if !release.date.is_empty() {
+                                ui.label(egui::RichText::new(&release.date).weak().small());
+                            }
+                        });
+                    }
+                });
+            }
+        }
+
+        if let Some(release) = to_download {
+            self.start_download(&release);
+        }
+        if let Some(version) = to_remove {
+            self.status = match self.library.remove(&version) {
+                Ok(()) => format!("Removed Craftmjne {version}. Your worlds are untouched."),
+                Err(err) => format!("Couldn't remove {version}: {err}"),
+            };
+        }
+    }
+}
