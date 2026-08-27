@@ -1,0 +1,159 @@
+name: Launcher Release
+
+# Publishes a launcher update, independently of any game release.
+#
+# How it works, and why it's set up this way: the launcher checks
+# `launcher/manifest.json` on this one branch every time it starts (see
+# launcher/src/selfupdate.rs). That's a plain file fetch from
+# raw.githubusercontent.com rather than a GitHub API call, so it needs no
+# token and can't be rate-limited, and because it's keyed to a branch rather
+# than to release tags, shipping a launcher update never involves - or waits
+# for - a game version bump.
+#
+# To publish one:
+#   1. Bump `version` in launcher/Cargo.toml.
+#   2. Push that to the `launcher` branch.
+# This workflow builds every platform, publishes them under the tag
+# `launcher-v<version>`, and then writes the matching manifest.json back to
+# the branch. Existing launchers pick it up on their next start.
+
+on:
+  push:
+    branches: [launcher]
+    # Without this the manifest commit at the end of this workflow would
+    # re-trigger the workflow, forever.
+    paths-ignore: ["launcher/manifest.json"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' launcher/Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing launcher $version"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: launcher-${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p craftmjne-launcher
+
+      # The self-updater extracts this archive and expects to find
+      # `craftmjne-launcher[.exe]` at its root - keep the layout flat.
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar czf "craftmjne-launcher-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" craftmjne-launcher
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path target\${{ matrix.target }}\release\craftmjne-launcher.exe `
+            -DestinationPath craftmjne-launcher-${{ matrix.target }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-${{ matrix.target }}
+          path: craftmjne-launcher-${{ matrix.target }}.${{ matrix.ext }}
+
+  publish:
+    needs: [version, build]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: launcher
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the launcher release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: launcher-v${{ needs.version.outputs.version }}
+          name: Launcher ${{ needs.version.outputs.version }}
+          files: dist/**
+
+      # Written only after the release exists, so the manifest can never
+      # point at downloads that aren't there yet. Only platforms that
+      # actually built get an entry - a launcher on a platform whose build
+      # failed simply sees no update, which is the right outcome.
+      - name: Update the manifest on this branch
+        shell: bash
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          base="https://github.com/${{ github.repository }}/releases/download/launcher-v$version"
+          {
+            echo '{'
+            echo "  \"version\": \"$version\","
+            echo '  "assets": {'
+            first=1
+            for pair in \
+              "x86_64-pc-windows-msvc:zip" \
+              "x86_64-unknown-linux-gnu:tar.gz" \
+              "aarch64-apple-darwin:tar.gz"
+            do
+              target="${pair%%:*}"; ext="${pair##*:}"
+              [ -f "dist/craftmjne-launcher-$target.$ext" ] || continue
+              [ $first -eq 1 ] || echo ','
+              first=0
+              printf '    "%s": "%s/craftmjne-launcher-%s.%s"' "$target" "$base" "$target" "$ext"
+            done
+            echo
+            echo '  }'
+            echo '}'
+          } > launcher/manifest.json
+          cat launcher/manifest.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add launcher/manifest.json
+          git diff --staged --quiet || git commit -m "Publish launcher $version"
+          git push origin HEAD:launcher

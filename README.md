@@ -18,19 +18,19 @@ and run it — no admin rights needed. It installs to
 `%LOCALAPPDATA%\Craftmjne`, adds Start Menu and Desktop shortcuts, and
 registers a normal uninstaller in "Add or remove programs".
 
-From then on the game **updates itself**: every time it starts it checks
-GitHub Releases in the background and, if a newer version exists, downloads
-it and swaps the installed `.exe` in place (see "Auto-update" below) — you
-never need to re-run the installer. New builds are published automatically
-by CI whenever a `v*` tag is pushed (`.github/workflows/release.yml`), for
-Windows, Linux, and macOS (Intel + Apple Silicon).
+That installs the **launcher**, which is what you'll open from then on. It
+lists every published version, downloads the ones you want (once — they're
+kept), lets you keep several as named instances, and updates itself. You
+never need to re-run the installer. See "The launcher" below. New game
+builds are published by CI whenever a `v*` tag is pushed
+(`.github/workflows/release.yml`), for Windows, Linux, and macOS.
 
 ## Build from source
 
 ```bash
 cargo run --release
 # options:
-cargo run --release -- --seed 42 --render-distance 10 --no-update-check
+cargo run --release -- --seed 42 --render-distance 10
 ```
 
 Dev builds are configured for fast iteration (`opt-level = 1` for the game,
@@ -47,11 +47,13 @@ Cross-compiles fine from Linux/macOS with `mingw-w64` + NSIS installed
 (`apt install mingw-w64 nsis` / `brew install mingw-w64 makensis`), or
 natively on Windows with the MSVC target — CI uses the latter.
 
+The installer ships the launcher, so that's what gets built here.
+
 ```bash
 rustup target add x86_64-pc-windows-gnu   # once
-cargo build --release --target x86_64-pc-windows-gnu
-makensis -DAPP_VERSION=0.2.0 \
-         -DSRC_EXE="$(pwd)/target/x86_64-pc-windows-gnu/release/craftmjne.exe" \
+cargo build --release --target x86_64-pc-windows-gnu -p craftmjne-launcher
+makensis -DAPP_VERSION=1.0.0 \
+         -DSRC_EXE="$(pwd)/target/x86_64-pc-windows-gnu/release/craftmjne-launcher.exe" \
          installer/craftmjne.nsi
 # -> CraftmjneSetup.exe in the repo root
 ```
@@ -94,13 +96,16 @@ game mode picker) at the bottom, Minecraft-style; clicking a saved world loads
 it. **Settings** currently exposes render distance (persisted, applied on next
 launch); **Mods** is a placeholder for future mod support.
 
-Worlds save to the same per-user app-data directory the installer and
-auto-updater use (`%LOCALAPPDATA%\Craftmjne\saves\<name>` on Windows,
+Worlds save to the per-user app-data directory
+(`%LOCALAPPDATA%\Craftmjne\saves\<name>` on Windows,
 `~/.local/share/craftmjne/saves/<name>` on Linux, `~/Library/Application
 Support/Craftmjne/saves/<name>` on macOS) — naturally scoped to the OS user
 account. Each world is a small `meta.json` (name, seed, game mode, timestamps)
 plus a `data.json` recording the player's position and every block edit (by
 block *name*, not numeric id, so saves survive block-registry changes).
+`meta.json` also records the save format the world was written with, which
+is what lets every installed version safely share one saves folder — see
+"The launcher" below.
 Terrain itself is never saved — it's deterministic from the seed, so only the
 diff from procedural generation needs to persist. Autosaves every 30s and on
 returning to the menu.
@@ -261,64 +266,94 @@ across one Bevy `Text` root entity plus `TextSpan` children (Bevy's
 multi-colored-text API), one call reused for anything a player or a command
 sends to chat.
 
-## Auto-update
+## The launcher
 
-`src/updater.rs` is the whole mechanism, split into two deliberately
-separate phases:
+`launcher/` is a separate small app (its own workspace member, egui rather
+than Bevy) that owns everything to do with versions. **`CraftmjneSetup.exe`
+installs the launcher**, and the launcher takes it from there.
 
-1. **On startup**, a background thread asks GitHub Releases for the latest
-   tag and, if it's newer than the running build, downloads the matching
-   platform archive and extracts just the binary into a scratch directory
-   (`%TEMP%\craftmjne-update\` or the OS equivalent) — nothing on the actual
-   install is touched yet. A HUD banner tells you it's ready.
-2. **On quit** (the in-game Quit button or the OS window's close button —
-   both route through `QuitRequested`, see `updater::gate_quit`), if a
-   staged update is waiting, the game shows a real "Updating..." banner,
-   performs the actual on-disk swap right then using
-   [`self_update`](https://docs.rs/self_update)'s re-exported
-   [`self_replace`](https://docs.rs/self_replace) crate — a rename-based
-   replace that works even while that same binary is currently running —
-   and only *then* actually exits. The swap takes effect next launch, the
-   same model Steam and VS Code use.
+It replaces the old in-game auto-updater, which worked by having the running
+game rewrite its own executable. That approach fought the operating system:
+a process silently replacing its own binary is exactly what antivirus and
+EDR heuristics exist to catch, it gave no way to tell whether it had really
+taken effect, there was no way back to an older build, and it only ever
+swapped the `.exe` — so a release that changed `blocks/` left an installed
+copy half-updated. None of that applies now.
 
-The swap is deliberately **not** done silently mid-session the moment it's
-downloaded: rewriting your own running executable in the background is
-exactly the kind of behavior antivirus/EDR heuristics are built to flag,
-and a silent swap gives no visible confirmation it actually happened. Doing
-it at the one moment the game is already closing means there's a real,
-visible step to point to, and a much smaller, more predictable window for
-anything to interfere with it.
+### What it does
 
-Failures at either phase (offline, rate-limited, no releases yet, the swap
-itself erroring) are shown in the same banner and logged, but never block
-or delay quitting — a failed update never traps you in the game.
+- **Versions tab** — lists every published GitHub release that has a build
+  for your platform. Download one and it's extracted to
+  `%LOCALAPPDATA%\Craftmjne\versions\<version>\` (or the OS equivalent) as
+  an ordinary, complete folder: executable, `blocks/`, `textures/`. It's
+  downloaded once and kept, so switching back to it later is instant, and
+  removing one is just deleting that folder.
+- **Instances tab** — named launch configurations. Each pins a version and
+  optionally overrides render distance, world seed, and any extra command
+  line arguments. Editing one is immediate; they're stored in
+  `launcher/instances.json`.
+- **Play** — starts the selected instance. The launcher doesn't wait around;
+  you can close it and keep playing.
 
-This is why the installer targets `%LOCALAPPDATA%` instead of
-`Program Files`: an unprivileged process can overwrite its own exe there,
-so updates need no UAC prompt and no separate updater service.
+Downloads extract to a scratch directory and are only renamed into place once
+they finish, so an interrupted download can't leave behind a half-installed
+version that looks runnable but crashes on start.
 
-Turn it off with `--no-update-check` or `CRAFTMJNE_NO_UPDATE_CHECK=1` (it's
-also auto-disabled under `CRAFT_SMOKE`, so CI screenshots never depend on
-network access).
+### Worlds are shared, and migrate forward
 
-**Known gap:** `self_update` only ever extracts and swaps the named binary
-out of the downloaded archive — it never touches other files. That means an
-in-place auto-update does **not** refresh an existing install's `blocks/`
-folder, only the `.exe`. A release that changes block definitions needs a
-fresh install (or manually replacing `blocks/`) until something closes that
-gap.
+Every instance reads and writes the **same** `saves/` folder — the one a
+directly-installed copy of the game already uses — so adopting the launcher
+doesn't strand existing worlds, and a world follows you between versions
+rather than being trapped in whichever instance made it.
 
-## Releasing a new version
+What makes that safe is that worlds record the save format they were written
+with (`save::SAVE_FORMAT`):
+
+- Opening an **older** world migrates it forward and stamps it, written to
+  disk immediately rather than at the next autosave.
+- Opening a world written by a **newer** build is refused — loading it would
+  mean writing it back out in the older format and silently dropping
+  whatever the newer build stored. The worlds list still shows it, greyed
+  out and labelled, so it never looks like the world vanished.
+
+`SaveStore::open_world` is the single entry point that does both, so the
+too-new check can't be skipped by some other call site.
+
+### The launcher updates itself, from its own branch
+
+On every start the launcher fetches `launcher/manifest.json` from the
+`launcher` branch, and if it names a newer version with a build for your
+platform, downloads it and swaps it in — then tells you to restart. This is
+keyed to a **branch**, not to release tags, which is the point: shipping a
+launcher update neither requires nor triggers a game release. It's also a
+plain file fetch from `raw.githubusercontent.com`, so it needs no token and
+can't hit the API rate limit.
+
+Self-replacing is fine here in a way it wasn't in the game: the launcher is
+a small binary, the swap happens seconds after startup with nothing else
+going on, and if it fails you simply keep running the launcher you already
+have and it says so. No game version's install depends on it — those live in
+`versions/` and are never swapped in place at all.
+
+To publish a launcher update: bump `version` in `launcher/Cargo.toml` and
+push it to the `launcher` branch. `.github/workflows/launcher-release.yml`
+builds every platform, publishes them under a `launcher-v<version>` tag, and
+writes the matching manifest back to the branch.
+
+## Releasing a new game version
 
 Releases are cut by hand: bump `version` in `Cargo.toml` (and the matching
 `craftmjne` entry near the top of `Cargo.lock`), merge that to `main`, then
 either `git tag vX.Y.Z && git push origin vX.Y.Z` or create a Release for
 that tag directly on GitHub (Releases → Draft a new release → type the new
 tag). Either path fires `release.yml`'s `on: push: tags: ["v*"]` trigger,
-which builds Windows/Linux/macOS binaries, packages the Windows installer,
+which builds Windows/Linux/macOS archives, packages the Windows installer,
 and publishes everything to a GitHub Release (usually ~10-15 minutes end to
-end). Installed copies of the game pick it up automatically within one
-restart after that (see "Auto-updating" above).
+end). The launcher offers the new version the next time it's opened.
+
+Each `craftmjne-<target>.<zip|tar.gz>` is a complete, self-contained build —
+executable plus `blocks/` and `textures/` — because the launcher unpacks it
+as-is and the game refuses to start without `blocks/` beside its executable.
 
 Note that some environments — including Claude sessions working in this
 repo — get an HTTP 403 pushing tags even though branch pushes work fine, so
@@ -383,18 +418,27 @@ src/
 ├── commands.rs  # chat command dispatcher (/mode, /texture-report ...) + the cheats-flag rule
 ├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
 ├── texture_report.rs # TextureReport resource: green/yellow/red texture health, read by /texture-report
-├── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel, update banner
-└── updater.rs   # UpdaterPlugin: background check/stage + swap-on-quit
+└── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel
 blocks/
 └── *.json                # one block definition per file - see "Add a block" below
 textures/blocks/
 └── *.png                 # optional hand-supplied art overriding a procedural tile - see "Use real texture files" below
 textures/sky/
 └── sun.png / moon.png    # optional hand-supplied sun/moon art - see "Day/night cycle" below
+launcher/                 # separate crate: the launcher (egui, no Bevy)
+├── paths.rs              # where downloaded versions / instances live on disk
+├── library.rs            # installed versions - the download-once cache
+├── remote.rs             # GitHub releases: what exists, and fetching one
+├── instances.rs          # named, editable launch configurations
+├── launch.rs             # starting a game build
+├── selfupdate.rs         # the launcher updating itself from its own branch
+├── jobs.rs               # background work, so the window never blocks
+└── app.rs                # the window
 installer/
-└── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (bundles blocks/)
+└── craftmjne.nsi        # NSIS script -> CraftmjneSetup.exe (installs the launcher)
 .github/workflows/
-└── release.yml           # push of a vX.Y.Z tag -> cross-platform build + release
+├── release.yml           # push of a vX.Y.Z tag -> cross-platform build + release
+└── launcher-release.yml  # push to the `launcher` branch -> launcher build + manifest
 ```
 
 Data flow for a chunk: `stream_chunks` → generation task → blocks arrive →
@@ -719,14 +763,21 @@ exactly this reason).
 ## Tests
 
 ```bash
-cargo test
+cargo test              # the game
+cargo test --workspace  # the game and the launcher
 ```
 
 Unit tests cover the noise, atlas, registry, terrain, mesher (face counts, AO,
-water bucket), physics (falling, landing, wall collision), raycasting,
+water bucket, baked light channels), lighting (falloff, occlusion, colored
+channels, removal), physics (falling, landing, wall collision), raycasting,
 save/load (slugging, sanitization, round-tripping worlds and settings against
-a throwaway temp directory — never a real user profile), and the command
-dispatcher (`/mode`'s alias forms, persistence, and the cheats-flag rule).
+a throwaway temp directory — never a real user profile, plus save-format
+migration and the refusal to open a world written by a newer build), and the
+command dispatcher (`/mode`'s alias forms, persistence, and the cheats-flag
+rule). The launcher's own tests cover version ordering, the installed-version
+cache, instance config round-tripping, launch-argument construction, the
+self-update manifest and its upgrade decision, and that a failed download
+leaves no half-installed version behind — all without touching the network.
 `tests/headless.rs` boots the real ECS app **without a window or GPU** and
 drives the full streaming pipeline through the actual `AppState` machine:
 menu → `InGame` → generation tasks → meshing tasks → chunk entities, plus
@@ -737,8 +788,7 @@ save/load round trip.
 ## Roadmap ideas
 
 Natural next steps the architecture is prepared for: greedy meshing as an
-alternative mesher, block light propagation (extra vertex-color channel),
-multiple save slots per world / world deletion and rename in the Worlds
+alternative mesher, multiple save slots per world / world deletion and rename in the Worlds
 screen, real mod loading (the Mods screen is a placeholder), entities/mobs as
 plugins, day/night cycle (shader uniforms already in place), biome-driven
 generation parameters, audio (enable Bevy's `bevy_audio` feature), more chat

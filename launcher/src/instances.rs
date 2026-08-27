@@ -139,8 +139,8 @@ mod tests {
     #[test]
     fn extra_args_are_split_on_whitespace_and_appended() {
         let mut instance = Instance::new("Raw", "1.0.0");
-        instance.extra_args = "  --no-update-check   --version ".to_string();
-        assert_eq!(instance.launch_args(), vec!["--no-update-check", "--version"]);
+        instance.extra_args = "  --some-future-flag   --version ".to_string();
+        assert_eq!(instance.launch_args(), vec!["--some-future-flag", "--version"]);
     }
 
     #[test]

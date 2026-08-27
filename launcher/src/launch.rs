@@ -93,11 +93,11 @@ mod tests {
         let (_temp, library) = library_with("1.0.0");
         let mut instance = Instance::new("Tuned", "1.0.0");
         instance.render_distance = Some(4);
-        instance.extra_args = "--no-update-check".to_string();
+        instance.extra_args = "--some-future-flag".to_string();
 
         let command = command_for(&library, &instance).unwrap();
         let args: Vec<String> =
             command.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        assert_eq!(args, vec!["--render-distance", "4", "--no-update-check"]);
+        assert_eq!(args, vec!["--render-distance", "4", "--some-future-flag"]);
     }
 }

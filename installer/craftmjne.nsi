@@ -1,13 +1,17 @@
 ; Craftmjne installer (NSIS / Modern UI 2).
 ;
-; Installs per-user to %LOCALAPPDATA%\Craftmjne — no admin rights required to
-; install *or* to update. This matters because the in-game auto-updater
-; (src/updater.rs) rewrites the installed .exe in place on every launch; a
-; Program Files install would need a UAC-elevated updater to do that, which
-; is a much bigger (and worse) piece of software than the game itself.
+; This installs the **launcher**, not the game. The launcher downloads game
+; versions itself into %LOCALAPPDATA%\Craftmjne\versions\<version>\, so a
+; version is an ordinary folder that can be added, removed or switched
+; between freely - nothing ever rewrites a running executable in place, which
+; is what the old in-game updater did and what kept going wrong.
 ;
-; Build (from repo root, after `cargo build --release`):
-;   makensis -DAPP_VERSION=0.2.0 -DSRC_EXE=target\release\craftmjne.exe installer\craftmjne.nsi
+; Installs per-user to %LOCALAPPDATA%\Craftmjne - no admin rights needed, and
+; the same directory the launcher already keeps saves/ and versions/ in, so
+; everything Craftmjne owns lives in one place.
+;
+; Build (from repo root, after `cargo build --release -p craftmjne-launcher`):
+;   makensis -DAPP_VERSION=1.0.0 -DSRC_EXE=target\release\craftmjne-launcher.exe installer\craftmjne.nsi
 ; Produces CraftmjneSetup.exe in the repo root.
 
 !include "MUI2.nsh"
@@ -16,7 +20,7 @@
   !define APP_VERSION "0.0.0"
 !endif
 !ifndef SRC_EXE
-  !define SRC_EXE "..\target\release\craftmjne.exe"
+  !define SRC_EXE "..\target\release\craftmjne-launcher.exe"
 !endif
 
 Name "Craftmjne"
@@ -27,8 +31,8 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 VIProductVersion "${APP_VERSION}.0"
-VIAddVersionKey "ProductName" "Craftmjne"
-VIAddVersionKey "FileDescription" "Craftmjne voxel game installer"
+VIAddVersionKey "ProductName" "Craftmjne Launcher"
+VIAddVersionKey "FileDescription" "Craftmjne launcher installer"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey "LegalCopyright" "MIT license"
@@ -37,8 +41,8 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_RUN "$INSTDIR\craftmjne.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Launch Craftmjne now"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\craftmjne-launcher.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Open the Craftmjne launcher"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -46,39 +50,23 @@ VIAddVersionKey "LegalCopyright" "MIT license"
 
 !insertmacro MUI_LANGUAGE "English"
 
-Section "Craftmjne" SEC_APP
+Section "Craftmjne Launcher" SEC_APP
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File "/oname=craftmjne.exe" "${SRC_EXE}"
+  File "/oname=craftmjne-launcher.exe" "${SRC_EXE}"
 
-  ; Block definitions (one *.json per block - see src/blocks.rs). The game
-  ; looks for this folder next to its own exe at startup and won't run
-  ; without it. Relative to this script's own directory (installer/), same
-  ; as everything else here except SRC_EXE.
-  SetOutPath "$INSTDIR\blocks"
-  File /r "..\blocks\*.json"
-  SetOutPath "$INSTDIR"
-
-  ; Optional custom-texture folder (see src/atlas.rs and textures/blocks/
-  ; README.md) - just the README, so it exists and is discoverable right
-  ; next to the exe; the game runs fine with nothing else in it.
-  SetOutPath "$INSTDIR\textures\blocks"
-  File "..\textures\blocks\README.md"
-  SetOutPath "$INSTDIR"
-
-  ; Optional custom sun/moon texture folder (see src/sky.rs and
-  ; textures/sky/README.md) - same deal, just the README.
-  SetOutPath "$INSTDIR\textures\sky"
-  File "..\textures\sky\README.md"
-  SetOutPath "$INSTDIR"
+  ; No blocks/ or textures/ here on purpose: those ship inside each game
+  ; version's own download, so every installed version carries the block
+  ; definitions it was actually built against instead of sharing one copy
+  ; that only matches whichever version was installed last.
 
   WriteRegStr HKCU "Software\Craftmjne" "InstallDir" "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\Craftmjne"
-  CreateShortcut "$SMPROGRAMS\Craftmjne\Craftmjne.lnk" "$INSTDIR\craftmjne.exe"
+  CreateShortcut "$SMPROGRAMS\Craftmjne\Craftmjne.lnk" "$INSTDIR\craftmjne-launcher.exe"
   CreateShortcut "$SMPROGRAMS\Craftmjne\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$DESKTOP\Craftmjne.lnk" "$INSTDIR\craftmjne.exe"
+  CreateShortcut "$DESKTOP\Craftmjne.lnk" "$INSTDIR\craftmjne-launcher.exe"
 
   ; Add/Remove Programs entry (per-user, HKCU — no admin rights needed).
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Craftmjne" \
@@ -88,7 +76,7 @@ Section "Craftmjne" SEC_APP
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Craftmjne" \
     "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Craftmjne" \
-    "DisplayIcon" "$INSTDIR\craftmjne.exe"
+    "DisplayIcon" "$INSTDIR\craftmjne-launcher.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Craftmjne" \
     "Publisher" "Craftmjne"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Craftmjne" \
@@ -100,10 +88,14 @@ Section "Craftmjne" SEC_APP
 SectionEnd
 
 Section "Uninstall"
-  Delete "$INSTDIR\craftmjne.exe"
+  ; Deliberately file-by-file, never `RMDir /r "$INSTDIR"`: the install
+  ; directory is also where the launcher keeps saves\ and versions\, and
+  ; uninstalling the launcher must not delete anyone's worlds. The plain
+  ; RMDir at the end only succeeds if the folder is genuinely empty, so a
+  ; user with no saved worlds gets a clean removal and everyone else keeps
+  ; their data.
+  Delete "$INSTDIR\craftmjne-launcher.exe"
   Delete "$INSTDIR\Uninstall.exe"
-  RMDir /r "$INSTDIR\blocks"
-  RMDir /r "$INSTDIR\textures"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\Craftmjne\Craftmjne.lnk"

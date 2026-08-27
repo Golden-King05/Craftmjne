@@ -4,7 +4,8 @@ This is a **Rust + Bevy native game** (see `Cargo.toml`, `src/*.rs`). It is a
 complete, working, well-optimized voxel engine framework with procedurally
 generated 16x16 textures, chunked async terrain generation/meshing, physics,
 colored voxel lighting, a day/night cycle, a main menu with per-user saves,
-a Windows installer, and a self-updater. Full details: `README.md`.
+a Windows installer, and a separate launcher that manages game versions.
+Full details: `README.md`.
 
 ## Do not rewrite this project
 
@@ -49,16 +50,31 @@ silently reset" below — the same staleness risk applies here).
 
 ## Quick orientation
 
-- `cargo run --release` to play; `cargo test` to run the test suite.
+**This is a two-crate Cargo workspace.** The game is the root package; the
+launcher is `launcher/`. `cargo test` at the root still runs only the game
+(that's Cargo's behavior for a workspace with a root package) - use `cargo
+test --workspace` to include the launcher's tests, and remember to, because
+it's easy to "run the tests" and never touch the launcher at all.
+
+- `cargo run --release` to play; `cargo test --workspace` for everything.
 - `src/` is organized as Bevy plugins — one file per plugin/subsystem
   (`world.rs`, `player.rs`, `terrain.rs`, `mesher.rs`, `atlas.rs`, etc.).
   `main.rs` just assembles them.
+- `launcher/` is deliberately Bevy-free (egui/eframe): it downloads game
+  versions into `versions/<version>/`, manages instances, and starts them.
+  Nothing in it may depend on the `craftmjne` crate - it has to build and
+  start fast, and pulling in the engine would defeat both.
+- **The game no longer updates itself.** `src/updater.rs` is gone; don't
+  reintroduce anything that rewrites the running executable. Version
+  management belongs to the launcher.
 - Building the Windows installer: see README's "Building the Windows
-  installer yourself" section (`rustup target add x86_64-pc-windows-gnu`,
-  cross-compile, then `makensis` against `installer/craftmjne.nsi`).
-- Releases are cut by tagging `vX.Y.Z` (matching `Cargo.toml`'s `version`)
-  and pushing the tag; `.github/workflows/release.yml` builds and publishes
-  binaries + the installer automatically.
+  installer yourself" section. Note it now packages the *launcher*, not the
+  game (`-p craftmjne-launcher`).
+- Game releases are cut by tagging `vX.Y.Z` (matching `Cargo.toml`'s
+  `version`) and pushing the tag; `.github/workflows/release.yml` publishes
+  the archives + installer. **Launcher releases are separate**: bump
+  `version` in `launcher/Cargo.toml` and push to the `launcher` branch,
+  which fires `.github/workflows/launcher-release.yml`.
 
 ## Bevy 0.16 API notes (verified by actually compiling, not guessed)
 
@@ -970,3 +986,70 @@ etc.) instead of inventing a new approach:
   two of the same type. `mesher::PaddedChunk` (blocks/fluid/axis/light, plus
   an `empty()` constructor the tests build on) made `build_padded`'s return
   type and the mesher's signature both simpler than before the feature.
+- **The fix for "our updates keep breaking" was to stop having the running
+  program update itself, not to make the self-replace more careful.** Two
+  previous rounds went into hardening the in-game updater - deferring the
+  swap to quit time, adding a visible dwell, reading the vendored
+  `self_replace` source to confirm the rename dance was correct - and it
+  was all correct, and it still didn't work reliably, because a process
+  silently rewriting its own binary is something the OS and its security
+  software get a vote on. The launcher wins by removing the premise: the
+  process doing the downloading (the launcher) is never the process being
+  replaced (a game build under `versions/`), so a version install is just
+  writing a new folder. When a mechanism keeps failing after the third
+  careful fix, check whether the mechanism itself is the thing to delete.
+- **Deciding a launcher's instances share one saves folder is a decision
+  about *save compatibility*, not about folders.** Isolated per-instance
+  saves would have needed no format work at all; sharing them makes both
+  directions of version skew reachable in ordinary use, which is what
+  forced `save::SAVE_FORMAT`, `SaveCompatibility`, `migrate` and
+  `SaveStore::open_world`. The dangerous direction is the *backwards* one -
+  an older build opening a newer world would load it (every field is
+  `#[serde(default)]`, so it deserializes fine) and then write it back out
+  minus everything the newer build added. That's silent data loss that
+  looks like a successful load, so it's refused rather than warned about,
+  and the worlds list greys the world out instead of hiding it (a hidden
+  world reads as "my save is gone").
+- **Build the migration mechanism at the moment the *first* migration
+  becomes possible, not when it becomes necessary.** There are currently
+  zero data-shape migrations - format 0 -> 1 rewrites nothing, because
+  serde defaults already covered every field added so far. Writing the
+  table-plus-loop anyway costs a few lines now; improvising it later, at
+  the point where a real format change has already shipped and someone's
+  world is the test case, costs a lot more. Same instinct as
+  `MoonEventDef`'s declarative table: the generic algorithm goes in while
+  it's cheap and obvious.
+- **`cargo test` in a workspace with a root package does NOT test the
+  workspace.** Converting the repo to a workspace silently changed what
+  "run the tests" means - the launcher's 40 tests don't run under a bare
+  `cargo test`. Nothing warns about this. Use `--workspace` (and check that
+  CI/docs say so) whenever adding a crate.
+- **A launcher's "is it installed?" check should read the filesystem, not
+  an index file.** `Library::is_installed` is just "does
+  `versions/<version>/craftmjne[.exe]` exist" - so deleting a folder by
+  hand really does uninstall that version, and there's no catalogue that
+  can disagree with reality. The matching hazard is a *partial* extraction
+  leaving the executable in place: that would read as installed and then
+  crash on the missing `blocks/`. Fixed by extracting to a scratch
+  directory and renaming into place only on success, so the check can
+  never observe a half-written version (`remote::install`, tested by
+  pointing an install at an unreachable URL and asserting no directory is
+  left behind).
+- **Test temp directories must be unique per call, not per fixture.** Two
+  launcher tests both built `craftmjne-launch-test-<pid>-1.0.0`, ran in
+  parallel, and one's `TempRoot` drop deleted the other's fixture mid-test
+  - which surfaced as an unrelated-looking "isn't downloaded yet" failure
+  that only appeared sometimes. Every temp-dir helper in this repo uses an
+  `AtomicU64` counter for exactly this reason; copy that, don't key the
+  name on the fixture's contents.
+- **The launcher exposed a real packaging bug that had been latent for
+  months: the Windows release zip contained only `craftmjne.exe`.** That was
+  fine while the only consumer was the old in-game updater, which extracted
+  just the named binary out of it - but the archive is now what a fresh
+  install *is*, and the game refuses to start without `blocks/` beside its
+  executable. `release.yml` now stages executable + `blocks/` + `textures/`
+  into one folder and archives that folder's *contents* (note the `\*` in
+  the `Compress-Archive` path - archiving the folder itself would nest
+  everything one level down and break it just as thoroughly). General
+  lesson: when something starts consuming an artifact differently than the
+  thing it was built for, re-check what's actually in the artifact.
