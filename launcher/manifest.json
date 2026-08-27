@@ -1,8 +1,8 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.2",
   "assets": {
-    "x86_64-pc-windows-msvc": "https://github.com/Golden-King05/Craftmjne/releases/download/launcher-v1.0.1/craftmjne-launcher-x86_64-pc-windows-msvc.zip",
-    "x86_64-unknown-linux-gnu": "https://github.com/Golden-King05/Craftmjne/releases/download/launcher-v1.0.1/craftmjne-launcher-x86_64-unknown-linux-gnu.tar.gz",
-    "aarch64-apple-darwin": "https://github.com/Golden-King05/Craftmjne/releases/download/launcher-v1.0.1/craftmjne-launcher-aarch64-apple-darwin.tar.gz"
+    "x86_64-pc-windows-msvc": "https://github.com/Golden-King05/Craftmjne/releases/download/launcher-v1.0.2/craftmjne-launcher-x86_64-pc-windows-msvc.zip",
+    "x86_64-unknown-linux-gnu": "https://github.com/Golden-King05/Craftmjne/releases/download/launcher-v1.0.2/craftmjne-launcher-x86_64-unknown-linux-gnu.tar.gz",
+    "aarch64-apple-darwin": "https://github.com/Golden-King05/Craftmjne/releases/download/launcher-v1.0.2/craftmjne-launcher-aarch64-apple-darwin.tar.gz"
   }
 }
