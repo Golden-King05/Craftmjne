@@ -68,6 +68,15 @@
 //!   `custom_item_model`, a path — required when `"custom"` is chosen, the
 //!   loader panics on a block file missing it; no model loader exists yet,
 //!   so this renders as `"face"` for now). Defaults to `"default"`.
+//! - `block_model` names a Blockbench `.bbmodel` file in the `models/`
+//!   directory (a bare filename, not a path) giving this block a real shape
+//!   in the *world* - as opposed to `item_model`, which only ever affects
+//!   the inventory icon. The two are deliberately independent: a block can
+//!   have a custom world shape and still use the standard baked isometric
+//!   icon. Like `custom_item_model`, **no loader reads it yet** - a block
+//!   naming a model still renders as an ordinary cube - so this exists to
+//!   let content be authored against the final naming convention ahead of
+//!   the mesher supporting it. `blocks/torch.json` is the built-in example.
 //! - `rotation` is `"none"` (the default - always renders unrotated, "top"/
 //!   "bottom"/"side" textures fixed to +y/-y/the four sides) or `"log"`
 //!   (Minecraft log behavior: placing it against a block's top or bottom
@@ -422,6 +431,21 @@ pub struct BlockDef {
     /// treat this as relative to wherever a future model system decides -
     /// for now it's just carried through the registry unread.
     pub custom_item_model: Option<String>,
+    /// A Blockbench `.bbmodel` filename (relative to the repo's `models/`
+    /// directory) giving this block a real shape in the *world*, instead of
+    /// the plain textured cube every block renders as today.
+    ///
+    /// Deliberately separate from [`Self::item_model`], which is only ever
+    /// about the inventory/hotbar icon: a block can have a custom world
+    /// shape while keeping the standard baked isometric icon, and vice
+    /// versa. Folding both into one field would mean a torch couldn't get
+    /// its real shape without also losing its icon.
+    ///
+    /// **No loader exists yet** - like `custom_item_model`, this is carried
+    /// through the registry unread, so a block naming a model still renders
+    /// as a cube. It's here so content can be authored against the final
+    /// naming convention before the mesher learns to read it.
+    pub block_model: Option<String>,
     /// Whether a placed instance can face different directions. See
     /// [`Rotation`].
     pub rotation: Rotation,
@@ -466,6 +490,7 @@ impl Default for BlockDef {
             item: true,
             item_model: ItemModel::default(),
             custom_item_model: None,
+            block_model: None,
             rotation: Rotation::default(),
             light: LightSpec::default(),
             texture_scheme: TextureScheme::default(),
@@ -514,6 +539,7 @@ struct BlockFile {
     #[serde(default)]
     item_model: ItemModel,
     custom_item_model: Option<String>,
+    block_model: Option<String>,
     #[serde(default)]
     rotation: Rotation,
     #[serde(default)]
@@ -556,6 +582,7 @@ impl BlockFile {
             item: self.item,
             item_model: self.item_model,
             custom_item_model: self.custom_item_model,
+            block_model: self.block_model,
             rotation: self.rotation,
             light: self.light,
             texture_scheme: self.texture_scheme,
@@ -946,6 +973,35 @@ mod tests {
         .into_def();
         assert_eq!(def.item_model, ItemModel::Custom);
         assert_eq!(def.custom_item_model.as_deref(), Some("gizmo/model.json"));
+    }
+
+    #[test]
+    fn block_model_is_independent_of_item_model() {
+        let def: BlockDef = serde_json::from_str::<BlockFile>(r#"{"id": "dirt"}"#)
+            .unwrap()
+            .into_def();
+        assert!(def.block_model.is_none(), "blocks default to no custom model");
+
+        // The point of the separate field: naming a world model must leave
+        // the inventory icon on the standard isometric bake, not silently
+        // downgrade it the way reusing `item_model: "custom"` would.
+        let def: BlockDef =
+            serde_json::from_str::<BlockFile>(r#"{"id": "torch", "block_model": "torch.bbmodel"}"#)
+                .unwrap()
+                .into_def();
+        assert_eq!(def.block_model.as_deref(), Some("torch.bbmodel"));
+        assert_eq!(def.item_model, ItemModel::Default);
+    }
+
+    #[test]
+    fn the_shipped_torch_names_a_model_without_needing_it_to_exist() {
+        // There's no `.bbmodel` loader yet, so `models/torch.bbmodel` is
+        // legitimately absent - loading the real registry must not care.
+        // This is what keeps the game runnable while the art is still being
+        // made, rather than turning a not-yet-drawn model into a hard crash.
+        let registry = BlockRegistry::with_defaults();
+        let torch = registry.def(registry.id("torch"));
+        assert_eq!(torch.block_model.as_deref(), Some("torch.bbmodel"));
     }
 
     #[test]
