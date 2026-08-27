@@ -13,7 +13,6 @@ use crate::player::{cursor_grabbed, Player};
 use crate::render::{AtlasImage, IconAtlasImage};
 use crate::save::GameMode;
 use crate::state::AppState;
-use crate::updater::{PendingExit, UpdateState};
 use crate::world::ChunkMap;
 
 #[derive(Component)]
@@ -37,9 +36,6 @@ const HOTBAR_LABEL_DURATION: f32 = 1.6;
 
 #[derive(Component)]
 struct HintText;
-
-#[derive(Component)]
-struct UpdateBanner;
 
 #[derive(Component)]
 struct DebugText;
@@ -200,81 +196,6 @@ fn setup_hud(mut commands: Commands) {
 fn despawn_hud(mut commands: Commands, roots: Query<Entity, With<HudRoot>>) {
     for e in &roots {
         commands.entity(e).despawn();
-    }
-}
-
-/// Spawned once at startup — the update-available banner is meaningful
-/// whether you're in the menus or in a world, so it lives outside the HUD.
-/// Anchored top-right so it never collides with the hotbar (bottom) or the
-/// in-game hint text (top-center).
-fn setup_update_banner(mut commands: Commands) {
-    commands.spawn((
-        UpdateBanner,
-        Text::new(""),
-        TextFont { font_size: 14.0, ..default() },
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            right: Val::Px(10.0),
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.12, 0.45, 0.2, 0.85)),
-        Visibility::Hidden,
-    ));
-}
-
-/// Reflects the background update check into a small top-right banner:
-/// silent while checking or up to date, a note once a newer version has
-/// been staged and is waiting for a restart, and - while the game is
-/// actually closing with a staged update - the live "Updating..."/failure
-/// text `updater::apply_update_then_exit` is racing against (see
-/// `PendingExit`), which always takes priority over the ordinary states
-/// since it means the window is about to disappear either way.
-fn update_banner(
-    state: Res<UpdateState>,
-    pending: Option<Res<PendingExit>>,
-    mut banners: Query<(&mut Text, &mut Visibility, &mut BackgroundColor), With<UpdateBanner>>,
-) {
-    let Ok((mut text, mut vis, mut bg)) = banners.single_mut() else { return };
-    const GREEN: Color = Color::srgba(0.12, 0.45, 0.2, 0.9);
-    const RED: Color = Color::srgba(0.55, 0.15, 0.12, 0.9);
-
-    if let Some(pending) = &pending {
-        *vis = Visibility::Visible;
-        match &pending.outcome {
-            None => {
-                text.0 = "Updating... closing now".into();
-                bg.0 = GREEN;
-            }
-            Some(Ok(())) => {
-                text.0 = "Updated - closing now".into();
-                bg.0 = GREEN;
-            }
-            Some(Err(err)) => {
-                text.0 = format!("Update failed, playing on this version: {err}");
-                bg.0 = RED;
-            }
-        }
-        return;
-    }
-
-    if !state.is_changed() {
-        return;
-    }
-    match &*state {
-        UpdateState::Ready { version, .. } => {
-            text.0 = format!("Craftmjne {version} downloaded - restart to update");
-            bg.0 = GREEN;
-            *vis = Visibility::Visible;
-        }
-        UpdateState::Failed(err) => {
-            text.0 = format!("Update check failed: {err}");
-            bg.0 = RED;
-            *vis = Visibility::Visible;
-        }
-        _ => *vis = Visibility::Hidden,
     }
 }
 
@@ -445,14 +366,12 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugState>()
             .init_resource::<HotbarLabelState>()
-            .add_systems(Startup, setup_update_banner)
             .add_systems(OnEnter(AppState::InGame), setup_hud)
             .add_systems(OnExit(AppState::InGame), despawn_hud)
             .add_systems(
                 Update,
                 (rebuild_hotbar, hotbar_label, hint_visibility, debug_panel)
                     .run_if(in_state(AppState::InGame)),
-            )
-            .add_systems(Update, update_banner);
+            );
     }
 }

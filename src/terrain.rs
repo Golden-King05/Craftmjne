@@ -6,8 +6,9 @@
 //! To customize generation, swap the generator constructed in
 //! `world::compile_content` for your own.
 
-use crate::blocks::{BlockId, BlockRegistry, AIR, AXIS_Y, FLUID_SOURCE};
+use crate::blocks::{BlockId, BlockRegistry, Transparency, AIR, AXIS_Y, FLUID_SOURCE};
 use crate::config::{block_index, CHUNK_SIZE, CS, H, SEA_LEVEL, WORLD_HEIGHT};
+use crate::light::{LightCell, MAX_LIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
 
 const SNOW_LINE: i32 = 45;
@@ -24,6 +25,12 @@ pub struct GeneratedChunk {
     /// this is always filled with `AXIS_Y` - only player placement
     /// (`interact.rs`) ever writes a different value.
     pub axis: Vec<u8>,
+    /// Parallel to `blocks`. Only the straight-down sky column is filled in
+    /// here (see `fill_sky_columns`); everything else - block light, and sky
+    /// light that has to turn a corner into a cave or under an overhang - is
+    /// left to `light.rs`'s propagation once the chunk is in the world and
+    /// its neighbours are known.
+    pub light: Vec<LightCell>,
 }
 
 struct TerrainIds {
@@ -44,6 +51,11 @@ struct TerrainIds {
 pub struct TerrainGenerator {
     seed: u32,
     ids: TerrainIds,
+    /// Per-block-id opacity, so `fill_sky_columns` can tell what stops
+    /// sunlight without needing the compiled `Tables` (which don't exist yet
+    /// when a generator is constructed, and which generation otherwise has
+    /// no reason to depend on).
+    opaque: Vec<bool>,
     terrain: SimplexNoise,
     mountain: SimplexNoise,
     cave_a: SimplexNoise,
@@ -54,6 +66,11 @@ impl TerrainGenerator {
     pub fn new(seed: u32, reg: &BlockRegistry) -> Self {
         Self {
             seed,
+            opaque: reg
+                .defs
+                .iter()
+                .map(|def| def.transparency == Transparency::No)
+                .collect(),
             ids: TerrainIds {
                 stone: reg.id("stone"),
                 dirt: reg.id("dirt"),
@@ -215,8 +232,36 @@ impl TerrainGenerator {
         GeneratedChunk {
             fluid: vec![FLUID_SOURCE; blocks.len()],
             axis: vec![AXIS_Y; blocks.len()],
+            light: self.fill_sky_columns(&blocks),
             blocks,
         }
+    }
+
+    /// Sunlight straight down: every column starts at full strength from the
+    /// top of the world and keeps it until the first opaque block, below
+    /// which it's dark until `light.rs` propagates something in sideways.
+    ///
+    /// Doing this here rather than leaving it entirely to the propagation
+    /// queue is what keeps chunk streaming cheap: it needs no neighbour
+    /// information at all (a column is self-contained), and it settles the
+    /// overwhelming majority of a chunk's cells - everything in open air -
+    /// to their exact final value, so a chunk's very first mesh is already
+    /// correctly lit outdoors and the queue only has the genuinely
+    /// cross-chunk and enclosed cases left to work out.
+    fn fill_sky_columns(&self, blocks: &[BlockId]) -> Vec<LightCell> {
+        let mut light = vec![LightCell::DARK; blocks.len()];
+        for z in 0..CS {
+            for x in 0..CS {
+                let base = block_index(x, 0, z);
+                for y in (0..H).rev() {
+                    if self.opaque[blocks[base + y] as usize] {
+                        break;
+                    }
+                    light[base + y].sky = MAX_LIGHT;
+                }
+            }
+        }
+        light
     }
 }
 

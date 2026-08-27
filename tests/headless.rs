@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use craftmjne::blocks::{BlockRegistry, AXIS_Y};
 use craftmjne::config::{WorldSettings, CHUNK_SIZE};
+use craftmjne::light::{LightPlugin, LightQueue, MAX_LIGHT};
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
 use craftmjne::save::{GameMode, SaveStore};
@@ -49,7 +50,7 @@ fn headless_app(temp: &TempSaves) -> App {
         water: Handle::default(),
     });
     app.init_state::<AppState>();
-    app.add_plugins(WorldPlugin);
+    app.add_plugins((WorldPlugin, LightPlugin));
     app.world_mut().spawn(Player::default());
 
     let (slug, meta) = app.world().resource::<SaveStore>().create_world("Test World", 7, GameMode::Survival).unwrap();
@@ -73,7 +74,7 @@ fn reload_app(temp: &TempSaves) -> App {
     app.insert_resource(SaveStore::at(temp.0.clone()));
     app.insert_resource(ChunkMaterials { solid: Handle::default(), water: Handle::default() });
     app.init_state::<AppState>();
-    app.add_plugins(WorldPlugin);
+    app.add_plugins((WorldPlugin, LightPlugin));
     app.world_mut().spawn(Player::default());
 
     let store = app.world().resource::<SaveStore>();
@@ -423,5 +424,119 @@ fn edits_in_unvisited_chunks_survive_a_second_reload() {
     assert!(
         run_until(&mut app3, |app| app.world().resource::<ChunkMap>().get_block(far) == glass, 2000),
         "edit in a chunk unvisited during session 2 was lost after session 2's save"
+    );
+}
+
+/// Runs the app until the chunks around spawn are meshed *and* the lighting
+/// queue has fully settled, so light values can be asserted exactly.
+fn run_until_lit(app: &mut App) {
+    let ok = run_until(
+        app,
+        |app| {
+            app.world().resource::<ChunkMap>().stats().1 >= 9
+                && app.world().resource::<LightQueue>().is_empty()
+        },
+        4000,
+    );
+    assert!(ok, "chunks never finished meshing with settled lighting");
+}
+
+fn surface_y(app: &App, x: i32, z: i32) -> i32 {
+    let tables = app.world().resource::<craftmjne::blocks::BlockTables>().clone();
+    app.world()
+        .resource::<ChunkMap>()
+        .surface_y(&tables.0, x, z)
+        .expect("column generated")
+}
+
+#[test]
+fn sky_light_fills_open_air_and_a_roof_cuts_it_off() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    run_until_lit(&mut app);
+
+    let y = surface_y(&app, 8, 8);
+    let open = IVec3::new(8, y + 1, 8);
+    assert_eq!(
+        app.world().resource::<ChunkMap>().get_light(open).sky,
+        MAX_LIGHT,
+        "open air above the ground should see the full sky"
+    );
+
+    // Roof it over two blocks up. The cell underneath can no longer see the
+    // sky directly, so it must end up dimmer than full daylight.
+    let roof = IVec3::new(8, y + 2, 8);
+    let stone = app.world().resource::<BlockRegistry>().id("stone");
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(roof, stone);
+    }
+    app.world_mut().send_event(BlockSetEvent { pos: roof, id: stone, prev: 0, axis: AXIS_Y });
+    run_until_lit(&mut app);
+
+    let under_roof = app.world().resource::<ChunkMap>().get_light(open).sky;
+    assert!(
+        under_roof < MAX_LIGHT,
+        "a roof should cut the sky light underneath it, still {under_roof}"
+    );
+}
+
+#[test]
+fn a_placed_torch_lights_the_cells_around_it_in_its_own_color() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    run_until_lit(&mut app);
+
+    let y = surface_y(&app, 8, 8);
+    let torch_pos = IVec3::new(8, y + 1, 8);
+    let torch = app.world().resource::<BlockRegistry>().id("torch");
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(torch_pos, torch);
+    }
+    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: torch, prev: 0, axis: AXIS_Y });
+    run_until_lit(&mut app);
+
+    let map = app.world().resource::<ChunkMap>();
+    let beside = map.get_light(torch_pos + IVec3::X).block;
+    assert_eq!(beside[0], MAX_LIGHT - 1, "one block from a full-strength torch");
+    assert!(
+        beside[0] > beside[2],
+        "the torch's light should stay warm as it spreads, got {beside:?}"
+    );
+    // ...and fade with distance rather than filling the whole area evenly.
+    let further = map.get_light(torch_pos + IVec3::X * 4).block;
+    assert!(further[0] < beside[0] && further[0] > 0, "expected falloff, got {further:?}");
+}
+
+#[test]
+fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    run_until_lit(&mut app);
+
+    let y = surface_y(&app, 8, 8);
+    let torch_pos = IVec3::new(8, y + 1, 8);
+    let probe = torch_pos + IVec3::X * 3;
+    let torch = app.world().resource::<BlockRegistry>().id("torch");
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(torch_pos, torch);
+    }
+    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: torch, prev: 0, axis: AXIS_Y });
+    run_until_lit(&mut app);
+    assert!(app.world().resource::<ChunkMap>().get_light(probe).block[0] > 0);
+
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(torch_pos, 0);
+    }
+    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: 0, prev: torch, axis: AXIS_Y });
+    run_until_lit(&mut app);
+
+    assert_eq!(
+        app.world().resource::<ChunkMap>().get_light(probe).block,
+        [0; 3],
+        "removing the only light source must leave nothing behind"
     );
 }

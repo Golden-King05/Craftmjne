@@ -179,7 +179,7 @@ fn restore_grab(chat: &ChatState, windows: &mut Query<&mut Window, With<PrimaryW
 /// Copies `text` to the OS clipboard, silently doing nothing if there's no
 /// clipboard to talk to (e.g. a headless/CI environment) - matches this
 /// project's general "never crash on an external environment failure"
-/// stance elsewhere (updater, save loading, texture loading).
+/// stance elsewhere (save loading, texture loading).
 fn clipboard_copy(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text.to_string());

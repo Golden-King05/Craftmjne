@@ -5,18 +5,34 @@
 //!  - Operates on a "padded" copy of the chunk (+1 block shell from the eight
 //!    neighbouring chunks) so face culling and AO never need chunk lookups.
 //!  - Hidden-face culling: only faces exposed to air / transparent blocks emit.
-//!  - Per-vertex ambient occlusion and directional sky shading are baked into
-//!    vertex colors; the chunk shader is fully unlit.
+//!  - Per-vertex ambient occlusion, directional face shading and the propagated
+//!    voxel light (`light.rs`) are all baked into vertex colors; the chunk
+//!    shader is fully unlit.
+//!
 //!  - Quads flip along the brighter AO diagonal to avoid interpolation
 //!    artifacts.
 //!  - Two buckets per chunk: `solid` (opaque + alpha-cutout like leaves/glass)
 //!    and `water` (alpha-blended translucent pass).
+//!
+//! ## What the vertex color channels mean
+//!
+//! `RGB` is the colored **block** light for that vertex (torches and the
+//! like), already multiplied by face shading and ambient occlusion, and
+//! already floored at [`AMBIENT_LIGHT`]. `A` is the **sky** light for the
+//! same vertex, on the same shading/AO scale, and is *not* a transparency -
+//! the alpha the fragment actually outputs comes from the texture and the
+//! material's `base_alpha`, so this attribute was sitting unused. Keeping the
+//! two separate is the whole point: `chunk.wgsl` combines them as
+//! `max(rgb, a * sky_light)` every frame, which is what lets the day/night
+//! cycle brighten, dim and tint the world's sky lighting without touching a
+//! single mesh.
 
 use std::sync::LazyLock;
 
 use crate::atlas::BASE_TILE_SIZE;
-use crate::blocks::{Tables, AXIS_X, AXIS_Y, AXIS_Z, FLUID_FALLING, FLUID_SOURCE};
+use crate::blocks::{BlockId, Tables, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{ATLAS_TILES, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
+use crate::light::{LightCell, AMBIENT_LIGHT, MAX_LIGHT};
 
 // Padded array layout: x,z in [-1, CHUNK_SIZE], y in [-1, WORLD_HEIGHT].
 pub const PAD_XZ: usize = CS + 2;
@@ -203,15 +219,65 @@ pub struct ChunkMeshData {
     pub water: MeshBucket,
 }
 
-pub fn mesh_chunk(
-    padded: &[u16],
-    padded_fluid: &[u8],
-    padded_axis: &[u8],
-    tables: &Tables,
-) -> ChunkMeshData {
-    debug_assert_eq!(padded.len(), PAD_XZ * PAD_XZ * PAD_Y);
-    debug_assert_eq!(padded_fluid.len(), padded.len());
-    debug_assert_eq!(padded_axis.len(), padded.len());
+/// One chunk plus the 1-block shell from its eight neighbours, in the padded
+/// layout `padded_index` addresses. Four arrays that must always be indexed
+/// identically and stay the same length, so they travel as one value rather
+/// than four positional parameters nothing would stop a caller reordering.
+/// Built by `world::ChunkMap::build_padded`.
+pub struct PaddedChunk {
+    pub blocks: Vec<BlockId>,
+    pub fluid: Vec<u8>,
+    pub axis: Vec<u8>,
+    pub light: Vec<LightCell>,
+}
+
+impl PaddedChunk {
+    /// An all-air, unlit padded chunk - the starting point `build_padded`
+    /// copies into, and what tests build their scenarios on top of.
+    pub fn empty() -> Self {
+        let n = PAD_XZ * PAD_XZ * PAD_Y;
+        Self {
+            blocks: vec![AIR; n],
+            fluid: vec![FLUID_SOURCE; n],
+            axis: vec![AXIS_Y; n],
+            light: vec![LightCell::DARK; n],
+        }
+    }
+}
+
+/// Smoothly lit vertex value: the average light over the (up to) four cells
+/// that touch this vertex on the *outside* of the face - the direct
+/// neighbour plus the two side cells and the diagonal corner, which is
+/// exactly the set ambient occlusion already samples. Opaque cells are
+/// skipped rather than averaged in as darkness; including them would draw a
+/// dark seam along every wall/floor join, since those cells are solid rock
+/// that light was never in a position to occupy.
+fn vertex_light(padded: &PaddedChunk, tables: &Tables, cells: [usize; 4]) -> ([f32; 3], f32) {
+    let mut sum = [0u32; 4];
+    let mut count = 0u32;
+    for cell in cells {
+        if tables.opaque[padded.blocks[cell] as usize] {
+            continue;
+        }
+        let l = padded.light[cell];
+        for (total, channel) in sum.iter_mut().zip(l.block) {
+            *total += channel as u32;
+        }
+        sum[3] += l.sky as u32;
+        count += 1;
+    }
+    if count == 0 {
+        return ([0.0; 3], 0.0);
+    }
+    let inv = 1.0 / (count as f32 * MAX_LIGHT as f32);
+    ([sum[0] as f32 * inv, sum[1] as f32 * inv, sum[2] as f32 * inv], sum[3] as f32 * inv)
+}
+
+pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
+    debug_assert_eq!(padded.blocks.len(), PAD_XZ * PAD_XZ * PAD_Y);
+    debug_assert_eq!(padded.fluid.len(), padded.blocks.len());
+    debug_assert_eq!(padded.axis.len(), padded.blocks.len());
+    debug_assert_eq!(padded.light.len(), padded.blocks.len());
     let mut solid = MeshBucket::default();
     let mut water = MeshBucket::default();
 
@@ -219,7 +285,7 @@ pub fn mesh_chunk(
         for x in 0..CHUNK_SIZE {
             let mut idx = padded_index(x, 0, z);
             for y in 0..WORLD_HEIGHT {
-                let id = padded[idx];
+                let id = padded.blocks[idx];
                 idx += 1; // SY == 1: next Y
                 if id == 0 {
                     continue;
@@ -234,20 +300,24 @@ pub fn mesh_chunk(
                 let is_translucent = tables.translucent[id as usize];
                 let bucket = if is_translucent { &mut water } else { &mut solid };
                 let is_fluid = tables.fluid[id as usize];
-                let axis = if tables.rotates[id as usize] { padded_axis[cell] } else { AXIS_Y };
-                let level = padded_fluid[cell];
+                let axis = if tables.rotates[id as usize] { padded.axis[cell] } else { AXIS_Y };
+                let level = padded.fluid[cell];
                 let flow_dist = tables.flow_distance[id as usize];
                 // Covered by more of the same fluid above -> render full
                 // height (it's not this stack's exposed surface).
                 let cap = if is_fluid {
-                    if padded[cell + SY as usize] == id { 1.0 } else { fluid_height(level, flow_dist) }
+                    if padded.blocks[cell + SY as usize] == id {
+                        1.0
+                    } else {
+                        fluid_height(level, flow_dist)
+                    }
                 } else {
                     1.0
                 };
 
                 for (f, face) in FACES.iter().enumerate() {
                     let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
-                    let nid = padded[n_cell];
+                    let nid = padded.blocks[n_cell];
                     let is_side = matches!(f, 0 | 1 | 4 | 5);
                     let mut bottom = 0.0f32;
                     let mut stepped = false;
@@ -262,8 +332,8 @@ pub fn mesh_chunk(
                                 // up to ours instead of culling the face
                                 // outright (a flat cull would leave a visible
                                 // gap between two different-height cells).
-                                let n_level = padded_fluid[n_cell];
-                                let n_cap = if padded[n_cell + SY as usize] == id {
+                                let n_level = padded.fluid[n_cell];
+                                let n_cap = if padded.blocks[n_cell + SY as usize] == id {
                                     1.0
                                 } else {
                                     fluid_height(n_level, flow_dist)
@@ -301,7 +371,7 @@ pub fn mesh_chunk(
                         && level == FLUID_FALLING
                         && !stepped
                         && FALLING_WATER_STYLE == FallingWaterStyle::Sloped
-                        && padded[cell - SY as usize] != id
+                        && padded.blocks[cell - SY as usize] != id
                     {
                         bottom = 1.0 / BASE_TILE_SIZE as f32;
                     }
@@ -328,7 +398,8 @@ pub fn mesh_chunk(
                         let mut bright = 1.0;
                         if !is_translucent {
                             let occ = |o: i32| {
-                                tables.opaque[padded[(cell as i32 + o) as usize] as usize] as u32
+                                tables.opaque[padded.blocks[(cell as i32 + o) as usize] as usize]
+                                    as u32
                             };
                             let (s1, s2) = (occ(c.ao[0]), occ(c.ao[1]));
                             let level = if s1 == 1 && s2 == 1 { 3 } else { s1 + s2 + occ(c.ao[2]) };
@@ -345,8 +416,23 @@ pub fn mesh_chunk(
                             tu + tables.uv_pad + c.uv[0] * tables.uv_span,
                             tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span,
                         ]);
-                        let light = face.shade * bright;
-                        bucket.colors.push([light, light, light, 1.0]);
+
+                        // The four cells touching this vertex outside the
+                        // face - the same neighbourhood the AO above just
+                        // sampled, reused for smooth lighting.
+                        let at = |o: i32| (cell as i32 + o) as usize;
+                        let (block_rgb, sky) = vertex_light(
+                            padded,
+                            tables,
+                            [n_cell, at(c.ao[0]), at(c.ao[1]), at(c.ao[2])],
+                        );
+                        let shade = face.shade * bright;
+                        bucket.colors.push([
+                            block_rgb[0].max(AMBIENT_LIGHT) * shade,
+                            block_rgb[1].max(AMBIENT_LIGHT) * shade,
+                            block_rgb[2].max(AMBIENT_LIGHT) * shade,
+                            sky * shade,
+                        ]);
                     }
 
                     if ao[0] + ao[3] > ao[1] + ao[2] {
@@ -375,24 +461,20 @@ mod tests {
         (reg, tables)
     }
 
-    fn empty_padded() -> Vec<u16> {
-        vec![0u16; PAD_XZ * PAD_XZ * PAD_Y]
-    }
-
-    fn empty_fluid() -> Vec<u8> {
-        vec![0u8; PAD_XZ * PAD_XZ * PAD_Y]
-    }
-
-    fn empty_axis() -> Vec<u8> {
-        vec![AXIS_Y; PAD_XZ * PAD_XZ * PAD_Y]
+    /// Uniform full sky light everywhere, so tests that aren't about
+    /// lighting see the same brightness the pre-lighting mesher produced.
+    fn lit_padded() -> PaddedChunk {
+        let mut padded = PaddedChunk::empty();
+        padded.light.fill(LightCell::OPEN_SKY);
+        padded
     }
 
     #[test]
     fn lone_block_emits_six_faces() {
         let (reg, tables) = tables();
-        let mut padded = empty_padded();
-        padded[padded_index(8, 30, 8)] = reg.id("stone");
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = reg.id("stone");
+        let mesh = mesh_chunk(&padded, &tables);
         assert_eq!(mesh.solid.positions.len(), 6 * 4);
         assert_eq!(mesh.solid.indices.len(), 6 * 6);
         assert!(mesh.water.is_empty());
@@ -402,24 +484,25 @@ mod tests {
     fn buried_block_emits_nothing() {
         let (reg, tables) = tables();
         let stone = reg.id("stone");
-        let mut padded = vec![stone; PAD_XZ * PAD_XZ * PAD_Y];
+        let mut padded = lit_padded();
+        padded.blocks.fill(stone);
         // one exposed face at the top only for the interior column we check:
         // actually fully solid volume -> zero faces inside; boundary faces
         // depend on the shell, which is also stone here.
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
+        let mesh = mesh_chunk(&padded, &tables);
         assert!(mesh.solid.is_empty());
         // poke a hole: the neighbouring block gains exactly one face
-        padded[padded_index(8, 30, 8)] = 0;
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
+        padded.blocks[padded_index(8, 30, 8)] = 0;
+        let mesh = mesh_chunk(&padded, &tables);
         assert_eq!(mesh.solid.positions.len(), 6 * 4); // 6 cavity walls
     }
 
     #[test]
     fn water_goes_to_translucent_bucket_with_lowered_top() {
         let (reg, tables) = tables();
-        let mut padded = empty_padded();
-        padded[padded_index(4, 10, 4)] = reg.id("water");
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(4, 10, 4)] = reg.id("water");
+        let mesh = mesh_chunk(&padded, &tables);
         assert!(mesh.solid.is_empty());
         assert_eq!(mesh.water.positions.len(), 6 * 4);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
@@ -430,11 +513,10 @@ mod tests {
     fn flowing_water_is_shallower_than_a_source() {
         let (reg, tables) = tables();
         let water = reg.id("water");
-        let mut padded = empty_padded();
-        let mut fluid = empty_fluid();
-        padded[padded_index(4, 10, 4)] = water;
-        fluid[padded_index(4, 10, 4)] = 3; // 3 blocks from a source
-        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(4, 10, 4)] = water;
+        padded.fluid[padded_index(4, 10, 4)] = 3; // 3 blocks from a source
+        let mesh = mesh_chunk(&padded, &tables);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
         assert!(max_y < 10.0 + FLUID_SURFACE);
         assert!(max_y > 10.0);
@@ -444,20 +526,19 @@ mod tests {
     fn adjacent_water_at_different_levels_gets_a_step_wall() {
         let (reg, tables) = tables();
         let water = reg.id("water");
-        let mut padded = empty_padded();
-        let mut fluid = empty_fluid();
-        padded[padded_index(4, 10, 4)] = water;
-        padded[padded_index(5, 10, 4)] = water;
-        fluid[padded_index(4, 10, 4)] = 1;
-        fluid[padded_index(5, 10, 4)] = 4; // shallower neighbour
-        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(4, 10, 4)] = water;
+        padded.blocks[padded_index(5, 10, 4)] = water;
+        padded.fluid[padded_index(4, 10, 4)] = 1;
+        padded.fluid[padded_index(5, 10, 4)] = 4; // shallower neighbour
+        let mesh = mesh_chunk(&padded, &tables);
         // the boundary between them must render a wall face instead of being
         // fully culled (same-id neighbours at equal height cull completely).
         assert!(!mesh.water.is_empty());
 
         // sanity: identical levels on both sides fully cull that face.
-        fluid[padded_index(5, 10, 4)] = 1;
-        let level_mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+        padded.fluid[padded_index(5, 10, 4)] = 1;
+        let level_mesh = mesh_chunk(&padded, &tables);
         assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
     }
 
@@ -466,10 +547,10 @@ mod tests {
         let (reg, tables) = tables();
         let water = reg.id("water");
         let glass = reg.id("glass");
-        let mut padded = empty_padded();
-        padded[padded_index(4, 10, 4)] = water;
-        padded[padded_index(5, 10, 4)] = glass;
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(4, 10, 4)] = water;
+        padded.blocks[padded_index(5, 10, 4)] = glass;
+        let mesh = mesh_chunk(&padded, &tables);
 
         // Neither block culls the other's face at their shared boundary
         // (glass has real cutout holes you're meant to see the water
@@ -499,15 +580,14 @@ mod tests {
     fn falling_water_tapers_its_side_walls_to_a_sliver() {
         let (reg, tables) = tables();
         let water = reg.id("water");
-        let mut padded = empty_padded();
-        let mut fluid = empty_fluid();
+        let mut padded = lit_padded();
         // A falling segment fed from a source directly above it, open air on
         // every side and below - the classic mid-air waterfall shaft.
-        padded[padded_index(4, 11, 4)] = water;
-        fluid[padded_index(4, 11, 4)] = FLUID_SOURCE;
-        padded[padded_index(4, 10, 4)] = water;
-        fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
-        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+        padded.blocks[padded_index(4, 11, 4)] = water;
+        padded.fluid[padded_index(4, 11, 4)] = FLUID_SOURCE;
+        padded.blocks[padded_index(4, 10, 4)] = water;
+        padded.fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
+        let mesh = mesh_chunk(&padded, &tables);
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
         let sliver = 10.0 + 1.0 / BASE_TILE_SIZE as f32;
@@ -523,19 +603,18 @@ mod tests {
     fn a_multi_block_fall_only_tapers_its_last_segment() {
         let (reg, tables) = tables();
         let water = reg.id("water");
-        let mut padded = empty_padded();
-        let mut fluid = empty_fluid();
+        let mut padded = lit_padded();
         // Source -> two falling segments -> open air: the classic multi-
         // block waterfall shaft. Only the last segment (y=10, nothing but
         // air below it) should taper; the internal boundary between the two
         // falling segments (y=11/y=10) must connect with no gap at all.
-        padded[padded_index(4, 12, 4)] = water;
-        fluid[padded_index(4, 12, 4)] = FLUID_SOURCE;
-        padded[padded_index(4, 11, 4)] = water;
-        fluid[padded_index(4, 11, 4)] = FLUID_FALLING;
-        padded[padded_index(4, 10, 4)] = water;
-        fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
-        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+        padded.blocks[padded_index(4, 12, 4)] = water;
+        padded.fluid[padded_index(4, 12, 4)] = FLUID_SOURCE;
+        padded.blocks[padded_index(4, 11, 4)] = water;
+        padded.fluid[padded_index(4, 11, 4)] = FLUID_FALLING;
+        padded.blocks[padded_index(4, 10, 4)] = water;
+        padded.fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
+        let mesh = mesh_chunk(&padded, &tables);
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
         let sliver = 10.0 + 1.0 / BASE_TILE_SIZE as f32;
@@ -555,22 +634,105 @@ mod tests {
     fn ao_darkens_corner_vertices() {
         let (reg, tables) = tables();
         let stone = reg.id("stone");
-        let mut padded = empty_padded();
-        padded[padded_index(8, 30, 8)] = stone;
-        padded[padded_index(9, 31, 8)] = stone; // occluder above the +x neighbour
-        let mesh = mesh_chunk(&padded, &empty_fluid(), &empty_axis(), &tables);
-        // some top-face vertex of the base block must now be darker than shade 1.0
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = stone;
+        padded.blocks[padded_index(9, 31, 8)] = stone; // occluder above the +x neighbour
+        let mesh = mesh_chunk(&padded, &tables);
+        // Some top-face vertex of the base block must now be darker than a
+        // fully unoccluded one. AO rides on the sky channel here (the scene
+        // has full sky light and no block light), same as it rides on every
+        // other channel.
         let top_lights: Vec<f32> = mesh
             .solid
             .positions
             .iter()
             .zip(&mesh.solid.colors)
             .filter(|(p, _)| p[1] == 31.0)
-            .map(|(_, c)| c[0])
+            .map(|(_, c)| c[3])
             .collect();
         assert!(!top_lights.is_empty());
         assert!(top_lights.iter().any(|&l| l < 1.0));
         assert!(top_lights.iter().any(|&l| l == 1.0));
+    }
+
+    #[test]
+    fn sky_light_lands_in_the_vertex_alpha_channel_and_block_light_in_rgb() {
+        let (reg, tables) = tables();
+        let stone = reg.id("stone");
+
+        // Fully sky-lit, no block light: alpha carries it, rgb sits at the
+        // ambient floor.
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = stone;
+        let mesh = mesh_chunk(&padded, &tables);
+        let top = horizontal_face_color(&mesh, 31.0);
+        assert_eq!(top[3], 1.0, "full sky light should reach the alpha channel");
+        assert!(
+            (top[0] - AMBIENT_LIGHT).abs() < 1e-6,
+            "no block light means rgb should be exactly the ambient floor, got {top:?}"
+        );
+
+        // The mirror image: full block light, no sky at all.
+        let mut padded = PaddedChunk::empty();
+        padded.light.fill(LightCell { block: [MAX_LIGHT; 3], sky: 0 });
+        padded.blocks[padded_index(8, 30, 8)] = stone;
+        let mesh = mesh_chunk(&padded, &tables);
+        let top = horizontal_face_color(&mesh, 31.0);
+        assert_eq!(top[3], 0.0, "no sky light");
+        assert_eq!(top[0], 1.0, "full block light");
+    }
+
+    #[test]
+    fn colored_block_light_is_baked_per_channel() {
+        let (reg, tables) = tables();
+        let stone = reg.id("stone");
+        let mut padded = PaddedChunk::empty();
+        // A deep-red light: full red, half green, no blue.
+        padded.light.fill(LightCell { block: [MAX_LIGHT, MAX_LIGHT / 2, 0], sky: 0 });
+        padded.blocks[padded_index(8, 30, 8)] = stone;
+        let mesh = mesh_chunk(&padded, &tables);
+
+        let top = horizontal_face_color(&mesh, 31.0);
+        assert_eq!(top[0], 1.0);
+        assert!((top[1] - 0.5).abs() < 1e-6, "half-strength green, got {top:?}");
+        assert!(
+            (top[2] - AMBIENT_LIGHT).abs() < 1e-6,
+            "an unlit channel falls back to ambient, not to zero, got {top:?}"
+        );
+    }
+
+    #[test]
+    fn a_dark_cell_still_gets_the_ambient_floor_rather_than_pure_black() {
+        let (reg, tables) = tables();
+        let stone = reg.id("stone");
+        let mut padded = PaddedChunk::empty(); // no light at all anywhere
+        padded.blocks[padded_index(8, 30, 8)] = stone;
+        let mesh = mesh_chunk(&padded, &tables);
+
+        for c in &mesh.solid.colors {
+            assert!(c[0] > 0.0, "nothing should bake to pure black: {c:?}");
+            // Still shaded per face, so the floor isn't a flat wash.
+            assert!(c[0] <= AMBIENT_LIGHT + 1e-6);
+            assert_eq!(c[3], 0.0);
+        }
+        let top = horizontal_face_color(&mesh, 31.0);
+        let bottom = horizontal_face_color(&mesh, 30.0);
+        assert!(top[0] > bottom[0], "face shading must survive the ambient floor");
+    }
+
+    /// The color of the first vertex of the horizontal quad sitting at height
+    /// `y`. Matching whole quads rather than individual vertices matters: a
+    /// side face has two of its four corners at the block's top height too,
+    /// so a per-vertex search finds a *side* face (shade 0.6) when it meant
+    /// to find the top one (shade 1.0).
+    fn horizontal_face_color(mesh: &ChunkMeshData, y: f32) -> [f32; 4] {
+        mesh.solid
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.solid.colors.chunks_exact(4))
+            .find(|(quad, _)| quad.iter().all(|p| p[1] == y))
+            .map(|(_, colors)| colors[0])
+            .expect("no horizontal face at that height")
     }
 
     #[test]
@@ -608,8 +770,7 @@ mod tests {
         let (reg, tables) = tables();
         let gen = crate::terrain::TerrainGenerator::new(1337, &reg);
         // build padded from 3x3 generated chunks
-        let mut padded = empty_padded();
-        let mut fluid = empty_fluid();
+        let mut padded = PaddedChunk::empty();
         for ncz in -1..=1i32 {
             for ncx in -1..=1i32 {
                 let chunk = gen.generate(ncx, ncz);
@@ -621,16 +782,17 @@ mod tests {
                             continue;
                         }
                         for y in 0..H {
-                            padded[padded_index(px, y as i32, pz)] =
-                                chunk.blocks[block_index(lx, y, lz)];
-                            fluid[padded_index(px, y as i32, pz)] =
-                                chunk.fluid[block_index(lx, y, lz)];
+                            let dst = padded_index(px, y as i32, pz);
+                            let src = block_index(lx, y, lz);
+                            padded.blocks[dst] = chunk.blocks[src];
+                            padded.fluid[dst] = chunk.fluid[src];
+                            padded.light[dst] = chunk.light[src];
                         }
                     }
                 }
             }
         }
-        let mesh = mesh_chunk(&padded, &fluid, &empty_axis(), &tables);
+        let mesh = mesh_chunk(&padded, &tables);
         assert!(mesh.solid.positions.len() > 1000);
         assert_eq!(mesh.solid.positions.len() % 4, 0);
         assert_eq!(mesh.solid.indices.len() / 6, mesh.solid.positions.len() / 4);

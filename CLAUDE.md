@@ -3,8 +3,9 @@
 This is a **Rust + Bevy native game** (see `Cargo.toml`, `src/*.rs`). It is a
 complete, working, well-optimized voxel engine framework with procedurally
 generated 16x16 textures, chunked async terrain generation/meshing, physics,
-a day/night cycle, a main menu with per-user saves, a Windows installer, and
-a self-updater. Full details: `README.md`.
+colored voxel lighting, a day/night cycle, a main menu with per-user saves,
+a Windows installer, and a separate launcher that manages game versions.
+Full details: `README.md`.
 
 ## Do not rewrite this project
 
@@ -49,16 +50,31 @@ silently reset" below — the same staleness risk applies here).
 
 ## Quick orientation
 
-- `cargo run --release` to play; `cargo test` to run the test suite.
+**This is a two-crate Cargo workspace.** The game is the root package; the
+launcher is `launcher/`. `cargo test` at the root still runs only the game
+(that's Cargo's behavior for a workspace with a root package) - use `cargo
+test --workspace` to include the launcher's tests, and remember to, because
+it's easy to "run the tests" and never touch the launcher at all.
+
+- `cargo run --release` to play; `cargo test --workspace` for everything.
 - `src/` is organized as Bevy plugins — one file per plugin/subsystem
   (`world.rs`, `player.rs`, `terrain.rs`, `mesher.rs`, `atlas.rs`, etc.).
   `main.rs` just assembles them.
+- `launcher/` is deliberately Bevy-free (egui/eframe): it downloads game
+  versions into `versions/<version>/`, manages instances, and starts them.
+  Nothing in it may depend on the `craftmjne` crate - it has to build and
+  start fast, and pulling in the engine would defeat both.
+- **The game no longer updates itself.** `src/updater.rs` is gone; don't
+  reintroduce anything that rewrites the running executable. Version
+  management belongs to the launcher.
 - Building the Windows installer: see README's "Building the Windows
-  installer yourself" section (`rustup target add x86_64-pc-windows-gnu`,
-  cross-compile, then `makensis` against `installer/craftmjne.nsi`).
-- Releases are cut by tagging `vX.Y.Z` (matching `Cargo.toml`'s `version`)
-  and pushing the tag; `.github/workflows/release.yml` builds and publishes
-  binaries + the installer automatically.
+  installer yourself" section. Note it now packages the *launcher*, not the
+  game (`-p craftmjne-launcher`).
+- Game releases are cut by tagging `vX.Y.Z` (matching `Cargo.toml`'s
+  `version`) and pushing the tag; `.github/workflows/release.yml` publishes
+  the archives + installer. **Launcher releases are separate**: bump
+  `version` in `launcher/Cargo.toml` and push to the `launcher` branch,
+  which fires `.github/workflows/launcher-release.yml`.
 
 ## Bevy 0.16 API notes (verified by actually compiling, not guessed)
 
@@ -895,3 +911,145 @@ etc.) instead of inventing a new approach:
   that opened the box doesn't also get typed" logic (`chat.just_opened`)
   needed no changes at all, since it already clears *all* pending events
   for that frame regardless of which key triggered the open.
+- **A relaxation that reports "changed" when its write silently didn't land
+  is an unbounded work generator, and it looks exactly like a convergence
+  bug.** `light.rs`'s propagation seeds cells one block *outside* a chunk
+  (the far side of each seam), and those can belong to a chunk that isn't
+  loaded yet. `ChunkMap::set_light` originally returned `()` and no-opped
+  for a missing chunk, so `recompute_light_cell` computed a new value, saw
+  `next != current`, and enqueued all 6 neighbours - every single visit,
+  forever, spreading outward through terrain that doesn't exist. The queue
+  grew by a steady ~24k cells/frame and never drained. Fix: `set_light`
+  returns `bool` like `set_fluid_cell` already did, and the "it changed"
+  path is gated on the write actually landing. **The general rule: any
+  setter a propagating simulation drives has to report whether it wrote,
+  because "did this change?" is what decides whether to schedule more
+  work** - a silent no-op turns that question into a permanent yes.
+- **"Every settled cell enqueues neighbours it could improve" (a push rule)
+  does not terminate, even though each individual value is correct.**
+  Written as the mirror of the pull rule it looks obviously right, and the
+  *values* it produces are right - but it fires on every visit of every lit
+  cell, and since a cell gets visited once per neighbour that changed, the
+  queue regenerates work faster than the budget drains it. Measured: 20M+
+  pops on a 2197-cell room that should settle in a few thousand, with every
+  sampled pop reporting no change. What light removal actually needs is far
+  narrower: when `relax` empties a channel rather than downgrading it, that
+  cell re-queues *itself* (one entry, only on an actual drop, and each drop
+  lands it on a strictly lower value so there can only be `MAX_LIGHT` of
+  them). Same effect as the two-pass "clear the region then refill from
+  whatever still has a real supply" BFS voxel engines hand-write, without a
+  second queue. The narrow-vs-general lesson generalizes: in a budgeted
+  queue, a rule that can fire on *unchanged* cells is a red flag, because
+  the queue's only termination argument is "work is proportional to
+  changes."
+- **CLAUDE.md's own "measure before assuming an infinite loop" rule paid off
+  twice here, in opposite directions.** The first light failure looked like
+  slowness (raise the guard?) and was a true non-termination; the fix for
+  it looked like a correctness bug and was also non-termination, from a
+  completely different cause. Both were found the same cheap way - print
+  the pop count, then dump which positions repeat and what they transition
+  to - and neither would have been found by reading the code, because in
+  both cases every individual value being computed was correct. When a
+  propagating sim misbehaves, instrument *what repeats*, not *what's
+  wrong*.
+- **A "does light stop at a wall" test needs a corridor, not a room.** The
+  first version put a single stone block next to a torch in an open carved
+  box and asserted the far side was dark; it was lit, because light
+  correctly travels *around* one block. The production code was right and
+  the test was wrong - the same intuition-first trap as the moon-terminator
+  test. Bore a one-cell-wide tunnel so a single block genuinely seals it.
+- **Separating "how much sky reaches this cell" from "what the sky
+  currently looks like" is what makes a day/night cycle free.** The stored
+  sky-light level describes the world's *shape* and only changes when
+  blocks do; `render::ChunkMaterialParams::sky_light` (now an RGB value,
+  not the old brightness scalar) describes the sky *right now* and is
+  rewritten every frame by `sky::update_sky`. Dawn, dusk, and a red/blue/
+  green moon tinting every outdoor surface therefore cost one uniform
+  write - no relighting, no remeshing. If they'd been baked together into
+  one "final brightness" per cell, every sunrise would have had to relight
+  and remesh the visible world. Worth applying to any future
+  per-cell-value-times-global-state pair (weather, seasons affecting
+  ground color, etc.): store the part that changes with the world, uniform
+  the part that changes with time.
+- **The mesher's vertex alpha channel was free real estate, and that's a
+  fact worth checking before adding a vertex attribute.** Chunk fragments
+  get their alpha from the texture and `base_alpha`, so `in.color.a` was
+  being written (`1.0`) and never read. Sky light now rides there while
+  block light rides in RGB, which is what lets the shader combine them per
+  frame - no new attribute, no bigger vertex buffer, no mesh format change.
+  Grep for what actually *reads* an existing channel before growing the
+  vertex layout.
+- **Four parallel arrays that must always be indexed together are a struct,
+  not four positional parameters.** `mesh_chunk(padded, padded_fluid,
+  padded_axis, tables)` was already at the edge; adding light would have
+  made it five positional slices with nothing stopping a caller swapping
+  two of the same type. `mesher::PaddedChunk` (blocks/fluid/axis/light, plus
+  an `empty()` constructor the tests build on) made `build_padded`'s return
+  type and the mesher's signature both simpler than before the feature.
+- **The fix for "our updates keep breaking" was to stop having the running
+  program update itself, not to make the self-replace more careful.** Two
+  previous rounds went into hardening the in-game updater - deferring the
+  swap to quit time, adding a visible dwell, reading the vendored
+  `self_replace` source to confirm the rename dance was correct - and it
+  was all correct, and it still didn't work reliably, because a process
+  silently rewriting its own binary is something the OS and its security
+  software get a vote on. The launcher wins by removing the premise: the
+  process doing the downloading (the launcher) is never the process being
+  replaced (a game build under `versions/`), so a version install is just
+  writing a new folder. When a mechanism keeps failing after the third
+  careful fix, check whether the mechanism itself is the thing to delete.
+- **Deciding a launcher's instances share one saves folder is a decision
+  about *save compatibility*, not about folders.** Isolated per-instance
+  saves would have needed no format work at all; sharing them makes both
+  directions of version skew reachable in ordinary use, which is what
+  forced `save::SAVE_FORMAT`, `SaveCompatibility`, `migrate` and
+  `SaveStore::open_world`. The dangerous direction is the *backwards* one -
+  an older build opening a newer world would load it (every field is
+  `#[serde(default)]`, so it deserializes fine) and then write it back out
+  minus everything the newer build added. That's silent data loss that
+  looks like a successful load, so it's refused rather than warned about,
+  and the worlds list greys the world out instead of hiding it (a hidden
+  world reads as "my save is gone").
+- **Build the migration mechanism at the moment the *first* migration
+  becomes possible, not when it becomes necessary.** There are currently
+  zero data-shape migrations - format 0 -> 1 rewrites nothing, because
+  serde defaults already covered every field added so far. Writing the
+  table-plus-loop anyway costs a few lines now; improvising it later, at
+  the point where a real format change has already shipped and someone's
+  world is the test case, costs a lot more. Same instinct as
+  `MoonEventDef`'s declarative table: the generic algorithm goes in while
+  it's cheap and obvious.
+- **`cargo test` in a workspace with a root package does NOT test the
+  workspace.** Converting the repo to a workspace silently changed what
+  "run the tests" means - the launcher's 40 tests don't run under a bare
+  `cargo test`. Nothing warns about this. Use `--workspace` (and check that
+  CI/docs say so) whenever adding a crate.
+- **A launcher's "is it installed?" check should read the filesystem, not
+  an index file.** `Library::is_installed` is just "does
+  `versions/<version>/craftmjne[.exe]` exist" - so deleting a folder by
+  hand really does uninstall that version, and there's no catalogue that
+  can disagree with reality. The matching hazard is a *partial* extraction
+  leaving the executable in place: that would read as installed and then
+  crash on the missing `blocks/`. Fixed by extracting to a scratch
+  directory and renaming into place only on success, so the check can
+  never observe a half-written version (`remote::install`, tested by
+  pointing an install at an unreachable URL and asserting no directory is
+  left behind).
+- **Test temp directories must be unique per call, not per fixture.** Two
+  launcher tests both built `craftmjne-launch-test-<pid>-1.0.0`, ran in
+  parallel, and one's `TempRoot` drop deleted the other's fixture mid-test
+  - which surfaced as an unrelated-looking "isn't downloaded yet" failure
+  that only appeared sometimes. Every temp-dir helper in this repo uses an
+  `AtomicU64` counter for exactly this reason; copy that, don't key the
+  name on the fixture's contents.
+- **The launcher exposed a real packaging bug that had been latent for
+  months: the Windows release zip contained only `craftmjne.exe`.** That was
+  fine while the only consumer was the old in-game updater, which extracted
+  just the named binary out of it - but the archive is now what a fresh
+  install *is*, and the game refuses to start without `blocks/` beside its
+  executable. `release.yml` now stages executable + `blocks/` + `textures/`
+  into one folder and archives that folder's *contents* (note the `\*` in
+  the `Compress-Archive` path - archiving the folder itself would nest
+  everything one level down and break it just as thoroughly). General
+  lesson: when something starts consuming an artifact differently than the
+  thing it was built for, re-check what's actually in the artifact.

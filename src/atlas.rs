@@ -498,6 +498,30 @@ pub fn default_painters() -> Painters {
         }
     });
 
+    // A wall-torch look on every face: a dark backing, a wooden stick up the
+    // middle, and a bright flame at the top. The block is a plain solid cube
+    // for now (see `blocks/torch.json`) - it's the lighting that makes it a
+    // torch, so the texture is what has to carry the shape.
+    p.register("torch", |t, rng| {
+        t.noisy_fill(rng, [38.0, 32.0, 28.0], 12.0);
+        for y in 0..10 {
+            for x in 7..9 {
+                let j = (rng() - 0.5) * 16.0;
+                t.px(x, y, [126.0 + j, 92.0 + j, 54.0 + j]);
+            }
+        }
+        // Flame: a hot near-white core fading out to orange at the edges.
+        for (y, half) in [(10, 2), (11, 2), (12, 2), (13, 1), (14, 1)] {
+            for x in (8 - half)..(8 + half) {
+                let core = x == 7 || x == 8;
+                let j = (rng() - 0.5) * 22.0;
+                let c: [f32; 3] =
+                    if core && y < 13 { [255.0, 244.0, 190.0] } else { [252.0, 168.0, 54.0] };
+                t.px(x, y, [c[0] + j, c[1] + j, c[2] + j]);
+            }
+        }
+    });
+
     p.register("bedrock", |t, rng| t.noisy_fill(rng, [70.0, 70.0, 70.0], 60.0));
 
     p.register("snow", |t, rng| t.noisy_fill(rng, [241.0, 246.0, 250.0], 10.0));
@@ -548,7 +572,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 18);
+        assert_eq!(a.indices.len(), 19);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

@@ -942,9 +942,12 @@ fn update_sky(
         moon_tf.scale = Vec3::splat(size);
         moon_tf.rotation = facing;
     }
+    // Tonight's special moon, if any - it colors both the moon disc itself
+    // and (via `sky_light_color`) the light the whole world receives.
+    let schedule = cached_year_schedule(&mut moon_schedule_cache, settings.seed, clock.year());
+    let event = clock.moon_event_in(&schedule);
     if let Some(mat) = celestial_assets.get_mut(moon_phase_material) {
-        let schedule = cached_year_schedule(&mut moon_schedule_cache, settings.seed, clock.year());
-        let color = moon_event_tint(clock.moon_event_in(&schedule));
+        let color = moon_event_tint(event);
         let alpha = if !is_day { fade } else { 0.0 };
         mat.params.tint = LinearRgba::new(color.red, color.green, color.blue, alpha);
     }
@@ -953,13 +956,31 @@ fn update_sky(
     let sky_color = NIGHT_SKY.mix(&SKY_COLOR, daylight);
     clear_color.0 = sky_color;
     let fog_color = LinearRgba::from(sky_color);
-    let sky_light = NIGHT_LIGHT + (DAY_LIGHT - NIGHT_LIGHT) * daylight;
     for handle in [&chunk_materials.solid, &chunk_materials.water] {
         if let Some(mat) = chunk_assets.get_mut(handle) {
             mat.params.fog_color = fog_color;
-            mat.params.sky_light = sky_light;
+            mat.params.sky_light = sky_light_color(daylight, event);
         }
     }
+}
+
+/// The color and brightness the open sky is currently casting on the world -
+/// what every cell's stored sky-light level gets multiplied by (see
+/// `light.rs`, and `render::ChunkMaterialParams::sky_light`).
+///
+/// Brightness runs from [`NIGHT_LIGHT`] to [`DAY_LIGHT`] with the sun's
+/// height, exactly as the old scalar multiplier did. The color is white
+/// through the day and fades to whatever a special moon is tinting the night
+/// - so a red moon doesn't just *look* red overhead, it actually lights
+/// everything outdoors red, while a torch-lit interior stays its own warm
+/// color. Interpolating on `daylight` rather than switching at the day/night
+/// boundary means the tint arrives and leaves across dusk and dawn instead of
+/// snapping on.
+fn sky_light_color(daylight: f32, event: Option<MoonEvent>) -> LinearRgba {
+    let brightness = NIGHT_LIGHT + (DAY_LIGHT - NIGHT_LIGHT) * daylight;
+    let tint = moon_event_tint(event);
+    let mix = |night: f32| (night + (1.0 - night) * daylight) * brightness;
+    LinearRgba::new(mix(tint.red), mix(tint.green), mix(tint.blue), 1.0)
 }
 
 pub struct SkyPlugin;
@@ -1189,6 +1210,31 @@ mod tests {
     #[test]
     fn moon_event_tint_is_a_plain_white_no_op_for_an_ordinary_moon() {
         assert_eq!(moon_event_tint(None), LinearRgba::WHITE);
+    }
+
+    #[test]
+    fn the_worlds_sky_light_is_full_white_at_noon_and_dim_at_midnight() {
+        let noon = sky_light_color(1.0, None);
+        assert_eq!((noon.red, noon.green, noon.blue), (DAY_LIGHT, DAY_LIGHT, DAY_LIGHT));
+
+        let midnight = sky_light_color(0.0, None);
+        assert_eq!((midnight.red, midnight.green, midnight.blue), (NIGHT_LIGHT, NIGHT_LIGHT, NIGHT_LIGHT));
+        assert!(midnight.red < noon.red, "night must actually be darker than day");
+    }
+
+    #[test]
+    fn a_special_moon_colors_the_light_the_whole_world_receives_at_night_only() {
+        let night = sky_light_color(0.0, Some(MoonEvent::Red));
+        assert!(
+            night.red > night.blue,
+            "a red moon should cast red light over the world, got {night:?}"
+        );
+        assert!(night.red <= NIGHT_LIGHT, "and still be night-dim, got {night:?}");
+
+        // By full daylight the sun has completely washed the tint out - the
+        // moon isn't up, so it has no business coloring anything.
+        let noon = sky_light_color(1.0, Some(MoonEvent::Red));
+        assert_eq!((noon.red, noon.green, noon.blue), (DAY_LIGHT, DAY_LIGHT, DAY_LIGHT));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Local world-save storage: one folder per world under the OS's per-user
-//! app-data directory — the same directory the installer and auto-updater
-//! use (`%LOCALAPPDATA%\Craftmjne` on Windows), so saves are naturally
-//! scoped to the OS user account, matching how most desktop games do it.
+//! app-data directory (`%LOCALAPPDATA%\Craftmjne` on Windows), so saves are
+//! naturally scoped to the OS user account, matching how most desktop games
+//! do it. Every installed game version shares this one directory - the
+//! launcher deliberately does not give each instance its own worlds - which
+//! is what [`SAVE_FORMAT`] and [`SaveStore::open_world`] exist to make safe.
 //!
 //! Layout: `<app_data_dir>/saves/<slug>/{meta.json, data.json}`
 //!   - `meta.json` — name, seed, game mode, timestamps. Cheap to read for
@@ -23,6 +25,85 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The save format this build reads and writes.
+///
+/// Bump this whenever a change to [`WorldData`] or [`WorldMeta`] can't be
+/// expressed as a plain `#[serde(default)]` - i.e. whenever loading an older
+/// world needs actual work rather than just a missing field defaulting - and
+/// add the matching step to [`migrate`].
+///
+/// This exists because worlds are **shared by every installed version** (the
+/// launcher deliberately does not give each instance its own saves), so both
+/// directions are reachable in normal use: opening an old world in a new
+/// build, and opening a new world in an old one. The first is a migration;
+/// the second has to be refused, because "load it anyway" means writing it
+/// back out in the older format and quietly discarding whatever the newer
+/// build had stored.
+pub const SAVE_FORMAT: u32 = 1;
+
+/// How a world's stored format relates to what this build can handle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SaveCompatibility {
+    /// Written by this exact format - load it as-is.
+    Current,
+    /// Older; [`migrate`] brings it forward on load.
+    Upgradable { from: u32 },
+    /// Written by a newer build than this one. Opening it would lose data.
+    TooNew { written_by: u32 },
+}
+
+pub fn compatibility(format: u32) -> SaveCompatibility {
+    match format.cmp(&SAVE_FORMAT) {
+        std::cmp::Ordering::Equal => SaveCompatibility::Current,
+        std::cmp::Ordering::Less => SaveCompatibility::Upgradable { from: format },
+        std::cmp::Ordering::Greater => SaveCompatibility::TooNew { written_by: format },
+    }
+}
+
+/// Why a world couldn't be opened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpenError {
+    /// No such world, or its `meta.json` is unreadable.
+    Missing,
+    /// Saved by a newer build - see [`SaveCompatibility::TooNew`].
+    TooNew { written_by: u32 },
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Missing => write!(f, "world not found"),
+            OpenError::TooNew { written_by } => write!(
+                f,
+                "saved by a newer version of Craftmjne (save format {written_by}, \
+                 this build reads {SAVE_FORMAT}) - update to open it"
+            ),
+        }
+    }
+}
+
+/// Brings a world's data forward one format at a time, from `from` to
+/// [`SAVE_FORMAT`].
+///
+/// There are no data-shape migrations yet, and that's not an oversight:
+/// every field added to [`WorldData`] so far is `#[serde(default)]`, so a
+/// format-0 file already deserializes correctly and the 0 -> 1 step is
+/// purely the stamp recording that a versioned build has adopted it. The
+/// mechanism is here now so the *first* change that can't be a serde default
+/// has an obvious place to go, rather than being bolted on in a hurry at the
+/// point where getting it wrong costs somebody their world.
+fn migrate(data: &mut WorldData, from: u32) {
+    for step in from..SAVE_FORMAT {
+        // Add an arm per `SAVE_FORMAT` bump: `n => { ...rewrite n -> n+1... }`.
+        // Step 0 -> 1 has none, for the reason in the doc comment above.
+        #[allow(clippy::match_single_binding, clippy::single_match)]
+        match step {
+            _ => {}
+        }
+    }
+    let _ = data;
+}
 
 pub fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -61,10 +142,15 @@ pub enum GameMode {
     Creative,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WorldMeta {
     pub name: String,
     pub seed: u32,
+    /// Which [`SAVE_FORMAT`] this world was last written with. `#[serde
+    /// (default)]` makes a world saved before formats were tracked read as
+    /// `0`, which is exactly right - that *is* the format it was written in.
+    #[serde(default)]
+    pub format: u32,
     /// `#[serde(default)]` so worlds saved before game modes existed still
     /// load - they come back as `Survival`, the more restrictive default.
     #[serde(default)]
@@ -240,6 +326,7 @@ impl SaveStore {
         let meta = WorldMeta {
             name: if name.trim().is_empty() { "New World".to_string() } else { name.trim().to_string() },
             seed,
+            format: SAVE_FORMAT,
             mode,
             cheats: false,
             created_at: now,
@@ -257,6 +344,34 @@ impl SaveStore {
     pub fn save_meta(&self, slug: &str, meta: &WorldMeta) -> io::Result<()> {
         fs::create_dir_all(self.saves_dir().join(slug))?;
         fs::write(self.meta_path(slug), serde_json::to_string_pretty(meta).map_err(io::Error::other)?)
+    }
+
+    /// Opens a world for play: refuses one saved by a newer build, migrates
+    /// an older one forward, stamps it as belonging to this format, and
+    /// marks it as just played.
+    ///
+    /// This is the *only* supported way to enter a world, so the
+    /// too-new check can't be forgotten at a second call site. Migration is
+    /// written back immediately rather than waiting for the next autosave -
+    /// otherwise a world could be played for an hour, crash, and still be
+    /// sitting there claiming to be the old format.
+    pub fn open_world(&self, slug: &str) -> Result<WorldMeta, OpenError> {
+        let mut meta = self.load_meta(slug).map_err(|_| OpenError::Missing)?;
+        match compatibility(meta.format) {
+            SaveCompatibility::TooNew { written_by } => {
+                return Err(OpenError::TooNew { written_by })
+            }
+            SaveCompatibility::Upgradable { from } => {
+                let mut data = self.load_data(slug);
+                migrate(&mut data, from);
+                let _ = self.save_data(slug, &data);
+                meta.format = SAVE_FORMAT;
+            }
+            SaveCompatibility::Current => {}
+        }
+        meta.last_played_at = now_unix();
+        let _ = self.save_meta(slug, &meta);
+        Ok(meta)
     }
 
     pub fn touch_last_played(&self, slug: &str) {
@@ -355,6 +470,102 @@ mod tests {
         let (slug, _) = store.create_world("../../etc/passwd", 1, GameMode::Survival).unwrap();
         assert!(!slug.contains('/'));
         assert!(!slug.contains(".."));
+    }
+
+    #[test]
+    fn a_new_world_is_stamped_with_the_current_save_format() {
+        let store = temp_store();
+        let (slug, meta) = store.create_world("Fresh", 1, GameMode::Survival).unwrap();
+        assert_eq!(meta.format, SAVE_FORMAT);
+        assert_eq!(store.load_meta(&slug).unwrap().format, SAVE_FORMAT);
+    }
+
+    #[test]
+    fn compatibility_sorts_older_current_and_newer_formats() {
+        assert_eq!(compatibility(SAVE_FORMAT), SaveCompatibility::Current);
+        assert_eq!(compatibility(0), SaveCompatibility::Upgradable { from: 0 });
+        assert_eq!(
+            compatibility(SAVE_FORMAT + 5),
+            SaveCompatibility::TooNew { written_by: SAVE_FORMAT + 5 }
+        );
+    }
+
+    #[test]
+    fn a_world_from_before_formats_existed_is_migrated_and_stamped_on_open() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("Legacy", 7, GameMode::Creative).unwrap();
+        // Rewrite meta.json without a `format` field at all, exactly as a
+        // build from before save versioning would have left it.
+        let legacy = r#"{"name":"Legacy","seed":7,"mode":"Creative","created_at":1,"last_played_at":1}"#;
+        fs::write(store.meta_path(&slug), legacy).unwrap();
+        assert_eq!(store.load_meta(&slug).unwrap().format, 0);
+
+        let meta = store.open_world(&slug).expect("an older world must open");
+
+        assert_eq!(meta.format, SAVE_FORMAT, "opening must migrate it forward");
+        assert_eq!(meta.seed, 7, "migration must not disturb the world's own data");
+        assert_eq!(meta.mode, GameMode::Creative);
+        assert_eq!(
+            store.load_meta(&slug).unwrap().format,
+            SAVE_FORMAT,
+            "the migration must be written to disk immediately, not left for the next autosave"
+        );
+    }
+
+    #[test]
+    fn opening_a_world_saved_by_a_newer_build_is_refused_and_changes_nothing() {
+        let store = temp_store();
+        let (slug, mut meta) = store.create_world("From The Future", 3, GameMode::Survival).unwrap();
+        meta.format = SAVE_FORMAT + 1;
+        store.save_meta(&slug, &meta).unwrap();
+        let before = fs::read_to_string(store.meta_path(&slug)).unwrap();
+
+        let err = store.open_world(&slug).expect_err("a newer world must not open");
+        assert_eq!(err, OpenError::TooNew { written_by: SAVE_FORMAT + 1 });
+        assert!(err.to_string().contains("newer version"), "{err}");
+
+        assert_eq!(
+            fs::read_to_string(store.meta_path(&slug)).unwrap(),
+            before,
+            "a refused open must not rewrite (and so downgrade) the world"
+        );
+    }
+
+    #[test]
+    fn opening_a_missing_world_reports_it_rather_than_panicking() {
+        let store = temp_store();
+        assert_eq!(store.open_world("no-such-world"), Err(OpenError::Missing));
+    }
+
+    #[test]
+    fn opening_a_world_marks_it_as_just_played() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("Recent", 1, GameMode::Survival).unwrap();
+        let mut meta = store.load_meta(&slug).unwrap();
+        meta.last_played_at = 0;
+        store.save_meta(&slug, &meta).unwrap();
+
+        store.open_world(&slug).unwrap();
+
+        assert!(store.load_meta(&slug).unwrap().last_played_at > 0);
+    }
+
+    #[test]
+    fn a_migrated_world_stays_migrated_across_a_second_open() {
+        // The shape of save bug this project keeps hitting only shows up on
+        // the *second* cycle (see CLAUDE.md), so check the stamp survives
+        // one, not just that it gets written once.
+        let store = temp_store();
+        let (slug, _) = store.create_world("Twice", 1, GameMode::Survival).unwrap();
+        let mut meta = store.load_meta(&slug).unwrap();
+        meta.format = 0;
+        store.save_meta(&slug, &meta).unwrap();
+
+        store.open_world(&slug).unwrap();
+        let reopened = store.open_world(&slug).unwrap();
+
+        assert_eq!(reopened.format, SAVE_FORMAT);
+        assert_eq!(compatibility(reopened.format), SaveCompatibility::Current);
     }
 
     #[test]

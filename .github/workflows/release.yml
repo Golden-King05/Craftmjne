@@ -4,19 +4,17 @@ name: Release
 # binaries for Windows/Linux/macOS and publish them as a GitHub Release.
 #
 # Two things read these release assets:
-#  - CraftmjneSetup.exe: the first-time installer end users download. Bundles
-#    the blocks/ directory (installer/craftmjne.nsi) - the game requires it
-#    next to the exe at startup (see src/blocks.rs's find_blocks_dir).
-#  - craftmjne-<target-triple>.<zip|tar.gz>: what the in-game auto-updater
-#    (src/updater.rs, via the `self_update` crate) downloads on later runs.
-#    Keep the archive naming (`craftmjne-<target-triple>`) in sync with any
-#    target added to the matrix below — self_update matches on it. NOTE:
-#    self_update only ever extracts and swaps the named binary out of this
-#    archive, never other files - so even though the Linux/macOS tar.gz
-#    bundles blocks/ too (for a fresh manual download), an in-place
-#    auto-update does NOT refresh an existing install's blocks/ folder.
-#    A block-definition change needs a fresh install until something
-#    fills that gap.
+#  - craftmjne-<target-triple>.<zip|tar.gz>: a complete, self-contained game
+#    build (executable + blocks/ + textures/). This is what the launcher
+#    downloads and extracts into versions/<version>/, and what a manual
+#    download gives you. It MUST stay self-contained - the game refuses to
+#    start without blocks/ next to its executable (see src/blocks.rs's
+#    find_blocks_dir), and the launcher just unpacks the archive as-is.
+#  - CraftmjneSetup.exe: the first-time installer, which installs the
+#    *launcher* (installer/craftmjne.nsi). The launcher takes it from there.
+#
+# The launcher updates itself from its own branch instead of from these
+# releases - see .github/workflows/launcher-release.yml.
 
 on:
   push:
@@ -67,29 +65,47 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build game
+        run: cargo build --release --target ${{ matrix.target }} -p craftmjne
+
+      - name: Build launcher
+        run: cargo build --release --target ${{ matrix.target }} -p craftmjne-launcher
+
+      # Everything the game needs to run, staged in one folder, so both
+      # archive formats below are built from an identical layout.
+      - name: Stage game files
+        shell: bash
+        run: |
+          stage="stage/craftmjne"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/craftmjne${{ runner.os == 'Windows' && '.exe' || '' }}" "$stage/"
+          cp -r blocks "$stage/blocks"
+          mkdir -p "$stage/textures/blocks" "$stage/textures/sky"
+          cp textures/blocks/README.md "$stage/textures/blocks/"
+          cp textures/sky/README.md "$stage/textures/sky/"
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          cp -r blocks target/${{ matrix.target }}/release/blocks
-          cd target/${{ matrix.target }}/release
-          tar czf "$GITHUB_WORKSPACE/craftmjne-${{ matrix.target }}.tar.gz" craftmjne blocks
+          tar czf "craftmjne-${{ matrix.target }}.tar.gz" -C stage/craftmjne .
 
-      - name: Package (Windows, for the auto-updater)
+      # Note the `\*` - it archives the folder's *contents*, so the game
+      # executable and blocks/ land at the root of the zip. The launcher
+      # extracts an archive straight into versions/<version>/, so an extra
+      # wrapping directory here would put blocks/ one level away from the
+      # executable and the game would refuse to start.
+      - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/craftmjne.exe `
-            -DestinationPath craftmjne-${{ matrix.target }}.zip
+          Compress-Archive -Path stage\craftmjne\* -DestinationPath craftmjne-${{ matrix.target }}.zip
 
       - name: Install NSIS
         if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
 
-      - name: Build Windows installer
+      - name: Build Windows installer (installs the launcher)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -98,7 +114,7 @@ jobs:
           # directory (installer/), not the working directory - SRC_EXE must
           # be absolute or it silently resolves to installer/target/... and
           # fails with "no files found".
-          $srcExe = Join-Path "${{ github.workspace }}" "target\${{ matrix.target }}\release\craftmjne.exe"
+          $srcExe = Join-Path "${{ github.workspace }}" "target\${{ matrix.target }}\release\craftmjne-launcher.exe"
           & 'C:\Program Files (x86)\NSIS\makensis.exe' `
             "-DAPP_VERSION=$version" `
             "-DSRC_EXE=$srcExe" `
