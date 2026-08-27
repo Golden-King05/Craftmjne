@@ -31,7 +31,25 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Set while a failure is expected to be recoverable - see
+/// [`suppress_dialogs`]. Panics are still logged; they just don't interrupt
+/// the user with a dialog for something the next attempt may well fix.
+static SUPPRESS: AtomicBool = AtomicBool::new(false);
+
+/// Silence the panic hook's dialog (but not its logging) for the duration of
+/// an attempt that has a fallback behind it.
+///
+/// `main` tries several renderers in turn, and a failing one *panics* rather
+/// than returning an error. Without this, the first backend's panic would pop
+/// an alarming "the launcher crashed" box and then the launcher would go on
+/// to start perfectly well on the next backend - the dialog would be pure
+/// misinformation.
+pub fn suppress_dialogs(on: bool) {
+    SUPPRESS.store(on, Ordering::SeqCst);
+}
 
 /// Where the log lives. Kept next to `instances.json` rather than beside the
 /// executable: the install directory may not be writable (Program Files), and
@@ -69,6 +87,9 @@ pub fn log(msg: &str) {
 /// report).
 pub fn fatal(msg: &str) {
     log(&format!("FATAL: {msg}"));
+    if SUPPRESS.load(Ordering::SeqCst) {
+        return;
+    }
     let full = format!(
         "{msg}\n\nA full log is at:\n{}",
         log_path().display()
@@ -148,6 +169,37 @@ mod tests {
         let path = log_path();
         assert!(path.starts_with(crate::paths::Paths::default().launcher_dir()));
         assert_eq!(path.file_name().unwrap(), "launcher.log");
+    }
+
+    /// The bug this guards against shipped a launcher that could not start on
+    /// any Windows machine, and neither `cargo build` nor `cargo clippy`
+    /// noticed - a wgpu with no backends compiles and links perfectly, then
+    /// panics the moment it needs a real GPU. CI only ever built the
+    /// launcher, so nothing caught it before a user did.
+    ///
+    /// `wgpu::Instance::enabled_backend_features()` is the same call wgpu's
+    /// own panic message points at, so this asserts against the authoritative
+    /// source rather than re-deriving what the feature flags ought to mean.
+    #[test]
+    fn at_least_one_wgpu_backend_is_compiled_in() {
+        let backends = eframe::wgpu::Instance::enabled_backend_features();
+        assert!(
+            !backends.is_empty(),
+            "wgpu has no backends compiled in - the launcher will panic on \
+             startup on every machine. Check that eframe keeps its default \
+             features (see launcher/Cargo.toml)."
+        );
+    }
+
+    #[test]
+    fn suppressing_dialogs_is_reversible() {
+        // Guards the ordering `main` depends on: the last renderer attempt
+        // has to be able to turn dialogs back on, or a total failure would
+        // be as silent as the bug this module exists to fix.
+        suppress_dialogs(true);
+        assert!(SUPPRESS.load(Ordering::SeqCst));
+        suppress_dialogs(false);
+        assert!(!SUPPRESS.load(Ordering::SeqCst));
     }
 
     #[test]
