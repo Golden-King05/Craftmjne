@@ -4,26 +4,27 @@
 //! the built-in ones; register blocks/painters from your plugin's `build()`
 //! (see README "Extending the framework").
 //!
-//! CLI: `craftmjne [--seed N] [--render-distance N] [--no-update-check] [--version]`
+//! CLI: `craftmjne [--seed N] [--render-distance N] [--version]`
+//!
+//! There is no update flag any more: versions are managed by the launcher
+//! (`launcher/`), which installs each build into its own folder rather than
+//! having the game rewrite itself.
 
 use bevy::prelude::*;
 
 use craftmjne::config::WorldSettings;
 use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
-use craftmjne::updater::UpdateCheckEnabled;
-use craftmjne::{chat, interact, inventory, light, menu, player, render, sky, ui, updater, world};
+use craftmjne::{chat, interact, inventory, light, menu, player, render, sky, ui, world};
 
 struct Args {
     seed: u32,
     render_distance: Option<i32>, // CLI override; None means "use the saved graphics setting"
-    update_check: bool,
 }
 
 fn parse_args() -> Args {
     let mut seed = WorldSettings::default().seed;
     let mut render_distance = None;
-    let mut update_check = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -37,7 +38,6 @@ fn parse_args() -> Args {
                     render_distance = Some(v);
                 }
             }
-            "--no-update-check" => update_check = false,
             "--version" | "-V" => {
                 println!("craftmjne {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -45,7 +45,7 @@ fn parse_args() -> Args {
             other => eprintln!("unknown argument: {other}"),
         }
     }
-    Args { seed, render_distance, update_check }
+    Args { seed, render_distance }
 }
 
 fn main() {
@@ -70,21 +70,16 @@ fn main() {
     let mut app = App::new();
     app.insert_resource(settings)
         .insert_resource(store)
-        .insert_resource(UpdateCheckEnabled(args.update_check))
         .add_plugins(
+            // Bevy's default window handling is back: nothing needs to
+            // intercept the close button any more, now that quitting no
+            // longer has to give a staged self-update a chance to apply.
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Craftmjne".into(),
                     ..default()
                 }),
-                // `updater::gate_quit` is the sole authority on when the
-                // game actually exits, so a staged update gets a chance to
-                // apply first (see updater.rs's module docs) - both the
-                // default "despawn the window the instant the OS close
-                // button is clicked" and "exit once no windows are open"
-                // behaviors would otherwise race ahead of that.
-                close_when_requested: false,
-                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
             }),
         )
         .init_state::<AppState>()
@@ -99,7 +94,6 @@ fn main() {
             inventory::InventoryPlugin,
             chat::ChatPlugin,
             ui::UiPlugin,
-            updater::UpdaterPlugin,
             menu::MenuPlugin,
         ));
 

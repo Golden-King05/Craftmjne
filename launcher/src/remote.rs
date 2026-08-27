@@ -3,10 +3,10 @@
 //!
 //! The download/extract machinery is `self_update`'s, the same crate the
 //! game's old in-game updater used. What's gone is the part that was
-//! actually causing trouble - a running process rewriting its own executable
-//! - because here the process doing the downloading (the launcher) is never
-//! the process being replaced (a game build in `versions/`). That's the
-//! whole reason this design fixes the update problem rather than moving it.
+//! actually causing trouble: a running process rewriting its own
+//! executable. Here the process doing the downloading (the launcher) is
+//! never the process being replaced (a game build under `versions/`), which
+//! is why this design fixes the update problem rather than relocating it.
 
 use std::io::Write;
 use std::path::Path;

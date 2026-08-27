@@ -11,7 +11,6 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::config::WorldSettings;
 use crate::save::{GameMode, GraphicsSettings, SaveStore};
 use crate::state::{ActiveWorld, AppState, PauseState};
-use crate::updater::QuitRequested;
 
 const PANEL_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.82);
 const BUTTON_IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
@@ -238,26 +237,49 @@ fn rebuild_worlds_content(
                     ));
                 }
                 for (slug, meta) in &worlds {
-                    p.spawn((
-                        Button,
-                        MenuButton::LoadWorld(slug.clone()),
-                        Node {
-                            width: Val::Px(360.0),
-                            padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
-                            flex_direction: FlexDirection::Column,
-                            ..default()
-                        },
-                        BackgroundColor(BUTTON_IDLE),
-                    ))
-                    .with_children(|row| {
-                        row.spawn((Text::new(meta.name.clone()), TextFont { font_size: 17.0, ..default() }, TextColor(Color::WHITE)));
+                    // A world saved by a newer build is shown, but not as a
+                    // button: entering it would rewrite it in this build's
+                    // older format and drop whatever the newer one stored.
+                    // Leaving it out of the list entirely would be worse -
+                    // it'd just look like the world had vanished.
+                    let too_new = matches!(
+                        crate::save::compatibility(meta.format),
+                        crate::save::SaveCompatibility::TooNew { .. }
+                    );
+                    let row_node = Node {
+                        width: Val::Px(360.0),
+                        padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
+                        flex_direction: FlexDirection::Column,
+                        ..default()
+                    };
+                    let mut row = if too_new {
+                        p.spawn((row_node, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25))))
+                    } else {
+                        p.spawn((
+                            Button,
+                            MenuButton::LoadWorld(slug.clone()),
+                            row_node,
+                            BackgroundColor(BUTTON_IDLE),
+                        ))
+                    };
+                    row.with_children(|row| {
                         row.spawn((
-                            Text::new(format!(
+                            Text::new(meta.name.clone()),
+                            TextFont { font_size: 17.0, ..default() },
+                            TextColor(if too_new { TEXT_DIM } else { Color::WHITE }),
+                        ));
+                        let subtitle = if too_new {
+                            "made by a newer version - update Craftmjne to open it".to_string()
+                        } else {
+                            format!(
                                 "seed {}  -  {}  -  {}",
                                 meta.seed,
                                 mode_label(meta.mode),
                                 relative_time(meta.last_played_at)
-                            )),
+                            )
+                        };
+                        row.spawn((
+                            Text::new(subtitle),
                             TextFont { font_size: 12.0, ..default() },
                             TextColor(TEXT_DIM),
                         ));
@@ -553,7 +575,7 @@ fn handle_menu_buttons(
     mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     store: Res<SaveStore>,
-    mut quit: EventWriter<QuitRequested>,
+    mut exit: EventWriter<AppExit>,
 ) {
     for (interaction, action) in &mut interactions {
         if *interaction != Interaction::Pressed {
@@ -565,7 +587,7 @@ fn handle_menu_buttons(
             MenuButton::GoMods => next_state.set(AppState::Mods),
             MenuButton::BackToMainMenu => next_state.set(AppState::MainMenu),
             MenuButton::Quit => {
-                quit.write(QuitRequested);
+                exit.write(AppExit::Success);
             }
             MenuButton::ShowCreateForm => *mode = WorldsScreenMode::Create,
             MenuButton::CancelCreate => *mode = WorldsScreenMode::List,
@@ -580,8 +602,12 @@ fn handle_menu_buttons(
                 }
             }
             MenuButton::LoadWorld(slug) => {
-                if let Ok(meta) = store.load_meta(&slug) {
-                    store.touch_last_played(&slug);
+                // `open_world` is what refuses a world saved by a newer
+                // build and migrates an older one forward - never bypass it
+                // with a bare `load_meta`. The list already renders a
+                // too-new world as unclickable, so reaching the `Err` arm
+                // here means the save changed underneath us.
+                if let Ok(meta) = store.open_world(&slug) {
                     commands.insert_resource(ActiveWorld { slug, meta });
                     next_state.set(AppState::InGame);
                 }

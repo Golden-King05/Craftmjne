@@ -1749,9 +1749,7 @@ version = "1.2.2"
 dependencies = [
  "arboard",
  "bevy",
- "http",
  "image",
- "self_update",
  "serde",
  "serde_json",
 ]
