@@ -75,6 +75,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
 
+      # Run the tests on every platform before packaging anything. This job
+      # used to build only, which is exactly how launcher 1.0.0 shipped
+      # unable to start on any Windows machine: it was built with wgpu
+      # compiled in but with none of wgpu's backends enabled, which builds
+      # and links perfectly cleanly and only fails when a real GPU is
+      # needed. `diagnostics::at_least_one_wgpu_backend_is_compiled_in`
+      # catches that class of "compiles fine, dies on startup" bug, but only
+      # if something actually runs it.
+      - name: Test
+        run: cargo test --release --target ${{ matrix.target }} -p craftmjne-launcher
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p craftmjne-launcher
 
