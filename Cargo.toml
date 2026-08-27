@@ -3,7 +3,7 @@ members = ["launcher"]
 
 [package]
 name = "craftmjne"
-version = "1.2.2"
+version = "1.3.0"
 edition = "2021"
 description = "A well-optimized, extensible voxel engine / Minecraft-style game framework"
 license = "MIT"
