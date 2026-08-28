@@ -4,6 +4,35 @@
 //! **Versions** (what's published on GitHub, and what's downloaded here).
 //! All state lives in [`LauncherApp`]; every slow operation goes through
 //! `jobs` so the window never stops responding.
+//!
+//! ## Hiding while a game is running
+//!
+//! `play` doesn't leave the launcher sitting open next to the game, and it
+//! doesn't exit either - it hides its window (`egui::ViewportCommand::
+//! Visible(false)`) and shows it again once the game process exits, so from
+//! the player's side the launcher closes when the game opens and reopens
+//! when the game closes, with no second window competing for taskbar space
+//! in between.
+//!
+//! This is one running process the whole time, not two: a background thread
+//! calls `Child::wait()` on the spawned game (blocking is fine off the UI
+//! thread) and reports back through the same `jobs`/`JobDone` channel every
+//! other background operation already uses, and `Context::request_repaint`
+//! (documented as safe and expected to call from another thread, and the
+//! specific reason it's cloned into the thread below) wakes the UI loop up
+//! to actually process that message even while the window has no input to
+//! otherwise trigger a redraw.
+//!
+//! Deliberately *not* implemented as "launcher process exits, then a second
+//! process relaunches it once the game closes": that would need the exiting
+//! launcher to hand off responsibility for the wait to some other process
+//! (itself, re-invoked with an internal flag, or a detached helper), which
+//! is real complexity for no benefit here, and "a process that spawns a
+//! hidden copy of itself to supervise, then reappears later" is a shape
+//! that reads as suspicious to exactly the antivirus heuristics this
+//! project is already trying to avoid tripping (see the old in-game
+//! updater's self-replace saga in CLAUDE.md). Hiding a window costs none of
+//! that.
 
 use eframe::egui;
 
@@ -72,7 +101,7 @@ impl LauncherApp {
         }
     }
 
-    fn poll_jobs(&mut self) {
+    fn poll_jobs(&mut self, ctx: &egui::Context) {
         for done in self.jobs.drain() {
             match done {
                 JobDone::Releases(Ok(list)) => self.releases = Releases::Loaded(list),
@@ -91,6 +120,15 @@ impl LauncherApp {
                         self.status = format!("Launcher update check failed: {err}");
                     }
                     self.self_update = Some(state);
+                }
+                JobDone::GameExited => {
+                    self.status = "Welcome back.".to_string();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    // A no-op if the OS doesn't want to yield focus (see the
+                    // command's own doc comment) - a nicety, not something
+                    // reopening depends on, since Visible(true) above is
+                    // what actually brings the window back at all.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
             }
         }
@@ -111,18 +149,38 @@ impl LauncherApp {
         });
     }
 
-    fn play(&mut self, index: usize) {
+    fn play(&mut self, index: usize, ctx: &egui::Context) {
         let Some(instance) = self.instances.items.get(index).cloned() else { return };
-        self.status = match launch::launch(&self.library, &instance) {
-            Ok(()) => format!("Started {} on Craftmjne {}.", instance.name, instance.version),
-            Err(err) => err,
-        };
+        match launch::launch(&self.library, &instance) {
+            Ok(child) => {
+                self.status = format!("Playing {} on Craftmjne {}.", instance.name, instance.version);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                let ctx = ctx.clone();
+                self.jobs.spawn(move || {
+                    // Best-effort: a `wait()` error here (already reaped,
+                    // OS-level failure) still means the game is gone, so
+                    // this waits it out at most rather than getting stuck
+                    // with the launcher hidden forever over a wait() that
+                    // can't itself be retried.
+                    let mut child = child;
+                    let _ = child.wait();
+                    // `Context::request_repaint` is explicitly documented as
+                    // safe (and expected) to call from a background thread -
+                    // it's what wakes eframe's loop to actually process
+                    // `JobDone::GameExited` even though the hidden window
+                    // has had no input to otherwise trigger a redraw.
+                    ctx.request_repaint();
+                    JobDone::GameExited
+                });
+            }
+            Err(err) => self.status = err,
+        }
     }
 }
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_jobs();
+        self.poll_jobs(ctx);
         // Downloads report progress from another thread, which egui has no
         // way to know about - keep repainting while any are in flight so the
         // byte counter actually moves.
@@ -332,7 +390,7 @@ impl LauncherApp {
         );
 
         if play {
-            self.play(index);
+            self.play(index, ui.ctx());
         }
         if delete {
             self.instances.remove(index);

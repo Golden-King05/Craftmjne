@@ -15,6 +15,9 @@ pub enum JobDone {
     Releases(Result<Vec<RemoteVersion>, String>),
     Installed { version: String, result: Result<(), String> },
     SelfUpdate(SelfUpdate),
+    /// The game process `app.rs`'s `play` spawned and hid the launcher for
+    /// has exited - time to show the launcher window again.
+    GameExited,
 }
 
 pub struct Jobs {

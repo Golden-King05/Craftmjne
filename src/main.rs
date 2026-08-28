@@ -10,6 +10,13 @@
 //! (`launcher/`), which installs each build into its own folder rather than
 //! having the game rewrite itself.
 
+// Without this a Windows release build pops a console window behind the
+// game every single launch - nothing here writes enough to stdout/stderr in
+// normal play to be worth that. Debug builds keep it, since that's where a
+// panic message is worth seeing. Same fix, same reasoning, as the launcher's
+// `launcher/src/main.rs`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use bevy::prelude::*;
 
 use craftmjne::config::WorldSettings;
@@ -48,7 +55,28 @@ fn parse_args() -> Args {
     Args { seed, render_distance }
 }
 
+/// Reconnects stdout/stderr to whatever terminal launched this process, if
+/// any. `windows_subsystem = "windows"` starts with no console at all, so
+/// even `craftmjne --version` run from an open PowerShell would otherwise
+/// print nothing; `AttachConsole` with the parent-process pseudo-handle
+/// borrows that terminal's console when one exists, and fails harmlessly
+/// (nothing to attach to) on a plain double-click. Same fix as the
+/// launcher's `launcher/src/diagnostics.rs::attach_console`.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: no arguments to get wrong; documented to fail cleanly when the
+    // process has no parent console.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn main() {
+    attach_console();
     let args = parse_args();
     let smoke = std::env::var_os("CRAFT_SMOKE").is_some();
 

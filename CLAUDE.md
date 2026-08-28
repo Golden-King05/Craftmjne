@@ -1094,6 +1094,56 @@ etc.) instead of inventing a new approach:
   that only appeared sometimes. Every temp-dir helper in this repo uses an
   `AtomicU64` counter for exactly this reason; copy that, don't key the
   name on the fixture's contents.
+- **A running process spawning a hidden supervisor of itself to reappear
+  later is exactly the shape antivirus heuristics are built to catch -
+  don't reach for it even when the goal (auto-reopen after a child
+  process exits) sounds like it needs one.** Asked to make the launcher
+  close when a game instance starts and reopen when it closes, the two
+  live options were: (a) exit the launcher and have some second process
+  re-launch it once the game ends, or (b) keep the one launcher process
+  alive, hide its window, and show it again. (a) needs a hand-off - the
+  exiting process re-invoking itself with an internal flag, or a detached
+  helper - which is the "process launches a hidden copy of itself to
+  supervise, then reappears" pattern, structurally identical to what got
+  flagged as suspicious in the old in-game updater's self-replace saga.
+  (b) is `launcher/src/app.rs`'s `play`: `egui::ViewportCommand::
+  Visible(false)`, a background thread `Child::wait()`s on the spawned
+  game (blocking is fine off the UI thread), then `Context::
+  request_repaint()` - documented as safe and expected to call from
+  another thread specifically for this "wake a UI with no live input"
+  case - delivers `JobDone::GameExited` through the same `jobs.rs`
+  channel every other background op already uses, and `poll_jobs` sends
+  `Visible(true)`. One process the whole time, no re-exec, no hand-off
+  to get wrong, and specifically avoids adding a second thing that looks
+  like malware to the exact AV heuristics this project is already fighting.
+- **When something is flagged as suspicious by name (a "sketchy" console
+  window, an AV signature warning) but the underlying mechanism turns out
+  to be correct, check whether the input the mechanism is *reacting to* is
+  actually current before assuming there's a bug to fix.** Asked to fix
+  "the game starting at 1pm instead of dawn," `sky::DayNightClock`'s
+  `elapsed: 0.0` is genuinely dawn (verified via its own doc comment, the
+  `phase_angle`/`daylight` formulas, and a passing integration test
+  literally named `time_of_day_and_moon_phase_persist_across_a_reload`
+  asserting `elapsed == 0.0` for a fresh world) - and checking out the
+  actual tagged `v1.2.4` release confirmed the identical logic was already
+  there, not something only fixed on an unreleased branch. Don't "fix" a
+  mechanism that's already correct and tested just because a symptom was
+  reported against it; ask what's actually being observed instead, since a
+  changed based on a guess at this point risks masking whatever the real
+  cause is.
+- **A version-metadata/code-signing change for a platform you can't compile
+  for is exactly where "verify by actually compiling" (this file's own
+  standing rule) has no cheap way to be followed - that's a reason to hold
+  off, not a reason to skip verification and ship a guess.** Embedding
+  Windows executable version info (`ProductName`/`FileDescription`/etc. via
+  a `build.rs` and `winresource`) was a real, safe-in-principle improvement
+  for the antivirus-flagging complaint, but this environment can only
+  compile for Linux - a wrong method name or field type wouldn't surface
+  until the next real Windows CI run, on a release the user is about to
+  cut. Fetched the crate's docs first rather than trusting memory, and the
+  summary still left the exact `.set()` vs `.set_version_info()` split
+  ambiguous enough not to trust blind. Left it undone and said why, rather
+  than landing a plausible-looking build.rs neither of us could check.
 - **A "query everything registered, including future mods" feature needs a
   registry to query, not a second hardcoded list next to the first one.**
   Command autocomplete could have been built as its own name list inside
