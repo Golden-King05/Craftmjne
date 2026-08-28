@@ -101,6 +101,17 @@ have it, just add the file; if you never do, it renders as the checkerboard
 placeholder (or a procedural painter, if `src/atlas.rs` registers one under
 that name) forever - either way, nothing crashes.
 
+## `grass_top_bw.png` / `grass_side_bw.png`
+
+Grayscale luminosity masks for a future per-biome grass tinting feature
+(sample the mask, multiply by a biome's color at render time - the same
+technique Minecraft's own `grass_top.png`/`grass_side.png` + color-map
+tinting uses). Not read by anything yet - no biome concept exists in this
+engine at all currently, so these currently just sit here unused, same as
+any other file that doesn't match a name `src/atlas.rs` looks for. Kept
+rather than deleted so the art doesn't need remaking once that feature is
+built.
+
 ## Where this folder needs to live
 
 Same resolution rule as `blocks/`: next to the game's `.exe` for an
