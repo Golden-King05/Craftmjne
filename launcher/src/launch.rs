@@ -1,9 +1,13 @@
 //! Starting a game build.
 //!
-//! Deliberately fire-and-forget: the launcher spawns the game and does not
-//! wait on it, so you can start an instance, close the launcher, and the
-//! game keeps running - and so a crashed game can never take the launcher
-//! down with it.
+//! [`launch`] spawns the game and hands back the [`Child`](std::process::Child)
+//! rather than waiting on it here - a crashed game must never take the
+//! launcher down with it. The launcher still tracks that handle afterward
+//! (`app.rs`'s `play`): it hides its own window and waits on the child from
+//! a background thread, then shows itself again once the game exits, rather
+//! than staying open alongside it or exiting outright. See `app.rs`'s module
+//! docs for why hide-and-reveal was chosen over spawning a second launcher
+//! process to supervise the first.
 
 use std::process::Command;
 
@@ -33,12 +37,11 @@ pub fn command_for(library: &Library, instance: &Instance) -> Result<Command, St
     Ok(command)
 }
 
-/// Spawns the game for `instance`.
-pub fn launch(library: &Library, instance: &Instance) -> Result<(), String> {
-    command_for(library, instance)?
-        .spawn()
-        .map(|_child| ())
-        .map_err(|e| format!("couldn't start Craftmjne {}: {e}", instance.version))
+/// Spawns the game for `instance`, handing back the running process so the
+/// caller can wait on it (to know when to show the launcher window again)
+/// without this function blocking until the game exits.
+pub fn launch(library: &Library, instance: &Instance) -> Result<std::process::Child, String> {
+    command_for(library, instance)?.spawn().map_err(|e| format!("couldn't start Craftmjne {}: {e}", instance.version))
 }
 
 #[cfg(test)]

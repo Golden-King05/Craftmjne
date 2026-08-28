@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use craftmjne::blocks::{BlockRegistry, AXIS_Y};
 use craftmjne::config::{WorldSettings, CHUNK_SIZE};
-use craftmjne::light::{LightPlugin, LightQueue, MAX_LIGHT};
+use craftmjne::light::{LightPlugin, LightQueue, LEVEL_STEP, MAX_LIGHT};
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
 use craftmjne::save::{GameMode, SaveStore};
@@ -254,10 +254,11 @@ fn leaving_and_reentering_a_world_persists_edits_and_player_pose() {
     assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(edit_pos) == 0, 2000));
 }
 
-/// A fresh world starts its day/night clock at dawn (and a new moon);
-/// leaving mid-cycle and reloading resumes from wherever it was left,
-/// rather than resetting - the same "don't silently lose continuous state
-/// on reload" principle as fluid levels
+/// A fresh world starts its day/night clock partway into a bright morning
+/// (see `sky::NEW_WORLD_START_TIME` - not literal dawn, which renders almost
+/// fully dark) and at a new moon; leaving mid-cycle and reloading resumes
+/// from wherever it was left, rather than resetting - the same "don't
+/// silently lose continuous state on reload" principle as fluid levels
 /// (`water_restores_exactly_after_leaving_and_reentering_a_world`).
 /// `SkyPlugin` itself isn't part of this headless app (it needs rendering
 /// infrastructure this test doesn't set up), so the clock is advanced by
@@ -269,7 +270,11 @@ fn time_of_day_and_moon_phase_persist_across_a_reload() {
     let mut app = headless_app(&temp);
     {
         let clock = app.world().resource::<DayNightClock>();
-        assert_eq!(clock.elapsed, 0.0, "a fresh world starts at dawn");
+        assert_eq!(
+            clock.elapsed,
+            craftmjne::sky::NEW_WORLD_START_TIME,
+            "a fresh world starts partway into a bright morning, not literal (near-black) dawn"
+        );
         assert_eq!(clock.moon_phase(), 0, "a fresh world starts at a new moon");
     }
 
@@ -286,6 +291,39 @@ fn time_of_day_and_moon_phase_persist_across_a_reload() {
     assert_eq!(clock.elapsed, 543.0);
     assert_eq!(clock.day_count, 11);
     assert_eq!(clock.moon_phase(), 3);
+}
+
+/// `world::enter_world` only hands a brand-new world `sky::
+/// NEW_WORLD_START_TIME` when it has genuinely never been saved - an
+/// existing save whose `data.json` predates the `time_of_day` field (and so
+/// deserializes it via `#[serde(default)]`, save.rs's own
+/// `missing_time_of_day_field_in_old_saves_defaults_to_dawn` covers that
+/// deserialization directly) must still resume at literal dawn, unaffected.
+/// The two only converge on the same fallback value by coincidence today
+/// (both currently land on `WorldData::default()`), so this guards the
+/// distinction `world_data_exists` exists to draw rather than trusting
+/// "no code path changed that" - a save with real content (edits, a player
+/// position) simply has no `NEW_WORLD_START_TIME` to apply.
+#[test]
+fn an_existing_save_still_resumes_at_literal_dawn_not_a_bright_morning() {
+    let temp = temp_saves();
+    let app = headless_app(&temp);
+    // Confirm the premise a genuinely new world gets the bright-morning
+    // start, before manufacturing the "already has a save" scenario below.
+    assert_eq!(app.world().resource::<DayNightClock>().elapsed, craftmjne::sky::NEW_WORLD_START_TIME);
+
+    // Simulate this world having already been saved once (whatever the
+    // reason data.json exists - an old pre-day/night save is the case that
+    // motivates this, but any existing save qualifies).
+    let slug = app.world().resource::<ActiveWorld>().slug.clone();
+    app.world().resource::<SaveStore>().save_data(&slug, &craftmjne::save::WorldData::default()).unwrap();
+
+    let app2 = reload_app(&temp);
+    assert_eq!(
+        app2.world().resource::<DayNightClock>().elapsed,
+        0.0,
+        "an existing save must resume at literal dawn, not get the new-world override"
+    );
 }
 
 /// Every fluid cell's exact state (id *and* level) is saved and restored
@@ -449,23 +487,46 @@ fn surface_y(app: &App, x: i32, z: i32) -> i32 {
         .expect("column generated")
 }
 
+/// A column whose cell just above the ground is genuinely *air*, returned as
+/// that cell's position.
+///
+/// `ChunkMap::surface_y` finds the topmost **solid** block, and water isn't
+/// solid - so on a lake column the cell above the "surface" is water, not
+/// air. That's fine for tests that only care about the ground, but a test
+/// about open sky or about a torch in air gets a very different (and
+/// correct) answer there: water attenuates light per channel, so the cell
+/// reads as tinted and dimmed rather than fully lit. Scan for a dry column
+/// instead of assuming a hardcoded one is dry, since where the generator
+/// puts lakes is not this test's business.
+fn open_air_above_ground(app: &App) -> IVec3 {
+    for z in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            let y = surface_y(app, x, z);
+            let pos = IVec3::new(x, y + 1, z);
+            if app.world().resource::<ChunkMap>().get_block(pos) == craftmjne::blocks::AIR {
+                return pos;
+            }
+        }
+    }
+    panic!("no dry column found in the spawn chunk");
+}
+
 #[test]
 fn sky_light_fills_open_air_and_a_roof_cuts_it_off() {
     let temp = temp_saves();
     let mut app = headless_app(&temp);
     run_until_lit(&mut app);
 
-    let y = surface_y(&app, 8, 8);
-    let open = IVec3::new(8, y + 1, 8);
+    let open = open_air_above_ground(&app);
     assert_eq!(
         app.world().resource::<ChunkMap>().get_light(open).sky,
-        MAX_LIGHT,
+        [MAX_LIGHT; 3],
         "open air above the ground should see the full sky"
     );
 
     // Roof it over two blocks up. The cell underneath can no longer see the
     // sky directly, so it must end up dimmer than full daylight.
-    let roof = IVec3::new(8, y + 2, 8);
+    let roof = open + IVec3::Y;
     let stone = app.world().resource::<BlockRegistry>().id("stone");
     {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
@@ -476,8 +537,8 @@ fn sky_light_fills_open_air_and_a_roof_cuts_it_off() {
 
     let under_roof = app.world().resource::<ChunkMap>().get_light(open).sky;
     assert!(
-        under_roof < MAX_LIGHT,
-        "a roof should cut the sky light underneath it, still {under_roof}"
+        under_roof.iter().all(|&c| c < MAX_LIGHT),
+        "a roof should cut the sky light underneath it, still {under_roof:?}"
     );
 }
 
@@ -487,8 +548,7 @@ fn a_placed_torch_lights_the_cells_around_it_in_its_own_color() {
     let mut app = headless_app(&temp);
     run_until_lit(&mut app);
 
-    let y = surface_y(&app, 8, 8);
-    let torch_pos = IVec3::new(8, y + 1, 8);
+    let torch_pos = open_air_above_ground(&app);
     let torch = app.world().resource::<BlockRegistry>().id("torch");
     {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
@@ -499,7 +559,7 @@ fn a_placed_torch_lights_the_cells_around_it_in_its_own_color() {
 
     let map = app.world().resource::<ChunkMap>();
     let beside = map.get_light(torch_pos + IVec3::X).block;
-    assert_eq!(beside[0], MAX_LIGHT - 1, "one block from a full-strength torch");
+    assert_eq!(beside[0], MAX_LIGHT - LEVEL_STEP, "one block from a full-strength torch");
     assert!(
         beside[0] > beside[2],
         "the torch's light should stay warm as it spreads, got {beside:?}"

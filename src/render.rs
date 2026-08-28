@@ -117,6 +117,12 @@ pub fn bucket_to_mesh(bucket: MeshBucket) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, bucket.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, bucket.uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, bucket.colors);
+    // Not texture coordinates: sky light's green and blue channels (see
+    // `MeshBucket::sky_gb`). Inserting this is also what makes Bevy's mesh
+    // pipeline define `VERTEX_UVS_B` and pass `uv_b` through to the fragment
+    // stage, which is why `chunk.wgsl` can read it with no custom vertex
+    // shader and no `specialize` changes.
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, bucket.sky_gb);
     mesh.insert_indices(Indices::U32(bucket.indices));
     mesh
 }

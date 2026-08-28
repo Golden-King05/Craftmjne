@@ -25,7 +25,7 @@ use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PaddedChunk};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
-use crate::sky::DayNightClock;
+use crate::sky::{DayNightClock, NEW_WORLD_START_TIME};
 use crate::state::{ActiveWorld, AppState};
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
 use crate::texture_report::TextureReport;
@@ -727,7 +727,19 @@ fn enter_world(
     }
     *map = ChunkMap { needs_scan: true, ..ChunkMap::default() };
 
-    let data = store.load_data(&active.slug);
+    // A world that's never been saved gets a bright, already-morning
+    // starting time rather than the literal (and near-black) dawn instant
+    // `WorldData::default()` would otherwise hand back - see
+    // `sky::NEW_WORLD_START_TIME`'s own doc comment for why. An existing
+    // save just missing this one field (predating the day/night cycle)
+    // still resumes at literal dawn through `WorldData::default()`
+    // unchanged - `world_data_exists` is what tells the two cases apart,
+    // since both currently reach the same fallback value otherwise.
+    let is_new_world = !store.world_data_exists(&active.slug);
+    let mut data = store.load_data(&active.slug);
+    if is_new_world {
+        data.time_of_day = NEW_WORLD_START_TIME;
+    }
     let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u8)>> = HashMap::new();
     let mut edit_log: HashMap<IVec3, (BlockId, u8)> = HashMap::new();
     for edit in &data.edits {

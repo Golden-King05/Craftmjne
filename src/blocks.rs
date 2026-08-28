@@ -94,6 +94,14 @@
 //!   its color dims — keep `color` near white for one that should reach the
 //!   same distance in every direction. `blocks/torch.json` is the built-in
 //!   example.
+//! - `transmission` is how much light survives crossing one block of this
+//!   material, as a fraction (`1.0` = perfectly clear, the default). Either
+//!   one number for all three channels (`0.98`, glass: dims slightly with no
+//!   tint) or explicit per-channel `[r, g, b]` (`[0.65, 0.86, 0.95]`, water:
+//!   eats red, keeps blue, so what it shades goes blue-green rather than just
+//!   dark). Multiplicative, so stacked media compose - light crossing glass
+//!   and then water is scaled by each in turn. Ignored for opaque blocks,
+//!   which stop everything regardless. See [`Transmission`].
 //! - `texture_scheme` picks which texture *names* get looked up per face,
 //!   without having to spell any of them out by hand in `textures` - see
 //!   [`TextureScheme`]. Defaults to `"default"` (one texture, named after
@@ -109,7 +117,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::light::MAX_LIGHT;
+use crate::light::{MAX_LEVEL, MAX_LIGHT};
 
 pub type BlockId = u16;
 
@@ -222,7 +230,7 @@ pub enum Rotation {
 /// How much light a block emits, and what color. Blocks that aren't light
 /// sources leave this at its default (`level: 0`), which emits nothing.
 ///
-/// `level` is the brightness in light levels (`0..=`[`MAX_LIGHT`], clamped);
+/// `level` is the brightness in light levels (`0..=`[`MAX_LEVEL`], clamped);
 /// `color` is a plain 0-255 RGB hue applied to it. The two combine into a
 /// per-channel emission (see [`Self::emission`]) because `light.rs`
 /// propagates the three channels independently — which is exactly what makes
@@ -251,11 +259,71 @@ impl Default for LightSpec {
 }
 
 impl LightSpec {
-    /// This block's per-channel emission, `0..=MAX_LIGHT` each — what
-    /// `Tables::light` stores and `light.rs` actually propagates.
+    /// This block's per-channel emission in *stored* light units
+    /// (`0..=MAX_LIGHT` each) — what `Tables::light` holds and `light.rs`
+    /// actually propagates.
+    ///
+    /// Converts from the authored `0..=MAX_LEVEL` scale, which is the one
+    /// block files are written in and the one that corresponds to a distance
+    /// in blocks. Keeping authoring in levels while storing in finer units
+    /// means making light more precise never invalidated a single block file.
     pub fn emission(&self) -> [u8; 3] {
-        let level = self.level.min(MAX_LIGHT as u32);
-        self.color.map(|c| ((level * c as u32 + 127) / 255).min(MAX_LIGHT as u32) as u8)
+        let level = self.level.min(MAX_LEVEL);
+        self.color.map(|c| {
+            ((level * c as u32 * MAX_LIGHT as u32) / (MAX_LEVEL * 255)).min(MAX_LIGHT as u32) as u8
+        })
+    }
+}
+
+/// How much light survives passing through one block of this material, per
+/// channel, as a fraction in `0.0..=1.0` (`1.0` = perfectly clear).
+///
+/// Only meaningful for blocks light can enter at all — an opaque block stops
+/// everything regardless of what this says, and `Tables::transmission`
+/// records `[0; 3]` for those so nothing has to check two fields to know
+/// what a cell does to light.
+///
+/// Written in a block file either as one number for all three channels or as
+/// explicit per-channel values:
+///
+/// ```json
+/// "transmission": 0.98                     // glass: dims slightly, no tint
+/// "transmission": [0.65, 0.85, 0.95]       // water: eats red, keeps blue
+/// ```
+///
+/// Multiplicative rather than a subtracted number of levels, which is what
+/// makes it compose: light crossing glass and then water is scaled by each
+/// in turn, so the pair is genuinely different from either alone, and a
+/// hundred panes of glass really do add up to something. A subtractive
+/// "levels absorbed" field on the old coarse `0..=16` scale could not express
+/// "2%" at all — it rounded to either nothing or a full level.
+#[derive(Clone, Copy, PartialEq, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Transmission {
+    /// One value for all three channels — no tint, just dimming.
+    Uniform(f32),
+    /// Explicit per-channel `[r, g, b]`, for a medium that absorbs colors
+    /// unequally.
+    PerChannel([f32; 3]),
+}
+
+impl Default for Transmission {
+    fn default() -> Self {
+        Self::Uniform(1.0)
+    }
+}
+
+impl Transmission {
+    /// Fixed-point `0..=255` per channel, the form `light.rs` multiplies by.
+    /// Out-of-range values are clamped rather than rejected: a block file
+    /// asking for 150% transmission is a typo, not a reason to refuse to
+    /// start a world.
+    pub fn to_fixed(self) -> [u8; 3] {
+        let raw = match self {
+            Self::Uniform(v) => [v; 3],
+            Self::PerChannel(v) => v,
+        };
+        raw.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
     }
 }
 
@@ -452,6 +520,10 @@ pub struct BlockDef {
     /// How much light this block emits, and in what color. See [`LightSpec`];
     /// defaults to emitting nothing.
     pub light: LightSpec,
+    /// How much light survives crossing one block of this material, per
+    /// channel. See [`Transmission`]; defaults to perfectly clear, which is
+    /// what air and every ordinary see-through block want.
+    pub transmission: Transmission,
     /// Which texture names an unset face in `textures` falls back to. See
     /// [`TextureScheme`].
     pub texture_scheme: TextureScheme,
@@ -493,6 +565,7 @@ impl Default for BlockDef {
             block_model: None,
             rotation: Rotation::default(),
             light: LightSpec::default(),
+            transmission: Transmission::default(),
             texture_scheme: TextureScheme::default(),
             textures: FaceTextures::default(),
         }
@@ -545,6 +618,8 @@ struct BlockFile {
     #[serde(default)]
     light: LightSpec,
     #[serde(default)]
+    transmission: Transmission,
+    #[serde(default)]
     texture_scheme: TextureScheme,
     #[serde(default)]
     textures: FaceTextures,
@@ -585,6 +660,7 @@ impl BlockFile {
             block_model: self.block_model,
             rotation: self.rotation,
             light: self.light,
+            transmission: self.transmission,
             texture_scheme: self.texture_scheme,
             textures: self.textures,
         }
@@ -615,6 +691,14 @@ pub struct Tables {
     /// everything that isn't a light source, which `light.rs` treats as
     /// "emits nothing" without needing a separate flag.
     pub light: Vec<[u8; 3]>,
+    /// Per-channel fraction of light that survives crossing one block of
+    /// this material, fixed-point `0..=255` (see [`Transmission`]).
+    ///
+    /// `[255; 3]` — perfectly clear, an exact no-op in `light.rs` — for air
+    /// and every block that doesn't absorb anything, and `[0; 3]` for opaque
+    /// blocks. Folding opacity in here means a cell's effect on light is one
+    /// lookup rather than a flag plus a value that have to agree.
+    pub transmission: Vec<[u8; 3]>,
     /// Atlas tile per face: `tiles[id as usize * 6 + face]`.
     pub tiles: Vec<u16>,
     /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
@@ -773,6 +857,9 @@ impl BlockRegistry {
             flow_distance: vec![0; n],
             rotates: vec![false; n],
             light: vec![[0; 3]; n],
+            // Air (id 0) is skipped by the loop below and must be clear, not
+            // the `Default::default()` zero that would make it block light.
+            transmission: vec![[u8::MAX; 3]; n],
             tiles: vec![0; n * 6],
             tile_size,
             uv_pad,
@@ -787,6 +874,11 @@ impl BlockRegistry {
             tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
             tables.rotates[id] = def.rotation != Rotation::None;
             tables.light[id] = def.light.emission();
+            // An opaque block stops light whatever its `transmission` says,
+            // so that's resolved once here rather than re-checked at every
+            // propagation step.
+            tables.transmission[id] =
+                if tables.opaque[id] { [0; 3] } else { def.transmission.to_fixed() };
             for face in 0..6 {
                 let tex = def.texture_name(face);
                 let tile = atlas_index.get(&tex).unwrap_or_else(|| {

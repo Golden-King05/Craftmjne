@@ -1968,11 +1968,12 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "craftmjne-launcher"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "eframe",
  "http",
