@@ -110,6 +110,16 @@
 //!   `texture_scheme` would have derived for that face. Defaults to
 //!   whatever `texture_scheme` derives if omitted entirely (which itself
 //!   defaults to a single texture named after `id` on every face).
+//! - `tinted` marks which faces get biome-tinted at mesh time (`biome::
+//!   grass_tint` multiplied onto the atlas sample) - same `all`/`top`/
+//!   `bottom`/`side` shape as `textures`, e.g. `{"top": true, "side": true}`.
+//!   The face's own texture should be a grayscale mask meant to be colored
+//!   this way; tinting a full-color texture just darkens/recolors it
+//!   unexpectedly. Defaults to untinted on every face. See [`FaceTint`].
+//!   `blocks/grass.json` is the built-in example - its `bottom` face reuses
+//!   `dirt.png` (the same tile plain `dirt` blocks render with) and is
+//!   deliberately left untinted, since tinting that tile would tint dirt
+//!   blocks too.
 
 use bevy::prelude::*;
 use serde::Deserialize;
@@ -454,6 +464,38 @@ impl FaceTextures {
     }
 }
 
+/// Which of a block's faces get biome-tinted at mesh time - see
+/// `biome.rs` and `Tables::tinted`. Same `all`/`top`/`bottom`/`side`
+/// vocabulary and face-index mapping as [`FaceTextures`] (face `2` is top,
+/// `3` is bottom, everything else is a side), deliberately kept separate
+/// from it: tinting is a property of which *texture* a face resolved to
+/// (a grayscale mask meant to be multiplied by a color), not of the block
+/// as a whole, and a block can easily want one without the other - grass's
+/// bottom face reuses `dirt.png`, the same tile plain `dirt` blocks use, so
+/// it must never be tinted even though grass's top and sides are.
+#[derive(Clone, Copy, Default, Deserialize)]
+pub struct FaceTint {
+    #[serde(default)]
+    pub all: bool,
+    #[serde(default)]
+    pub top: bool,
+    #[serde(default)]
+    pub bottom: bool,
+    #[serde(default)]
+    pub side: bool,
+}
+
+impl FaceTint {
+    fn tinted(&self, face: usize) -> bool {
+        let primary = match face {
+            2 => self.top,
+            3 => self.bottom,
+            _ => self.side,
+        };
+        primary || self.all
+    }
+}
+
 #[derive(Clone)]
 pub struct BlockDef {
     /// Stable, no-spaces registry key (also what saves reference block
@@ -528,6 +570,9 @@ pub struct BlockDef {
     /// [`TextureScheme`].
     pub texture_scheme: TextureScheme,
     pub textures: FaceTextures,
+    /// Which faces get biome-tinted at mesh time. See [`FaceTint`];
+    /// defaults to none, which is what every block wants except grass.
+    pub tinted: FaceTint,
 }
 
 impl BlockDef {
@@ -568,6 +613,7 @@ impl Default for BlockDef {
             transmission: Transmission::default(),
             texture_scheme: TextureScheme::default(),
             textures: FaceTextures::default(),
+            tinted: FaceTint::default(),
         }
     }
 }
@@ -623,6 +669,8 @@ struct BlockFile {
     texture_scheme: TextureScheme,
     #[serde(default)]
     textures: FaceTextures,
+    #[serde(default)]
+    tinted: FaceTint,
 }
 
 fn default_true() -> bool {
@@ -663,6 +711,7 @@ impl BlockFile {
             transmission: self.transmission,
             texture_scheme: self.texture_scheme,
             textures: self.textures,
+            tinted: self.tinted,
         }
     }
 }
@@ -701,6 +750,12 @@ pub struct Tables {
     pub transmission: Vec<[u8; 3]>,
     /// Atlas tile per face: `tiles[id as usize * 6 + face]`.
     pub tiles: Vec<u16>,
+    /// Whether that same face gets biome-tinted (`biome::grass_tint`
+    /// multiplied onto it at mesh time) - `tinted[id as usize * 6 + face]`,
+    /// same indexing as `tiles`, resolved from [`FaceTint`]. `false` (the
+    /// atlas sample used untouched) for every face on every block except
+    /// grass's top and sides.
+    pub tinted: Vec<bool>,
     /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
     /// tile_size` at compile time) - one of `atlas::ALLOWED_TILE_SIZES`.
     pub tile_size: usize,
@@ -861,6 +916,7 @@ impl BlockRegistry {
             // the `Default::default()` zero that would make it block light.
             transmission: vec![[u8::MAX; 3]; n],
             tiles: vec![0; n * 6],
+            tinted: vec![false; n * 6],
             tile_size,
             uv_pad,
             uv_span: uv_tile - 2.0 * uv_pad,
@@ -885,6 +941,7 @@ impl BlockRegistry {
                     panic!("block {:?}: no texture painter registered for {tex:?}", def.id)
                 });
                 tables.tiles[id * 6 + face] = *tile;
+                tables.tinted[id * 6 + face] = def.tinted.tinted(face);
             }
         }
         self.compiled = true;
@@ -917,6 +974,39 @@ mod tests {
         let grass = reg.id("grass") as usize;
         assert_ne!(tables.tiles[grass * 6 + 2], tables.tiles[grass * 6 + 3]);
         assert_ne!(tables.tiles[grass * 6 + 2], tables.tiles[grass * 6]);
+    }
+
+    #[test]
+    fn grass_is_tinted_on_top_and_sides_but_not_its_dirt_bottom() {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        let grass = reg.id("grass") as usize;
+        let dirt = reg.id("dirt") as usize;
+
+        assert!(tables.tinted[grass * 6 + 2]); // top
+        assert!(!tables.tinted[grass * 6 + 3]); // bottom - reuses dirt.png, must stay untinted
+        for face in [0, 1, 4, 5] {
+            assert!(tables.tinted[grass * 6 + face]); // sides
+        }
+        // plain dirt blocks must never be tinted just because grass's
+        // bottom face happens to reuse the same tile.
+        for face in 0..6 {
+            assert!(!tables.tinted[dirt * 6 + face]);
+        }
+    }
+
+    #[test]
+    fn face_tint_all_overrides_every_face_regardless_of_the_per_face_flags() {
+        let tint = FaceTint { all: true, ..FaceTint::default() };
+        for face in 0..6 {
+            assert!(tint.tinted(face));
+        }
+
+        let tint = FaceTint { top: true, ..FaceTint::default() };
+        assert!(tint.tinted(2)); // top
+        assert!(!tint.tinted(3)); // bottom
+        assert!(!tint.tinted(0)); // side
     }
 
     #[test]

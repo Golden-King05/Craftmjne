@@ -1297,3 +1297,36 @@ etc.) instead of inventing a new approach:
   everything one level down and break it just as thoroughly). General
   lesson: when something starts consuming an artifact differently than the
   thing it was built for, re-check what's actually in the artifact.
+- **Biome grass tint reuses the exact "repurpose a free vertex attribute"
+  trick sky light already established, one level further.** The vertex
+  color/UV1 budget was already fully spent (RGB=block light, A+UV1.xy=sky
+  light's three channels), so a third per-face signal - biome color, so
+  `grass_top.png`/`grass_side.png` can be plain grayscale masks instead of
+  flat-green art - went into `Mesh::ATTRIBUTE_NORMAL` (`mesher::MeshBucket::
+  tint`, `chunk.wgsl` multiplies `in.world_normal` straight into the lit
+  color). Safe for the same reason `ATTRIBUTE_UV_1` was safe: chunks are
+  unlit and spawned with a pure-translation `Transform`, so nothing reads
+  `world_normal` for real lighting and the identity normal-matrix leaves
+  the smuggled color untouched. `[1.0, 1.0, 1.0]` (a multiply no-op) is
+  baked for every untinted face, so this needed zero changes to any
+  existing block or test. **Which faces get tinted is a property of the
+  (block, face) slot, not the texture name** - `FaceTint`/`Tables::tinted`
+  mirror `FaceTextures`/`Tables::tiles`'s exact `[id*6+face]` shape, because
+  grass's bottom face reuses `dirt.png` (the very tile plain `dirt` blocks
+  render with) and must stay untinted - a per-block flag would have
+  incorrectly tinted every dirt block too. Tint color itself
+  (`biome::grass_tint`) is a pure function of `(world_seed, x, z)` via a
+  dedicated `SimplexNoise` stream (`biome::noise_for_seed`, `seed ^
+  SEED_OFFSET` like every other decorrelated stream), computed fresh every
+  mesh - deliberately *not* stored per-chunk or persisted, same "nothing to
+  invalidate, a reload recomputes the same answer" reasoning as `light.rs`.
+  `mesh_chunk` gained an explicit `chunk_origin: (i32, i32)` parameter
+  (world-space column of the chunk's local `(0,0)`) so adjacent chunks
+  sample the same continuous noise field instead of each restarting at
+  local `(0,0)`, which would show as a tint seam at every chunk boundary.
+  The actual `textures/blocks/grass_top.png`/`grass_side.png` files are now
+  the grayscale masks (swapped in via `git mv`, since `texture_scheme:
+  organic` always looks for those exact names) - the flat-color versions an
+  earlier session wired in first got moved to `grass_top_color.png`/
+  `grass_side_color.png`, unread by anything but kept for a future block
+  that wants plain grass-style art without going through tinting.

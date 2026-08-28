@@ -80,8 +80,8 @@ grass's underside too.
 | `cobblestone.png` | cobblestone (all faces) |
 | `dirt.png` | dirt (all faces), grass (bottom) |
 | `glass.png` | glass (all faces) |
-| `grass_side.png` | grass (side faces) |
-| `grass_top.png` | grass (top face) |
+| `grass_side.png` | grass (side faces, tinted) |
+| `grass_top.png` | grass (top face, tinted) |
 | `gravel.png` | gravel (all faces) |
 | `iron_ore.png` | iron_ore (all faces) |
 | `leaves.png` | leaves (all faces) |
@@ -101,16 +101,19 @@ have it, just add the file; if you never do, it renders as the checkerboard
 placeholder (or a procedural painter, if `src/atlas.rs` registers one under
 that name) forever - either way, nothing crashes.
 
-## `grass_top_bw.png` / `grass_side_bw.png`
+## `grass_top.png` / `grass_side.png` are grayscale masks, not flat art
 
-Grayscale luminosity masks for a future per-biome grass tinting feature
-(sample the mask, multiply by a biome's color at render time - the same
-technique Minecraft's own `grass_top.png`/`grass_side.png` + color-map
-tinting uses). Not read by anything yet - no biome concept exists in this
-engine at all currently, so these currently just sit here unused, same as
-any other file that doesn't match a name `src/atlas.rs` looks for. Kept
-rather than deleted so the art doesn't need remaking once that feature is
-built.
+`blocks/grass.json`'s `"tinted": {"top": true, "side": true}` field
+(`src/blocks.rs`'s `FaceTint`/`Tables::tinted`) multiplies a per-column
+biome color (`src/biome.rs`'s `grass_tint`, seeded per world) onto whatever
+these two files sample - the same technique Minecraft's own
+`grass_top.png`/`grass_side.png` + color-map tinting uses. A grayscale
+luminosity mask is what makes that read as natural shading rather than a
+flat wash of one color; a full-color texture here would just get darkened/
+recolored unexpectedly instead. `grass_top_color.png`/`grass_side_color.png`
+are the original flat-color versions, kept alongside in case a future block
+(or a mod) wants plain, untinted grass-style art without going through the
+biome system at all - neither is read by anything right now.
 
 ## Where this folder needs to live
 

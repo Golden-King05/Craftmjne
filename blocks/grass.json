@@ -2,5 +2,6 @@
   "id": "grass",
   "name": "Grass",
   "texture_scheme": "organic",
-  "textures": { "bottom": "dirt" }
+  "textures": { "bottom": "dirt" },
+  "tinted": { "top": true, "side": true }
 }

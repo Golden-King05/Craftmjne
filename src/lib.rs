@@ -3,6 +3,7 @@
 //! app; see README for the framework guide.
 
 pub mod atlas;
+pub mod biome;
 pub mod blocks;
 pub mod chat;
 pub mod commands;
