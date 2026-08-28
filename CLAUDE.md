@@ -1330,3 +1330,41 @@ etc.) instead of inventing a new approach:
   earlier session wired in first got moved to `grass_top_color.png`/
   `grass_side_color.png`, unread by anything but kept for a future block
   that wants plain grass-style art without going through tinting.
+- **A Windows-only feature that can't compile here doesn't have to stay
+  unverified - installing a cross-compile target plus a real linker plus
+  Wine turned "reviewed by eye" into "actually ran."** The launcher's
+  "Add Desktop/Start Menu shortcut" buttons (`launcher/src/shortcut.rs`)
+  needed `windows-sys`'s `SHGetKnownFolderPath`/`CoTaskMemFree` (resolving
+  the real Shell folders rather than guessing `%USERPROFILE%\Desktop`,
+  which breaks under OneDrive Known Folder Move - the same reason NSIS's
+  own `$DESKTOP`/`$SMPROGRAMS` don't hardcode a path either) and a crate
+  (`mslnk`) to write the actual `.lnk` binary format. This machine can only
+  natively run `x86_64-unknown-linux-gnu`, but `rustup target add
+  x86_64-pc-windows-gnu` plus `apt-get install mingw-w64` got a real `cargo
+  build --target x86_64-pc-windows-gnu --tests` producing a genuine Windows
+  PE test binary, and `apt-get install wine64` then actually *ran* it -
+  `SHGetKnownFolderPath` resolving both known folders, `mslnk` writing real
+  `.lnk` files, and (checked once via a temporary test, then deleted before
+  committing) the real files landing at
+  `~/.wine/.../Desktop/*.lnk` and `.../Start Menu/Programs/Craftmjne/*.lnk`,
+  matching `installer/craftmjne.nsi`'s own two shortcut locations exactly.
+  Only bother with this when a target is realistically installable
+  (`rustup target list` showed multiple `windows` triples available) -
+  this project's earlier "embed exe version info" idea was correctly left
+  undone specifically because no such verification path existed for it.
+- **`mslnk` looked like a portable, cross-platform crate from its docs.rs
+  page (dependencies are just bitflags/byteorder/log, and the visible
+  source excerpt showed no `#[cfg(windows)]` gates) - it isn't.** It calls
+  `std::os::windows::ffi::OsStrExt` directly, which doesn't exist outside
+  `cfg(windows)` in `std` itself, so it fails to even compile on Linux.
+  Caught immediately by actually trying `cargo check` rather than trusting
+  the fetched summary, which is exactly the kind of gap a WebFetch summary
+  of a docs page can hide (it only shows what happened to be excerpted).
+  Fixed by moving the dependency into `[target.'cfg(windows)'.dependencies]`
+  alongside `windows-sys`, and gating the whole `shortcut` module on
+  `#[cfg(windows)]` at its `mod` declaration in `main.rs` rather than
+  giving it an internal non-Windows stub - once `app.rs`'s own "Add
+  shortcut" buttons are `#[cfg(windows)]`-gated too (there's no Desktop/
+  Start Menu concept to offer elsewhere), nothing on another platform ever
+  calls into the module, so a stub inside it would be permanently dead
+  code rather than a real fallback path.
