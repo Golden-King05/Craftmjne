@@ -1094,6 +1094,28 @@ etc.) instead of inventing a new approach:
   that only appeared sometimes. Every temp-dir helper in this repo uses an
   `AtomicU64` counter for exactly this reason; copy that, don't key the
   name on the fixture's contents.
+- **"The mechanism is correct and tested" doesn't mean "there's nothing to
+  fix" - a screenshot can reveal the mechanism was answering the wrong
+  question.** The day/night investigation above concluded the code already
+  did what was asked (dawn = `elapsed 0.0`, correctly persisted) and very
+  nearly stopped there. What actually landed once the user sent a real
+  screenshot: a brand-new world's near-black first frame is a real UX
+  problem even though the *data* is correct, and it's a genuinely different
+  complaint than "the sun's position is wrong." `sky::NEW_WORLD_START_TIME`
+  (`DAY_SECONDS * 0.2` - sun 36° up, `daylight() ≈ 0.59`) is what a
+  brand-new world starts at now, instead of the literal dawn instant.
+  Getting only a *new* world this treatment (not an existing save that
+  merely predates the `time_of_day` field) needed a real distinction
+  `save::SaveStore::world_data_exists` didn't have a reason to draw before -
+  both cases used to reach the same `WorldData::default()` fallback by
+  coincidence, so "does `data.json` exist at all" had to become an explicit
+  check in `world::enter_world`, not just a different default value. Two
+  tests guard the split: one confirms the new starting value, a second
+  (`an_existing_save_still_resumes_at_literal_dawn_not_a_bright_morning`)
+  manufactures an already-saved world and confirms it does *not* get the
+  new-world treatment - verified both actually fail without the
+  `world_data_exists` guard before trusting them, same discipline as every
+  other regression test in this file.
 - **A running process spawning a hidden supervisor of itself to reappear
   later is exactly the shape antivirus heuristics are built to catch -
   don't reach for it even when the goal (auto-reopen after a child
