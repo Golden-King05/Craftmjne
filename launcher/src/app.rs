@@ -43,6 +43,8 @@ use crate::library::Library;
 use crate::paths::Paths;
 use crate::remote::{self, RemoteVersion};
 use crate::selfupdate::{self, SelfUpdate};
+#[cfg(windows)]
+use crate::shortcut::{self, Location};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
@@ -293,6 +295,8 @@ impl eframe::App for LauncherApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.selectable_value(&mut self.tab, Tab::Versions, "Versions");
                     ui.selectable_value(&mut self.tab, Tab::Instances, "Instances");
+                    ui.separator();
+                    self.shortcut_row(ui);
                 });
             });
             ui.add_space(6.0);
@@ -668,4 +672,25 @@ impl LauncherApp {
             self.start_dev_download(&build);
         }
     }
+
+    /// "Add a shortcut" buttons in the header, for anyone who got the
+    /// launcher a way that skips the NSIS installer's own shortcut step
+    /// (the rolling self-update, a manual download, a dev build) and wants
+    /// one without hunting down the install folder by hand. Windows-only,
+    /// same as the feature itself (`shortcut.rs`) - hidden entirely rather
+    /// than shown greyed-out or erroring on click, since there's no Desktop
+    /// or Start Menu concept to offer on the other platforms this launcher
+    /// ships for.
+    #[cfg(windows)]
+    fn shortcut_row(&mut self, ui: &mut egui::Ui) {
+        if ui.small_button("Add Desktop shortcut").clicked() {
+            self.status = shortcut::create(Location::Desktop).unwrap_or_else(|e| e);
+        }
+        if ui.small_button("Add Start Menu shortcut").clicked() {
+            self.status = shortcut::create(Location::StartMenu).unwrap_or_else(|e| e);
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn shortcut_row(&mut self, _ui: &mut egui::Ui) {}
 }

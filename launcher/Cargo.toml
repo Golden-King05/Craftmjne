@@ -3,7 +3,7 @@ name = "craftmjne-launcher"
 # Versioned independently of the game: the launcher updates itself from its
 # own branch (see src/selfupdate.rs), so bumping this is what publishes a
 # launcher update, and it has nothing to do with the game's release tags.
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 description = "Downloads, manages and launches Craftmjne versions"
 license = "MIT"
@@ -49,9 +49,24 @@ serde_json = "1"
 # For `diagnostics.rs`: a native message box, and reattaching stdio to the
 # terminal that launched us. Already in the tree via winit/wgpu, so this adds
 # nothing to the download - it just makes the APIs callable directly.
+# For `shortcut.rs`: resolving the real Desktop / Start Menu folders
+# (`Win32_UI_Shell`'s `SHGetKnownFolderPath`, freed via `Win32_System_Com`'s
+# `CoTaskMemFree`) instead of guessing `%USERPROFILE%\Desktop`, which is
+# wrong under folder redirection (OneDrive Known Folder Move, a roaming
+# profile) - the same reason NSIS's own `$DESKTOP`/`$SMPROGRAMS` don't
+# hardcode a path either.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_System_Com",
   "Win32_System_Console",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# For `shortcut.rs`: writes the `.lnk` binary format. Despite not touching
+# any COM/Shell API, this reaches into `std::os::windows` directly (wide-
+# string conversion) and so - unlike its own listed dependencies (bitflags,
+# byteorder, log), which are all plain cross-platform crates - only actually
+# compiles targeting Windows, hence living here rather than in the plain
+# `[dependencies]` above with everything else.
+mslnk = "0.1"

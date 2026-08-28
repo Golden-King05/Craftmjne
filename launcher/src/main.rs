@@ -20,6 +20,7 @@
 //! - `instances`  — named, editable launch configurations
 //! - `launch`     — starting a game build
 //! - `selfupdate` — the launcher updating itself
+//! - `shortcut`   — Desktop / Start Menu shortcuts, on demand
 //! - `jobs`       — background work, so the window never blocks
 //! - `app`        — the window
 
@@ -36,6 +37,9 @@ mod library;
 mod paths;
 mod remote;
 mod selfupdate;
+// Windows-only, like the feature itself - see the module doc comment.
+#[cfg(windows)]
+mod shortcut;
 
 use eframe::Renderer;
 
