@@ -41,6 +41,14 @@ serde_json = "1"
 # `image`'s own clipboard-image support) is off, we only ever get/set text.
 arboard = { version = "3", default-features = false }
 
+# For reattaching to the launching terminal's console on Windows (main.rs) -
+# needed once windows_subsystem = "windows" hides the console a release
+# build would otherwise pop up, since that also silences --version/-V and
+# any CLI error output when actually run from a terminal. Already in the
+# tree via winit/wgpu, so this adds nothing to the download.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 # Fast iteration: light optimization for our code, full for dependencies.
 [profile.dev]
 opt-level = 1

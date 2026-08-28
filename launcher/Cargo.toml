@@ -3,23 +3,29 @@ name = "craftmjne-launcher"
 # Versioned independently of the game: the launcher updates itself from its
 # own branch (see src/selfupdate.rs), so bumping this is what publishes a
 # launcher update, and it has nothing to do with the game's release tags.
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Downloads, manages and launches Craftmjne versions"
 license = "MIT"
 
 [dependencies]
-# `wgpu` rather than the default `glow` backend: the game already brings wgpu
-# in, so a developer building the whole workspace pays for one graphics stack
-# instead of two. `x11` is not optional - winit 0.30 fails to compile at all
-# with no platform backend selected, which is what `default-features = false`
-# would otherwise leave it with.
-eframe = { version = "0.32", default-features = false, features = [
-  "default_fonts",
-  "wgpu",
-  "x11",
-  "wayland",
-] }
+# KEEP eframe's default features on. This looks like an easy place to trim a
+# few dependencies, and doing exactly that shipped a launcher that could not
+# start on *any* Windows machine.
+#
+# The trap: eframe's `default` feature includes `"egui-wgpu?/default"`, and
+# that - not eframe's own `wgpu` feature - is what enables wgpu's DX12/Vulkan/
+# Metal backends. Enabling `wgpu` with `default-features = false` therefore
+# compiles wgpu in with *zero* backends, which builds and links perfectly
+# cleanly and then panics at the first `wgpu::Instance` with "No wgpu backend
+# feature that is implemented for the target platform was enabled". Nothing
+# about it is caught until a real GPU is involved, so CI (which only builds)
+# stays green while every user gets a launcher that dies before drawing a
+# frame.
+#
+# The defaults also bring `glow`, which `main` uses as its fallback renderer,
+# plus the `x11`/`wayland` backends winit needs to compile at all on Linux.
+eframe = { version = "0.32", features = ["wgpu"] }
 # The same crate the game's old in-game updater used, kept for exactly the
 # parts that were never the problem: listing GitHub releases, downloading an
 # asset, and extracting an archive. What moved out of the game is the
@@ -39,3 +45,13 @@ self_update = { version = "0.44.0", default-features = false, features = [
 http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# For `diagnostics.rs`: a native message box, and reattaching stdio to the
+# terminal that launched us. Already in the tree via winit/wgpu, so this adds
+# nothing to the download - it just makes the APIs callable directly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_UI_WindowsAndMessaging",
+] }

@@ -1,0 +1,135 @@
+name: Dev Build
+
+# A rolling, unversioned build of the game straight from main - lets you
+# download and test whatever's currently on main through the launcher's
+# "Enable dev builds" toggle, without cutting a real vX.Y.Z release for
+# every feature you want to try. Publishes to one fixed GitHub Release
+# tagged "dev" that gets fully replaced (not accumulated) on every push, so
+# there's only ever the single latest dev build available - never a growing
+# list of them.
+#
+# Two things ship on the "dev" release, both read by the launcher's
+# remote::fetch_dev_build:
+#  - craftmjne-<target-triple>.<zip|tar.gz>: the same self-contained game
+#    build shape release.yml produces (executable + blocks/ + textures/).
+#  - dev-manifest.json: {"commit": "<full 40-char sha>"} - how the launcher
+#    knows whether an already-installed dev build is still current, since
+#    the release's own metadata (name/date) isn't a reliable way to compare
+#    "is this the same commit" against what's on disk.
+#
+# Marked --prerelease so GitHub's UI still shows a real vX.Y.Z tag as
+# "Latest" - this is deliberately not part of that story, and manual
+# downloaders should not stumble into it looking for a stable build.
+#
+# Does NOT build the launcher or the Windows installer - a dev build is for
+# testing the *game*, not for onboarding new users, so there is no
+# CraftmjneSetup.exe here. Only .github/workflows/release.yml (tags) and
+# launcher-release.yml (the launcher branch) ever touch those.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dev-${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+      - name: Build game
+        run: cargo build --release --target ${{ matrix.target }} -p craftmjne
+
+      # Same shape as release.yml's staging step, intentionally kept
+      # identical so a dev build and a tagged release install the same way
+      # into versions/<slot>/ - the launcher's install/launch code has no
+      # idea (and doesn't need one) which kind it's handling.
+      - name: Stage game files
+        shell: bash
+        run: |
+          stage="stage/craftmjne"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/craftmjne${{ runner.os == 'Windows' && '.exe' || '' }}" "$stage/"
+          cp -r blocks "$stage/blocks"
+          cp -r textures "$stage/textures"
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar czf "craftmjne-${{ matrix.target }}.tar.gz" -C stage/craftmjne .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path stage\craftmjne\* -DestinationPath craftmjne-${{ matrix.target }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev-${{ matrix.target }}
+          path: |
+            craftmjne-${{ matrix.target }}.tar.gz
+            craftmjne-${{ matrix.target }}.zip
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    # Publish whatever platforms did build even if one leg failed, same
+    # reasoning as release.yml's own release job.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write the commit manifest
+        run: |
+          echo "{\"commit\": \"${{ github.sha }}\"}" > dist/dev-manifest.json
+
+      # Delete-then-recreate rather than trying to update the existing "dev"
+      # release in place: this is what actually moves the tag to the new
+      # commit. `gh release create` with a tag that doesn't exist yet
+      # creates it pointing at --target automatically, so there's no
+      # separate `git tag`/`git push` step needed. `|| true` on the delete:
+      # the very first run ever has no "dev" release to remove yet.
+      - name: Replace the rolling "dev" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete dev --yes --cleanup-tag --repo "${{ github.repository }}" || true
+          gh release create dev dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Dev build ($(git rev-parse --short HEAD))" \
+            --notes "Automatic, unstable build straight from main @ ${{ github.sha }}. Not a tested release - things may be broken. Install through the launcher's \"Enable dev builds\" toggle." \
+            --prerelease

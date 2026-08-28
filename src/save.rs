@@ -287,6 +287,18 @@ impl SaveStore {
         self.saves_dir().join(slug).join("data.json")
     }
 
+    /// Whether `slug` has ever been saved to before - i.e. whether the next
+    /// [`Self::load_data`] would be resuming real progress or handing back
+    /// a fresh [`WorldData::default`]. `world.rs`'s `enter_world` uses this
+    /// to tell "a world that's never been played" apart from "an old save
+    /// missing a field `#[serde(default)]` fills in" - both currently reach
+    /// `load_data`'s fallback the same way, but only the first should get a
+    /// brand-new-world starting time (`sky::NEW_WORLD_START_TIME`) instead
+    /// of whatever an existing (if incomplete) save actually says.
+    pub fn world_data_exists(&self, slug: &str) -> bool {
+        self.data_path(slug).is_file()
+    }
+
     fn unique_slug(&self, base: &str) -> String {
         let dir = self.saves_dir();
         if !dir.join(base).exists() {

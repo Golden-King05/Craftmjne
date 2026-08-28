@@ -257,7 +257,7 @@ impl TerrainGenerator {
                     if self.opaque[blocks[base + y] as usize] {
                         break;
                     }
-                    light[base + y].sky = MAX_LIGHT;
+                    light[base + y].sky = [MAX_LIGHT; 3];
                 }
             }
         }

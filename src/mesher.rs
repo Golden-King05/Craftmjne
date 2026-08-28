@@ -18,14 +18,19 @@
 //!
 //! `RGB` is the colored **block** light for that vertex (torches and the
 //! like), already multiplied by face shading and ambient occlusion, and
-//! already floored at [`AMBIENT_LIGHT`]. `A` is the **sky** light for the
-//! same vertex, on the same shading/AO scale, and is *not* a transparency -
-//! the alpha the fragment actually outputs comes from the texture and the
-//! material's `base_alpha`, so this attribute was sitting unused. Keeping the
-//! two separate is the whole point: `chunk.wgsl` combines them as
-//! `max(rgb, a * sky_light)` every frame, which is what lets the day/night
-//! cycle brighten, dim and tint the world's sky lighting without touching a
-//! single mesh.
+//! already floored at [`AMBIENT_LIGHT`].
+//!
+//! **Sky** light for the same vertex needs three channels of its own, since
+//! media tint what passes through them (`light.rs`), and it is spread across
+//! two attributes: red in the vertex color's `A` - which is *not* a
+//! transparency, the fragment's alpha comes from the texture and the
+//! material's `base_alpha`, so that channel was sitting unused - and green
+//! and blue in `Mesh::ATTRIBUTE_UV_1` (see [`MeshBucket::sky_gb`]).
+//!
+//! Keeping sky light separate from block light is the whole point:
+//! `chunk.wgsl` combines them as `max(block_rgb, sky_rgb * sky_light)` every
+//! frame, which is what lets the day/night cycle brighten, dim and tint the
+//! world's sky lighting without touching a single mesh.
 
 use std::sync::LazyLock;
 
@@ -204,7 +209,25 @@ const UV_TILE: f32 = 1.0 / ATLAS_TILES as f32;
 pub struct MeshBucket {
     pub positions: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    /// `rgb` = block light, `a` = the *red* channel of sky light.
     pub colors: Vec<[f32; 4]>,
+    /// Sky light's green and blue channels, uploaded as `Mesh::ATTRIBUTE_UV_1`.
+    ///
+    /// Sky light needs three interpolated floats per vertex now that media
+    /// tint it, and the vertex color had exactly one slot free. Rather than
+    /// grow the vertex layout with a custom attribute - which would mean
+    /// replacing Bevy's standard mesh vertex shader, and this renderer has no
+    /// other reason to own one - the remaining two channels go in the second
+    /// UV set, which is unused here (chunks sample one atlas) and which Bevy
+    /// already plumbs through untouched: adding `ATTRIBUTE_UV_1` to a mesh
+    /// makes its pipeline define `VERTEX_UVS_B` and pass `uv_b` to the
+    /// fragment stage, interpolated like any other varying.
+    ///
+    /// The packing is deliberately *not* three values bit-packed into the one
+    /// spare float: vertex attributes are interpolated across each triangle,
+    /// and interpolating packed integers produces garbage between vertices.
+    /// Each channel needs its own interpolated float.
+    pub sky_gb: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
@@ -252,25 +275,26 @@ impl PaddedChunk {
 /// skipped rather than averaged in as darkness; including them would draw a
 /// dark seam along every wall/floor join, since those cells are solid rock
 /// that light was never in a position to occupy.
-fn vertex_light(padded: &PaddedChunk, tables: &Tables, cells: [usize; 4]) -> ([f32; 3], f32) {
-    let mut sum = [0u32; 4];
+fn vertex_light(padded: &PaddedChunk, tables: &Tables, cells: [usize; 4]) -> ([f32; 3], [f32; 3]) {
+    let mut block_sum = [0u32; 3];
+    let mut sky_sum = [0u32; 3];
     let mut count = 0u32;
     for cell in cells {
         if tables.opaque[padded.blocks[cell] as usize] {
             continue;
         }
         let l = padded.light[cell];
-        for (total, channel) in sum.iter_mut().zip(l.block) {
-            *total += channel as u32;
+        for c in 0..3 {
+            block_sum[c] += l.block[c] as u32;
+            sky_sum[c] += l.sky[c] as u32;
         }
-        sum[3] += l.sky as u32;
         count += 1;
     }
     if count == 0 {
-        return ([0.0; 3], 0.0);
+        return ([0.0; 3], [0.0; 3]);
     }
     let inv = 1.0 / (count as f32 * MAX_LIGHT as f32);
-    ([sum[0] as f32 * inv, sum[1] as f32 * inv, sum[2] as f32 * inv], sum[3] as f32 * inv)
+    (block_sum.map(|v| v as f32 * inv), sky_sum.map(|v| v as f32 * inv))
 }
 
 pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
@@ -421,7 +445,7 @@ pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
                         // face - the same neighbourhood the AO above just
                         // sampled, reused for smooth lighting.
                         let at = |o: i32| (cell as i32 + o) as usize;
-                        let (block_rgb, sky) = vertex_light(
+                        let (block_rgb, sky_rgb) = vertex_light(
                             padded,
                             tables,
                             [n_cell, at(c.ao[0]), at(c.ao[1]), at(c.ao[2])],
@@ -431,8 +455,13 @@ pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
                             block_rgb[0].max(AMBIENT_LIGHT) * shade,
                             block_rgb[1].max(AMBIENT_LIGHT) * shade,
                             block_rgb[2].max(AMBIENT_LIGHT) * shade,
-                            sky * shade,
+                            sky_rgb[0] * shade,
                         ]);
+                        // Sky green/blue ride in UV_1 - see `MeshBucket::
+                        // sky_gb`. Red stays in the color alpha it already
+                        // occupied, so this adds one attribute rather than
+                        // moving what was already working.
+                        bucket.sky_gb.push([sky_rgb[1] * shade, sky_rgb[2] * shade]);
                     }
 
                     if ao[0] + ao[3] > ao[1] + ao[2] {
@@ -674,7 +703,7 @@ mod tests {
 
         // The mirror image: full block light, no sky at all.
         let mut padded = PaddedChunk::empty();
-        padded.light.fill(LightCell { block: [MAX_LIGHT; 3], sky: 0 });
+        padded.light.fill(LightCell { block: [MAX_LIGHT; 3], sky: [0; 3] });
         padded.blocks[padded_index(8, 30, 8)] = stone;
         let mesh = mesh_chunk(&padded, &tables);
         let top = horizontal_face_color(&mesh, 31.0);
@@ -688,13 +717,17 @@ mod tests {
         let stone = reg.id("stone");
         let mut padded = PaddedChunk::empty();
         // A deep-red light: full red, half green, no blue.
-        padded.light.fill(LightCell { block: [MAX_LIGHT, MAX_LIGHT / 2, 0], sky: 0 });
+        padded.light.fill(LightCell { block: [MAX_LIGHT, MAX_LIGHT / 2, 0], sky: [0; 3] });
         padded.blocks[padded_index(8, 30, 8)] = stone;
         let mesh = mesh_chunk(&padded, &tables);
 
         let top = horizontal_face_color(&mesh, 31.0);
         assert_eq!(top[0], 1.0);
-        assert!((top[1] - 0.5).abs() < 1e-6, "half-strength green, got {top:?}");
+        // Not exactly 0.5: `MAX_LIGHT / 2` is integer division on an odd
+        // maximum, so the expected value comes from the same arithmetic
+        // rather than from a rounded-off constant.
+        let half = (MAX_LIGHT / 2) as f32 / MAX_LIGHT as f32;
+        assert!((top[1] - half).abs() < 1e-6, "half-strength green, got {top:?}");
         assert!(
             (top[2] - AMBIENT_LIGHT).abs() < 1e-6,
             "an unlit channel falls back to ambient, not to zero, got {top:?}"
@@ -723,6 +756,33 @@ mod tests {
     /// The color of the first vertex of the horizontal quad sitting at height
     /// `y`. Matching whole quads rather than individual vertices matters: a
     /// side face has two of its four corners at the block's top height too,
+    #[test]
+    fn every_per_vertex_buffer_stays_the_same_length() {
+        // Bevy panics at mesh-upload time if a mesh's vertex attributes
+        // disagree on how many vertices there are, and this project can't
+        // catch that in a test any other way - the failure happens on the
+        // render thread with a real GPU, which no test here has. Sky light
+        // now spans two attributes filled at two separate `push` sites in
+        // the same loop, so a future edit adding a vertex to one and not the
+        // other is a live hazard rather than a hypothetical one.
+        let (reg, tables) = tables();
+        let mut padded = PaddedChunk::empty();
+        padded.light.fill(LightCell::OPEN_SKY);
+        // A scene with both buckets populated: stone for `solid`, water for
+        // the translucent pass.
+        padded.blocks[padded_index(4, 30, 4)] = reg.id("stone");
+        padded.blocks[padded_index(8, 30, 8)] = reg.id("water");
+        let mesh = mesh_chunk(&padded, &tables);
+
+        for (name, bucket) in [("solid", &mesh.solid), ("water", &mesh.water)] {
+            let n = bucket.positions.len();
+            assert!(n > 0, "{name} bucket should have geometry to check");
+            assert_eq!(bucket.uvs.len(), n, "{name}: uvs");
+            assert_eq!(bucket.colors.len(), n, "{name}: colors");
+            assert_eq!(bucket.sky_gb.len(), n, "{name}: sky_gb");
+        }
+    }
+
     /// so a per-vertex search finds a *side* face (shade 0.6) when it meant
     /// to find the top one (shade 1.0).
     fn horizontal_face_color(mesh: &ChunkMeshData, y: f32) -> [f32; 4] {

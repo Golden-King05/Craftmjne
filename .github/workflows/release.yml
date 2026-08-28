@@ -80,9 +80,12 @@ jobs:
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/craftmjne${{ runner.os == 'Windows' && '.exe' || '' }}" "$stage/"
           cp -r blocks "$stage/blocks"
-          mkdir -p "$stage/textures/blocks" "$stage/textures/sky"
-          cp textures/blocks/README.md "$stage/textures/blocks/"
-          cp textures/sky/README.md "$stage/textures/sky/"
+          # The whole directories, not just their READMEs - a past version of
+          # this step copied only textures/blocks/README.md, which silently
+          # shipped every released build with the procedural placeholder art
+          # for every block even though real textures (dirt.png, stone.png)
+          # existed right there in the repo the whole time.
+          cp -r textures "$stage/textures"
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'

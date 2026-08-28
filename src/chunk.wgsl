@@ -7,11 +7,19 @@
 //   in.color.rgb - colored block light (torches), already shaded/AO'd and
 //                  floored at the ambient minimum. Fixed at mesh time; a
 //                  torch is exactly as bright at noon as at midnight.
-//   in.color.a   - sky light for this vertex, on the same shading scale.
-//                  Scaled and tinted every frame by params.sky_light, which
-//                  `sky.rs` drives from the day/night cycle (and from a
-//                  special moon's color), so the whole world's daylight
+//   in.color.a   - sky light's RED channel for this vertex, on the same
+//   in.uv_b.xy      shading scale; green and blue follow in the second UV
+//                  set. Three channels rather than one because media tint
+//                  what passes through them - water eats red and keeps blue,
+//                  so a pool floor is lit blue-green at noon rather than
+//                  merely darker. They're stored as ratios, then scaled and
+//                  tinted every frame by params.sky_light, which `sky.rs`
+//                  drives from the day/night cycle (and from a special
+//                  moon's color), so the whole world's daylight still
 //                  changes with zero relighting or remeshing.
+//                  uv_b carries light, not texture coordinates - chunks
+//                  sample a single atlas through uv, and this was the free
+//                  interpolated slot. See `mesher::MeshBucket::sky_gb`.
 // max() rather than a sum: a torch shouldn't visibly brighten a surface
 // that's already in full daylight, it should just take over once the sun
 // goes down - per channel, so a colored light still reads as colored
@@ -40,7 +48,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (color.a < params.alpha_cutoff) {
         discard;
     }
-    let sky = in.color.a * params.sky_light.rgb;
+    let sky = vec3<f32>(in.color.a, in.uv_b.x, in.uv_b.y) * params.sky_light.rgb;
     let light = max(in.color.rgb, sky);
     let lit = color.rgb * light;
     let dist = distance(view.world_position, in.world_position.xyz);

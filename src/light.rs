@@ -9,11 +9,21 @@
 //!   reaches its full range while its green/blue die out immediately, so two
 //!   differently-colored lights blend correctly where they overlap instead
 //!   of one flatly overwriting the other.
-//! - **Sky light** — one channel, `0..=`[`MAX_LIGHT`], "how much of the open
-//!   sky reaches this cell". Deliberately *not* stored pre-multiplied by the
-//!   time of day: it's a property of the world's shape, so the day/night
-//!   cycle can scale (and tint - see below) it every frame with no
-//!   relighting or remeshing at all.
+//! - **Sky light** — three channels, each `0..=`[`MAX_LIGHT`], "how much of
+//!   the open sky reaches this cell, and in what proportion of colors".
+//!   Three rather than one because the media light crosses absorb colors
+//!   unequally (`Tables::transmission`): water leaves blue nearly intact
+//!   while eating red, so a pool floor is lit blue-green at noon rather than
+//!   merely darker - something a single channel could never express, since
+//!   scaling one number can only dim.
+//!
+//!   Deliberately *not* stored pre-multiplied by the time of day: these are
+//!   ratios of the sky's own current color, so the day/night cycle can scale
+//!   and tint them every frame with no relighting or remeshing at all.
+//!
+//! Both quantities are stored in finer units than the `0..=`[`MAX_LEVEL`]
+//! scale block files are authored in, so that a percentage transmission has
+//! somewhere to land instead of rounding to nothing - see [`MAX_LIGHT`].
 //!
 //! Both are baked into vertex colors by `mesher.rs` and combined in
 //! `chunk.wgsl` as `max(block_light, sky_light * sky_color)` — Minecraft's
@@ -68,10 +78,32 @@ use crate::render::ChunkMaterials;
 use crate::state::AppState;
 use crate::world::{BlockSetEvent, ChunkMap, ChunkPipelineSet};
 
-/// The brightest a light channel can be. A cell at `MAX_LIGHT` renders at
-/// full texture brightness; each block travelled costs one level, so a
-/// `MAX_LIGHT` emitter is still faintly visible `MAX_LIGHT - 1` blocks away.
-pub const MAX_LIGHT: u8 = 16;
+/// The authored light scale. `blocks/*.json` writes `light.level` in
+/// `0..=MAX_LEVEL`, which is the scale a person reasonably thinks in ("a
+/// torch is 14 out of 16") and the range light travels in blocks.
+///
+/// Storage uses a finer scale ([`MAX_LIGHT`]) so that *fractional* effects -
+/// a pane of glass absorbing 2% of what passes through it - accumulate
+/// instead of rounding away to nothing. See [`Tables::transmission`].
+///
+/// [`Tables::transmission`]: crate::blocks::Tables::transmission
+pub const MAX_LEVEL: u32 = 16;
+
+/// The brightest a *stored* light channel can be.
+///
+/// Deliberately finer-grained than [`MAX_LEVEL`]: light is stored in
+/// 1/16th-of-a-level units so a percentage transmission has somewhere to
+/// land. On the old 0..=16 scale, "glass blocks 2%" rounded to zero and a
+/// hundred panes of glass in a row still blocked nothing at all, while
+/// anything that *did* round up to 1 was indistinguishable from dense
+/// leaves. The extra 4 bits of headroom is what makes transmission a
+/// continuous knob rather than a four-position switch.
+pub const MAX_LIGHT: u8 = 255;
+
+/// What one block of travel costs, in [`MAX_LIGHT`] units. Chosen so light
+/// still reaches exactly [`MAX_LEVEL`] blocks from a full-strength emitter,
+/// identical to the range before storage got finer.
+pub const LEVEL_STEP: u8 = 16;
 
 /// The faint non-directional floor every surface gets regardless of any real
 /// light reaching it, so a sealed cave reads as "very dark" rather than an
@@ -88,23 +120,34 @@ pub const LIGHT_NEIGHBORS: [IVec3; 6] =
     [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z, IVec3::Y, IVec3::NEG_Y];
 const NEIGHBOR_UP: usize = 4;
 
-/// One cell's stored light. 4 bytes, held in a `Vec` parallel to
+/// One cell's stored light. 6 bytes, held in a `Vec` parallel to
 /// `Chunk::blocks` exactly like `fluid_level`/`axis` (see CLAUDE.md's note on
 /// per-cell dynamic state).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct LightCell {
     /// Per-channel colored block light, `0..=MAX_LIGHT`.
     pub block: [u8; 3],
-    /// How much open sky reaches here, `0..=MAX_LIGHT`. Uncolored - the tint
-    /// is applied at render time from the current sky color, so one stored
-    /// channel serves both a blue noon and a red-moon midnight.
-    pub sky: u8,
+    /// Per-channel sky light, `0..=MAX_LIGHT`: how much open sky reaches
+    /// here, and *in what proportion of colors*.
+    ///
+    /// Three channels rather than one because the media light passes through
+    /// absorb colors unequally - a pool of water leaves the blue channel
+    /// nearly intact while eating the red, so the pool floor is lit blue-green
+    /// even at noon. Storing one scalar could only make that floor *darker*,
+    /// never bluer.
+    ///
+    /// Still not premultiplied by the time of day: these are ratios of the
+    /// sky's own current color, which `sky.rs` supplies as a per-frame
+    /// uniform. So this describes the world's shape and the media in it (it
+    /// changes only when blocks do), while dawn, dusk and a red moon stay a
+    /// uniform write with no relighting or remeshing.
+    pub sky: [u8; 3],
 }
 
 impl LightCell {
-    pub const DARK: LightCell = LightCell { block: [0; 3], sky: 0 };
+    pub const DARK: LightCell = LightCell { block: [0; 3], sky: [0; 3] };
     /// What sits above the top of the world: nothing blocking the sky.
-    pub const OPEN_SKY: LightCell = LightCell { block: [0; 3], sky: MAX_LIGHT };
+    pub const OPEN_SKY: LightCell = LightCell { block: [0; 3], sky: [MAX_LIGHT; 3] };
 }
 
 /// The relaxation rule, applied per channel: take `candidate` when it's at
@@ -126,23 +169,51 @@ pub fn relax(current: u8, candidate: u8) -> u8 {
     }
 }
 
+/// Scales `value` by a `0..=255` transmission fraction (`255` = perfectly
+/// clear).
+///
+/// The `255` case returns `value` untouched rather than going through the
+/// arithmetic, so a clear medium is *exactly* a no-op - the general formula
+/// collapsing to the old behavior for the overwhelming majority of blocks
+/// that don't absorb anything, in the same shape as `mesher.rs`'s
+/// `rotated_tile` (CLAUDE.md's note on gating a per-instance variation).
+fn attenuate(value: u8, transmit: u8) -> u8 {
+    if transmit == u8::MAX {
+        return value;
+    }
+    ((value as u32 * transmit as u32 + 127) / 255) as u8
+}
+
 /// What one cell would offer a neighbour in direction `toward_down`
-/// (`true` only for the cell directly below it): every channel loses one
-/// level, except sky light at full strength, which falls straight down
-/// undiminished so a deep shaft stays lit all the way to the bottom.
-fn offered(from: LightCell, toward_down: bool) -> LightCell {
-    LightCell {
-        block: [
-            from.block[0].saturating_sub(1),
-            from.block[1].saturating_sub(1),
-            from.block[2].saturating_sub(1),
-        ],
-        sky: if toward_down && from.sky == MAX_LIGHT {
+/// (`true` only for the cell directly below it), given the transmission of
+/// the medium being offered *into*.
+///
+/// Two separate effects, applied in this order:
+///
+/// 1. **Distance.** Every channel loses [`LEVEL_STEP`], except sky light at
+///    full strength travelling downward, which falls undiminished so a deep
+///    shaft stays lit all the way to the bottom.
+/// 2. **Absorption.** Whatever survives is scaled by the receiving cell's
+///    per-channel transmission. `transmit` belongs to the cell being lit,
+///    not the one doing the lighting, which is what makes stacking compose:
+///    light crossing glass and then water is multiplied by each in turn, so
+///    the pair genuinely differs from either alone.
+///
+/// Absorption comes *after* the straight-down rule on purpose. Applying it
+/// first would let full-strength sky light pass through any depth of water
+/// unattenuated, since the rule keys on the value still being `MAX_LIGHT`.
+fn offered(from: LightCell, toward_down: bool, transmit: [u8; 3]) -> LightCell {
+    let mut out = LightCell::DARK;
+    for c in 0..3 {
+        out.block[c] = attenuate(from.block[c].saturating_sub(LEVEL_STEP), transmit[c]);
+        let travelled = if toward_down && from.sky[c] == MAX_LIGHT {
             MAX_LIGHT
         } else {
-            from.sky.saturating_sub(1)
-        },
+            from.sky[c].saturating_sub(LEVEL_STEP)
+        };
+        out.sky[c] = attenuate(travelled, transmit[c]);
     }
+    out
 }
 
 /// Recomputes one cell from its 6 neighbours and writes it back if it
@@ -168,14 +239,18 @@ pub fn recompute_light_cell(
     // holds only whatever it emits itself: it neither receives light nor
     // lets any through, so a torch buried in a wall correctly lights only
     // the sides that are actually exposed.
-    let mut candidate = LightCell { block: tables.light[id as usize], sky: 0 };
+    let mut candidate = LightCell { block: tables.light[id as usize], sky: [0; 3] };
     if !tables.opaque[id as usize] {
+        // This cell's own medium is what attenuates everything arriving in
+        // it, so the transmission is looked up once here rather than per
+        // neighbour.
+        let transmit = tables.transmission[id as usize];
         for (i, d) in LIGHT_NEIGHBORS.iter().enumerate() {
-            let offer = offered(map.get_light(pos + *d), i == NEIGHBOR_UP);
+            let offer = offered(map.get_light(pos + *d), i == NEIGHBOR_UP, transmit);
             for c in 0..3 {
                 candidate.block[c] = candidate.block[c].max(offer.block[c]);
+                candidate.sky[c] = candidate.sky[c].max(offer.sky[c]);
             }
-            candidate.sky = candidate.sky.max(offer.sky);
         }
     }
 
@@ -185,7 +260,11 @@ pub fn recompute_light_cell(
             relax(current.block[1], candidate.block[1]),
             relax(current.block[2], candidate.block[2]),
         ],
-        sky: relax(current.sky, candidate.sky),
+        sky: [
+            relax(current.sky[0], candidate.sky[0]),
+            relax(current.sky[1], candidate.sky[1]),
+            relax(current.sky[2], candidate.sky[2]),
+        ],
     };
     if next == current || !map.set_light(pos, next) {
         // Nothing changed, or this cell belongs to a chunk that isn't loaded
@@ -211,7 +290,7 @@ pub fn recompute_light_cell(
     // faster than the queue drains and never terminates. This fires only on
     // an actual drop, and each drop lands the cell on a strictly lower value
     // than it held before, so there can only be `MAX_LIGHT` of them.)
-    if (0..3).any(|c| next.block[c] < current.block[c]) || next.sky < current.sky {
+    if (0..3).any(|c| next.block[c] < current.block[c] || next.sky[c] < current.sky[c]) {
         queue.push_back(pos);
     }
 }
@@ -345,7 +424,8 @@ pub fn seed_new_chunk(map: &ChunkMap, tables: &Tables, coord: IVec2, lights: &mu
                 let idx = block_index(x, y, z);
                 let id = blocks[idx] as usize;
                 let emits = tables.light[id] != [0; 3];
-                if !emits && (tables.opaque[id] || (!on_border && light[idx].sky == MAX_LIGHT)) {
+                let full_sky = light[idx].sky == [MAX_LIGHT; 3];
+                if !emits && (tables.opaque[id] || (!on_border && full_sky)) {
                     continue;
                 }
                 lights.push(origin + IVec3::new(x as i32, y as i32, z as i32));
@@ -378,8 +458,9 @@ pub fn seed_new_chunk(map: &ChunkMap, tables: &Tables, coord: IVec2, lights: &mu
                 if tables.opaque[id as usize] {
                     continue;
                 }
-                let offer = offered(map.get_light(origin + inside), false);
-                if (0..3).any(|c| light.block[c] < offer.block[c]) || light.sky < offer.sky {
+                let offer =
+                    offered(map.get_light(origin + inside), false, tables.transmission[id as usize]);
+                if (0..3).any(|c| light.block[c] < offer.block[c] || light.sky[c] < offer.sky[c]) {
                     lights.push(origin + outside);
                 }
             }
@@ -409,7 +490,7 @@ impl Plugin for LightPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blocks::{BlockRegistry, AIR};
+    use crate::blocks::{BlockId, BlockRegistry, AIR};
     use crate::config::{block_index, CS, H};
     use crate::world::Chunk;
 
@@ -474,6 +555,162 @@ mod tests {
         v
     }
 
+
+    /// Fills a solid column of `id` from `from` to `to` inclusive.
+    fn fill(map: &mut ChunkMap, from: IVec3, to: IVec3, id: BlockId) {
+        let blocks = map.chunks.get_mut(&IVec2::ZERO).unwrap().blocks.as_mut().unwrap();
+        for z in from.z..=to.z {
+            for y in from.y..=to.y {
+                for x in from.x..=to.x {
+                    blocks[block_index(x as usize, y as usize, z as usize)] = id;
+                }
+            }
+        }
+    }
+
+    /// Opens a shaft to the sky at `(x, z)` from `y_from` upward and relaxes
+    /// until convergence, returning the map ready to inspect.
+    fn light_shaft(map: &mut ChunkMap, tables: &Tables, x: i32, z: i32, y_from: i32) {
+        let top = IVec3::new(x, H as i32 - 1, z);
+        carve(map, IVec3::new(x, y_from, z), top);
+        drain(map, tables, &[top]);
+    }
+
+    #[test]
+    fn a_clear_medium_is_exactly_the_same_as_air() {
+        // The general transmission formula has to collapse to the old
+        // behavior for the overwhelming majority of blocks, or every
+        // existing lighting expectation shifts underneath us.
+        for v in [0u8, 1, 40, MAX_LIGHT] {
+            assert_eq!(attenuate(v, u8::MAX), v, "255 transmission must be a no-op");
+        }
+        assert_eq!(attenuate(MAX_LIGHT, 0), 0, "zero transmission blocks everything");
+    }
+
+    #[test]
+    fn glass_dims_sky_light_only_slightly_but_leaves_dim_it_a_lot() {
+        let (reg, tables, mut map) = setup();
+        let (glass, leaves) = (reg.id("glass"), reg.id("leaves"));
+
+        // Two identical shafts, one capped with glass and one with leaves,
+        // with the cell of interest directly beneath each cap.
+        for (x, id) in [(4, glass), (10, leaves)] {
+            light_shaft(&mut map, &tables, x, 8, 30);
+            fill(&mut map, IVec3::new(x, 34, 8), IVec3::new(x, 34, 8), id);
+            drain(&mut map, &tables, &seeds_around(IVec3::new(x, 34, 8)));
+        }
+
+        let under_glass = map.get_light(IVec3::new(4, 33, 8)).sky;
+        let under_leaves = map.get_light(IVec3::new(10, 33, 8)).sky;
+        assert!(
+            under_glass.iter().all(|&c| c > 200),
+            "glass should pass nearly all light, got {under_glass:?}"
+        );
+        assert!(
+            (0..3).all(|c| under_leaves[c] < under_glass[c]),
+            "leaves must dim more than glass: {under_leaves:?} vs {under_glass:?}"
+        );
+    }
+
+    #[test]
+    fn water_tints_sky_light_toward_blue_rather_than_only_darkening_it() {
+        let (reg, tables, mut map) = setup();
+        let water = reg.id("water");
+        light_shaft(&mut map, &tables, 8, 8, 30);
+        // A three-deep pool with open sky above it.
+        fill(&mut map, IVec3::new(8, 32, 8), IVec3::new(8, 34, 8), water);
+        drain(&mut map, &tables, &seeds_around(IVec3::new(8, 33, 8)));
+
+        let deep = map.get_light(IVec3::new(8, 32, 8)).sky;
+        assert!(
+            deep[2] > deep[1] && deep[1] > deep[0],
+            "water should leave blue strongest and red weakest, got {deep:?}"
+        );
+        assert!(deep[2] > 0, "blue should still reach the bottom of a shallow pool");
+        // The point of storing three channels: this is a *tint*, not just a
+        // dimming. A single-channel sky light could only have made this
+        // darker, never bluer.
+        assert!(
+            deep[2] as u32 * 100 / (deep[0] as u32).max(1) > 130,
+            "expected a visible blue/red imbalance, got {deep:?}"
+        );
+    }
+
+    #[test]
+    fn stacked_media_compose_so_glass_under_water_differs_from_glass_alone() {
+        // The case that motivated per-channel transmission: what reaches you
+        // through glass with water on top of it must differ from what
+        // reaches you through glass alone.
+        let (reg, tables, mut map) = setup();
+        let (glass, water) = (reg.id("glass"), reg.id("water"));
+
+        light_shaft(&mut map, &tables, 4, 8, 30);
+        fill(&mut map, IVec3::new(4, 34, 8), IVec3::new(4, 34, 8), glass);
+        drain(&mut map, &tables, &seeds_around(IVec3::new(4, 34, 8)));
+
+        light_shaft(&mut map, &tables, 10, 8, 30);
+        fill(&mut map, IVec3::new(10, 34, 8), IVec3::new(10, 34, 8), glass);
+        fill(&mut map, IVec3::new(10, 35, 8), IVec3::new(10, 36, 8), water);
+        drain(&mut map, &tables, &seeds_around(IVec3::new(10, 35, 8)));
+
+        let glass_only = map.get_light(IVec3::new(4, 33, 8)).sky;
+        let through_both = map.get_light(IVec3::new(10, 33, 8)).sky;
+
+        assert!(
+            (0..3).all(|c| through_both[c] < glass_only[c]),
+            "water above glass must cost light in every channel: \
+             {through_both:?} vs {glass_only:?}"
+        );
+        // ...and cost it *unequally*, which is what makes the pair
+        // qualitatively different rather than just dimmer.
+        let glass_ratio = glass_only[0] as f32 / glass_only[2] as f32;
+        let both_ratio = through_both[0] as f32 / through_both[2] as f32;
+        assert!(
+            both_ratio < glass_ratio * 0.9,
+            "the water should skew the color balance, not just scale it: \
+             {both_ratio} vs {glass_ratio}"
+        );
+    }
+
+    #[test]
+    fn transmission_multiplies_so_repeated_panes_keep_adding_up() {
+        // The reason transmission is a multiplicative fraction on a fine
+        // scale rather than a subtracted number of levels: on the old
+        // 0..=16 scale a 2% absorption rounded to zero, so any number of
+        // panes of glass in a row blocked exactly nothing.
+        let (reg, tables, mut map) = setup();
+        let glass = reg.id("glass");
+        light_shaft(&mut map, &tables, 8, 8, 20);
+        fill(&mut map, IVec3::new(8, 30, 8), IVec3::new(8, 37, 8), glass);
+        drain(&mut map, &tables, &seeds_around(IVec3::new(8, 34, 8)));
+
+        let above = map.get_light(IVec3::new(8, 37, 8)).sky[0];
+        let below = map.get_light(IVec3::new(8, 30, 8)).sky[0];
+        assert!(
+            below < above,
+            "eight panes of glass should cost something, got {below} under {above}"
+        );
+    }
+
+    #[test]
+    fn an_opaque_block_blocks_light_whatever_its_transmission_says() {
+        // `transmission` is meaningless for a block light can't enter, and
+        // the tables resolve that once rather than making every consumer
+        // check two fields that could disagree.
+        let (reg, tables, _) = setup_with(|reg| {
+            reg.register(crate::blocks::BlockDef {
+                id: "bogus".into(),
+                transparency: crate::blocks::Transparency::No,
+                transmission: crate::blocks::Transmission::Uniform(1.0),
+                textures: crate::blocks::FaceTextures::all("stone"),
+                ..crate::blocks::BlockDef::default()
+            });
+        });
+        let bogus = reg.id("bogus") as usize;
+        assert!(tables.opaque[bogus]);
+        assert_eq!(tables.transmission[bogus], [0; 3], "opaque wins over transmission");
+    }
+
     #[test]
     fn relax_improves_or_empties_but_never_settles_for_worse() {
         assert_eq!(relax(5, 9), 9, "a better candidate is accepted");
@@ -498,7 +735,11 @@ mod tests {
         for d in LIGHT_NEIGHBORS {
             for step in 1..=5u8 {
                 let at = map.get_light(center + d * step as i32).block[0];
-                assert_eq!(at, emission - step, "direction {d:?}, {step} blocks out");
+                assert_eq!(
+                    at,
+                    emission - LEVEL_STEP * step,
+                    "direction {d:?}, {step} blocks out"
+                );
             }
         }
     }
@@ -521,8 +762,8 @@ mod tests {
         drain(&mut map, &tables, &seeds_around(torch_pos));
 
         let emission = tables.light[torch as usize][0];
-        assert_eq!(map.get_light(IVec3::new(6, 32, 8)).block[0], emission - 1);
-        assert_eq!(map.get_light(IVec3::new(7, 32, 8)).block[0], emission - 2);
+        assert_eq!(map.get_light(IVec3::new(6, 32, 8)).block[0], emission - LEVEL_STEP);
+        assert_eq!(map.get_light(IVec3::new(7, 32, 8)).block[0], emission - 2 * LEVEL_STEP);
         assert_eq!(map.get_light(wall).block, [0; 3], "the wall itself holds no light");
         for x in 9..=12 {
             assert_eq!(
@@ -579,7 +820,7 @@ mod tests {
         // removal cascade swept through.
         for x in 5..14 {
             let pos = IVec3::new(x, 32, 8);
-            let expected = emission - (b.x - x) as u8;
+            let expected = emission - LEVEL_STEP * (b.x - x) as u8;
             assert_eq!(map.get_light(pos).block[0], expected, "at x={x}");
         }
     }
@@ -591,7 +832,7 @@ mod tests {
             for (id, color) in [("red_lamp", [255, 0, 0]), ("blue_lamp", [0, 0, 255])] {
                 reg.register(crate::blocks::BlockDef {
                     id: id.into(),
-                    light: crate::blocks::LightSpec { level: MAX_LIGHT as u32, color },
+                    light: crate::blocks::LightSpec { level: MAX_LEVEL, color },
                     textures: crate::blocks::FaceTextures::all("stone"),
                     ..crate::blocks::BlockDef::default()
                 });
@@ -607,8 +848,8 @@ mod tests {
         drain(&mut map, &tables, &[seeds_around(a), seeds_around(b)].concat());
 
         let mid = map.get_light(IVec3::new(7, 32, 8)).block;
-        assert_eq!(mid[0], MAX_LIGHT - 3, "red arrives from 3 blocks away");
-        assert_eq!(mid[2], MAX_LIGHT - 3, "blue arrives from 3 blocks away");
+        assert_eq!(mid[0], MAX_LIGHT - 3 * LEVEL_STEP, "red arrives from 3 blocks away");
+        assert_eq!(mid[2], MAX_LIGHT - 3 * LEVEL_STEP, "blue arrives from 3 blocks away");
         assert_eq!(mid[1], 0, "neither lamp emits green, so green stays dark");
         // Right next to the red lamp, red is strong and blue is weak: the
         // channels genuinely travel independently rather than being one
@@ -631,11 +872,11 @@ mod tests {
         for y in 20..H as i32 {
             assert_eq!(
                 map.get_light(IVec3::new(x, y, z)).sky,
-                MAX_LIGHT,
+                [MAX_LIGHT; 3],
                 "shaft should stay at full sky light at y={y}"
             );
         }
-        assert_eq!(map.get_light(IVec3::new(x, 19, z)).sky, 0, "solid floor below the shaft");
+        assert_eq!(map.get_light(IVec3::new(x, 19, z)).sky, [0; 3], "solid floor below the shaft");
     }
 
     #[test]
@@ -649,7 +890,7 @@ mod tests {
         for (step, x) in (9..=13).enumerate() {
             assert_eq!(
                 map.get_light(IVec3::new(x, 20, 8)).sky,
-                MAX_LIGHT - (step as u8 + 1),
+                [MAX_LIGHT - LEVEL_STEP * (step as u8 + 1); 3],
                 "sky light {} blocks into the tunnel",
                 step + 1
             );
@@ -667,7 +908,7 @@ mod tests {
 
         let lit = map.get_light(pos + IVec3::X);
         assert!(lit.block[0] > 0, "torch light reached it");
-        assert_eq!(lit.sky, 0, "a sealed pocket gets no sky light, however bright the torch");
+        assert_eq!(lit.sky, [0; 3], "a sealed pocket gets no sky light, however bright the torch");
     }
 
     #[test]

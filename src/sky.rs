@@ -104,6 +104,28 @@ pub const DAY_SECONDS: f32 = 20.0 * 60.0;
 pub const NIGHT_SECONDS: f32 = 10.0 * 60.0;
 pub const CYCLE_SECONDS: f32 = DAY_SECONDS + NIGHT_SECONDS;
 
+/// Where a genuinely brand-new world's clock starts - `world.rs`'s
+/// `enter_world` uses this instead of the literal `elapsed = 0.0` dawn
+/// instant, which is deliberately near-black (`DayNightClock::elapsed`'s own
+/// doc comment: "the sun exactly on the eastern horizon, about to rise").
+/// That's correct as the mathematical zero point of the cycle, and correct
+/// for what an *existing* save missing this field resumes at (see
+/// `save::SaveStore::world_data_exists`), but it is a bad first frame for a
+/// player who just clicked "Create": reported as "the world starts at 1pm"
+/// even though the sun's position was right, because a screen that's
+/// nearly black doesn't read as "sunrise," it reads as "night," and the
+/// far more noticeable thing is how fast it then brightens (`daylight`'s
+/// derivative - proportional to `cos(phase_angle)` - peaks at the literal
+/// zero instant and eases off approaching noon, so the steepest climb in
+/// the entire cycle happens in a new world's very first few real minutes).
+///
+/// `0.2` puts the sun 36 degrees above the horizon (`daylight() ≈ 0.59`,
+/// chunk brightness ≈0.68 of the way from `NIGHT_LIGHT` to `DAY_LIGHT`) -
+/// clearly still morning, not yet approaching the `PI/2` (`0.5`) zenith a
+/// real "1pm" would need, but bright and blue-skied immediately rather than
+/// needing several real minutes to stop looking like night.
+pub const NEW_WORLD_START_TIME: f32 = DAY_SECONDS * 0.2;
+
 /// A "month" is defined to exactly match the moon's own 8-phase cycle, so
 /// every month's full moon (`moon_phase() == 4`) always falls on the same
 /// day-of-month. A "year" is a plain 12-month calendar, same ordering as

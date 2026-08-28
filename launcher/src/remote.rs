@@ -28,6 +28,77 @@ pub struct RemoteVersion {
     pub download_url: String,
 }
 
+/// The version-slot name the rolling dev build installs under
+/// (`versions/dev/`), and the tag `.github/workflows/dev-build.yml`
+/// publishes to. There's exactly one of these at a time - a new push to
+/// main replaces the previous dev build rather than adding another - so
+/// unlike a real `RemoteVersion` there's no list of them to choose from.
+pub const DEV_VERSION_SLOT: &str = "dev";
+
+/// The rolling "dev" release: the game built straight from `main`, not a
+/// tagged version. See [`fetch_dev_build`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct DevBuild {
+    /// Full 40-character commit sha this build was made from - what
+    /// `Library::dev_commit` compares an installed dev build against to
+    /// decide whether it's stale.
+    pub commit: String,
+    /// First 7 characters of `commit`, for display.
+    pub short_commit: String,
+    pub download_url: String,
+}
+
+/// The one small JSON file `dev-build.yml` publishes alongside the platform
+/// archives on the "dev" release - see that workflow's own comments for why
+/// the commit has to travel this way rather than being inferred from the
+/// release's name/date.
+#[derive(serde::Deserialize)]
+struct DevManifest {
+    commit: String,
+}
+
+/// Looks up the current rolling dev build, if this platform has one.
+/// `Ok(None)` covers both "no 'dev' release exists yet" (the workflow has
+/// never run) and "it exists but hasn't built for this platform" - neither
+/// is an error, both just mean there's nothing to offer right now.
+pub fn fetch_dev_build() -> Result<Option<DevBuild>, String> {
+    let releases = self_update::backends::github::ReleaseList::configure()
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .build()
+        .and_then(|list| list.fetch())
+        .map_err(|e| e.to_string())?;
+
+    let Some(release) = releases.into_iter().find(|r| r.version == DEV_VERSION_SLOT) else {
+        return Ok(None);
+    };
+    let target = self_update::get_target();
+    let Some(asset) = release.asset_for(target, None) else {
+        return Ok(None);
+    };
+    let Some(manifest_asset) = release.assets.iter().find(|a| a.name == "dev-manifest.json") else {
+        return Ok(None);
+    };
+
+    let bytes = download_bytes(&manifest_asset.download_url)?;
+    let manifest: DevManifest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let short_commit = manifest.commit.chars().take(7).collect();
+
+    Ok(Some(DevBuild { commit: manifest.commit, short_commit, download_url: asset.download_url }))
+}
+
+/// Downloads a small file (not a release archive - no extraction) fully
+/// into memory. Reuses `self_update::Download`, the same primitive
+/// `download_and_extract` builds on, rather than pulling in a second HTTP
+/// client just for this.
+fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let mut download = self_update::Download::from_url(url);
+    download.set_header(http::header::ACCEPT, "application/octet-stream".parse().unwrap());
+    let mut buf = Vec::new();
+    download.download_to(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
 /// Live progress for an in-flight download, shared with the UI thread.
 /// Bytes only - GitHub's release listing doesn't carry asset sizes, so
 /// there's no honest total to show a percentage against, and inventing one
@@ -58,10 +129,25 @@ impl<W: Write> Write for CountingWriter<W> {
     }
 }
 
-/// Every published release that ships a build for the platform we're running
-/// on, newest first. A release with no matching asset (a platform that
-/// failed to build, or one added later) is skipped rather than listed as
-/// something that can't actually be installed.
+/// Every published *game* release that ships a build for the platform we're
+/// running on, newest first. A release with no matching asset (a platform
+/// that failed to build, or one added later) is skipped rather than listed
+/// as something that can't actually be installed.
+///
+/// This repo also publishes releases that are not game versions at all -
+/// `launcher-v1.0.2` (the launcher's own updates, see `selfupdate.rs`) and
+/// `dev` (see [`fetch_dev_build`]) - and both would otherwise show up here
+/// too: `self_update::Release::version` is just the tag with a *leading* `v`
+/// stripped (`"launcher-v1.0.2".trim_start_matches('v')` doesn't touch it,
+/// since the tag doesn't start with `v`), and their assets independently
+/// happen to contain the same platform-target substring `asset_for` matches
+/// on. A real game version always starts with a digit (`"1.3.0"`); neither
+/// `"launcher-v1.0.2"` nor `"dev"` do, which is what this filters on rather
+/// than hardcoding the specific other tag prefixes that exist today.
+fn looks_like_a_game_version(version: &str) -> bool {
+    version.starts_with(|c: char| c.is_ascii_digit())
+}
+
 pub fn fetch_releases() -> Result<Vec<RemoteVersion>, String> {
     let releases = self_update::backends::github::ReleaseList::configure()
         .repo_owner(REPO_OWNER)
@@ -73,6 +159,7 @@ pub fn fetch_releases() -> Result<Vec<RemoteVersion>, String> {
     let target = self_update::get_target();
     Ok(releases
         .into_iter()
+        .filter(|release| looks_like_a_game_version(&release.version))
         .filter_map(|release| {
             let asset = release.asset_for(target, None)?;
             Some(RemoteVersion {
@@ -172,6 +259,22 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_versions_are_told_apart_from_the_launchers_own_releases_and_dev_builds() {
+        // Both `"launcher-v1.0.2"` (`self_update`'s own `version` field is
+        // just the tag with a *leading* `v` stripped, which does nothing
+        // here since the tag starts with "launcher") and `"dev"` have,
+        // historically, ended up in the game's version list purely because
+        // their release assets also happen to contain the target-triple
+        // substring `asset_for` matches on - this is the guard that keeps
+        // them out.
+        assert!(looks_like_a_game_version("1.3.0"));
+        assert!(looks_like_a_game_version("0.1.0"));
+        assert!(!looks_like_a_game_version("launcher-v1.0.2"));
+        assert!(!looks_like_a_game_version(DEV_VERSION_SLOT));
+        assert!(!looks_like_a_game_version(""));
+    }
 
     #[test]
     fn archive_name_keeps_the_extension_that_selects_the_decompressor() {

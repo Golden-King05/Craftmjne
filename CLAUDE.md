@@ -942,6 +942,58 @@ etc.) instead of inventing a new approach:
   queue, a rule that can fire on *unchanged* cells is a red flag, because
   the queue's only termination argument is "work is proportional to
   changes."
+- **A percentage-shaped knob needs a storage scale fine enough to hold it -
+  otherwise the schema silently becomes a switch.** Adding per-block light
+  `transmission` ("glass passes 98%, water 65% of red") looked like it only
+  needed a new field, but the light scale was `0..=16`, so 2% of a full
+  level rounded to zero: a hundred panes of glass would have blocked
+  *nothing*, and anything that did round up to 1 was indistinguishable from
+  dense leaves. Two scales now exist deliberately - `MAX_LEVEL` (16) is what
+  `blocks/*.json` authors emission in and still equals a distance in blocks,
+  `MAX_LIGHT` (255) is what's stored, at 1/16th-of-a-level resolution, with
+  `LEVEL_STEP` (16) the per-block falloff so the *range* is unchanged.
+  Keeping authoring in levels while storing in finer units meant making
+  light more precise invalidated zero existing block files. The general
+  shape: when a new field is a fraction/percentage, check what it multiplies
+  against before designing the field, because the quantisation of the
+  *target* decides whether the field can express anything at all.
+- **Transmission is multiplicative, not a subtracted number of levels,
+  because that's what makes stacking compose.** Light crossing glass and
+  then water is scaled by each in turn, so the pair genuinely differs from
+  either alone (the case that motivated the feature). It's per-channel
+  `[r,g,b]` so a medium can absorb colors *unequally* - water eats red and
+  keeps blue, so a pool floor reads blue-green at noon rather than merely
+  darker. `attenuate` returns its input untouched for a transmission of 255,
+  so a clear medium is an exact no-op and every pre-existing lighting
+  expectation is unchanged - same "make the general formula reduce to the
+  old behavior" shape as `mesher.rs`'s `rotated_tile`. Opaque blocks resolve
+  to `[0;3]` in `Tables::transmission` at compile time, so nothing downstream
+  has to consult two fields that could disagree.
+- **Sky light needed three channels to be *tintable*, and the third and
+  fourth floats came from an unused attribute rather than a new one.** A
+  single stored sky value can only ever be scaled, i.e. made darker - it
+  cannot be made bluer, which is exactly what light through water has to be.
+  `LightCell::sky` is `[u8;3]` now (cell storage 4 -> 6 bytes). The vertex
+  side needed three interpolated floats where there was one: red stays in the
+  vertex color's alpha, green and blue ride in `Mesh::ATTRIBUTE_UV_1`
+  (`MeshBucket::sky_gb`), which chunks don't otherwise use since they sample
+  a single atlas. Inserting that attribute is *also* what makes Bevy define
+  `VERTEX_UVS_B` and pass `uv_b` through to the fragment stage, so this
+  needed no custom vertex shader and no `specialize` change - worth
+  preferring precisely because a rendering mistake can't be seen from a
+  remote session with no display. **Do not be tempted to bit-pack three
+  channels into the one spare float**: vertex attributes are interpolated
+  across each triangle, and interpolating packed integers produces garbage
+  between vertices. Each channel needs its own float.
+- **When a lighting change breaks a test, check whether the test's *scene*
+  is what changed meaning.** Two headless tests started failing with values
+  like `[166, 219, 242]` - which is exactly water's transmission applied to
+  full sky. `ChunkMap::surface_y` returns the topmost **solid** block and
+  water isn't solid, so `surface_y + 1` is a *water* cell on any lake
+  column; the tests had always been probing water and it simply hadn't
+  mattered until media started attenuating light. The fix was a
+  `open_air_above_ground` helper that scans for a genuinely dry column
+  rather than trusting a hardcoded one, not touching the production code.
 - **CLAUDE.md's own "measure before assuming an infinite loop" rule paid off
   twice here, in opposite directions.** The first light failure looked like
   slowness (raise the guard?) and was a true non-termination; the fix for
@@ -1042,6 +1094,180 @@ etc.) instead of inventing a new approach:
   that only appeared sometimes. Every temp-dir helper in this repo uses an
   `AtomicU64` counter for exactly this reason; copy that, don't key the
   name on the fixture's contents.
+- **"The mechanism is correct and tested" doesn't mean "there's nothing to
+  fix" - a screenshot can reveal the mechanism was answering the wrong
+  question.** The day/night investigation above concluded the code already
+  did what was asked (dawn = `elapsed 0.0`, correctly persisted) and very
+  nearly stopped there. What actually landed once the user sent a real
+  screenshot: a brand-new world's near-black first frame is a real UX
+  problem even though the *data* is correct, and it's a genuinely different
+  complaint than "the sun's position is wrong." `sky::NEW_WORLD_START_TIME`
+  (`DAY_SECONDS * 0.2` - sun 36° up, `daylight() ≈ 0.59`) is what a
+  brand-new world starts at now, instead of the literal dawn instant.
+  Getting only a *new* world this treatment (not an existing save that
+  merely predates the `time_of_day` field) needed a real distinction
+  `save::SaveStore::world_data_exists` didn't have a reason to draw before -
+  both cases used to reach the same `WorldData::default()` fallback by
+  coincidence, so "does `data.json` exist at all" had to become an explicit
+  check in `world::enter_world`, not just a different default value. Two
+  tests guard the split: one confirms the new starting value, a second
+  (`an_existing_save_still_resumes_at_literal_dawn_not_a_bright_morning`)
+  manufactures an already-saved world and confirms it does *not* get the
+  new-world treatment - verified both actually fail without the
+  `world_data_exists` guard before trusting them, same discipline as every
+  other regression test in this file.
+- **"Enable dev builds" needed a rolling GitHub Release, not a new
+  distribution mechanism, and the game version machinery didn't need to
+  know dev builds exist at all.** Asked for a launcher toggle that installs
+  whatever's on `main` without cutting a real `vX.Y.Z` release each time,
+  the shape that reuses the most existing, working code: `dev-build.yml`
+  builds on every push to `main` and replaces one fixed `dev`-tagged
+  GitHub Release (`gh release delete dev --yes --cleanup-tag || true` then
+  `gh release create dev ... --target "$GITHUB_SHA"` - delete-then-recreate
+  is what actually moves the tag, not an in-place update), reusing the
+  exact staging/packaging steps `release.yml` already has proven working.
+  `remote::fetch_dev_build` finds that one release by its known tag,
+  `remote::install` (already generic over "a URL and a destination
+  directory") installs it into `versions/dev/` exactly like a tagged
+  version installs into `versions/1.3.0/` - `instances.rs`/`launch.rs`
+  needed zero changes, since an `Instance.version` was already just a
+  directory-name string with no assumption it came from a real release.
+  The one genuinely new piece: `self_update::Release` carries no per-build
+  identity for something that isn't semver-tagged, so "is the installed
+  dev build stale" needed a real answer - `dev-manifest.json` (`{"commit":
+  "<sha>"}`), published as an extra release asset alongside the platform
+  archives, is what the commit travels in; `Library::dev_commit`/
+  `record_dev_commit` are the launcher's own bookkeeping for what's
+  actually on disk (a small sidecar file in `versions/dev/`, the one
+  deliberate exception to this module's "no index file, the directory
+  *is* the record" rule - the commit isn't something a directory listing
+  can ever answer on its own).
+- **A GitHub Actions release job needs to filter by asset name, not assume
+  "this repo's releases are all mine to list."** Reported as "the launcher
+  shows its own version in the game's version list": `RemoteVersion`'s
+  fetch matched any release with an asset containing the target-triple
+  substring, and a launcher release's asset name (`craftmjne-launcher-
+  x86_64-...`) contains that substring too, same as a game release's does -
+  `self_update`'s own `version` field (tag with a leading `v` stripped)
+  doesn't filter this out either, since `"launcher-v1.0.2"` doesn't start
+  with `v`. `dev` (this session's own new tag) would have hit the exact
+  same bug. Fixed with `looks_like_a_game_version` (starts with a digit) -
+  deliberately a property of what a real version string looks like, not a
+  list of the other tag prefixes that happen to exist today, so a future
+  tag this repo publishes for some other reason doesn't need this function
+  edited to stay excluded.
+- **A plain (unquoted) YAML `run:` scalar containing `": "` anywhere breaks
+  the parser - `run: |` (a block scalar) is the safe default for any shell
+  command with punctuation, not just multi-line ones.** `dev-build.yml`'s
+  manifest-writing step was originally `run: echo "{\"commit\": \"${{
+  github.sha }}\"}" > dist/dev-manifest.json` on one line - valid-looking
+  bash, but YAML parses an unquoted scalar's `: ` as a mapping key
+  separator wherever it appears, not just at the start, so this failed to
+  parse at all rather than running wrong. Caught by actually validating the
+  YAML (`python3 -c "import yaml; yaml.safe_load(...)"`) before trusting
+  it, the same "verify by actually running it" instinct as everywhere else
+  in this file - a workflow file with a syntax error doesn't even queue,
+  so this would otherwise have surfaced as "nothing happened" on the very
+  first real push, with no clue why from the change itself.
+- **A running process spawning a hidden supervisor of itself to reappear
+  later is exactly the shape antivirus heuristics are built to catch -
+  don't reach for it even when the goal (auto-reopen after a child
+  process exits) sounds like it needs one.** Asked to make the launcher
+  close when a game instance starts and reopen when it closes, the two
+  live options were: (a) exit the launcher and have some second process
+  re-launch it once the game ends, or (b) keep the one launcher process
+  alive, hide its window, and show it again. (a) needs a hand-off - the
+  exiting process re-invoking itself with an internal flag, or a detached
+  helper - which is the "process launches a hidden copy of itself to
+  supervise, then reappears" pattern, structurally identical to what got
+  flagged as suspicious in the old in-game updater's self-replace saga.
+  (b) is `launcher/src/app.rs`'s `play`: `egui::ViewportCommand::
+  Visible(false)`, a background thread `Child::wait()`s on the spawned
+  game (blocking is fine off the UI thread), then `Context::
+  request_repaint()` - documented as safe and expected to call from
+  another thread specifically for this "wake a UI with no live input"
+  case - delivers `JobDone::GameExited` through the same `jobs.rs`
+  channel every other background op already uses, and `poll_jobs` sends
+  `Visible(true)`. One process the whole time, no re-exec, no hand-off
+  to get wrong, and specifically avoids adding a second thing that looks
+  like malware to the exact AV heuristics this project is already fighting.
+- **When something is flagged as suspicious by name (a "sketchy" console
+  window, an AV signature warning) but the underlying mechanism turns out
+  to be correct, check whether the input the mechanism is *reacting to* is
+  actually current before assuming there's a bug to fix.** Asked to fix
+  "the game starting at 1pm instead of dawn," `sky::DayNightClock`'s
+  `elapsed: 0.0` is genuinely dawn (verified via its own doc comment, the
+  `phase_angle`/`daylight` formulas, and a passing integration test
+  literally named `time_of_day_and_moon_phase_persist_across_a_reload`
+  asserting `elapsed == 0.0` for a fresh world) - and checking out the
+  actual tagged `v1.2.4` release confirmed the identical logic was already
+  there, not something only fixed on an unreleased branch. Don't "fix" a
+  mechanism that's already correct and tested just because a symptom was
+  reported against it; ask what's actually being observed instead, since a
+  changed based on a guess at this point risks masking whatever the real
+  cause is.
+- **A version-metadata/code-signing change for a platform you can't compile
+  for is exactly where "verify by actually compiling" (this file's own
+  standing rule) has no cheap way to be followed - that's a reason to hold
+  off, not a reason to skip verification and ship a guess.** Embedding
+  Windows executable version info (`ProductName`/`FileDescription`/etc. via
+  a `build.rs` and `winresource`) was a real, safe-in-principle improvement
+  for the antivirus-flagging complaint, but this environment can only
+  compile for Linux - a wrong method name or field type wouldn't surface
+  until the next real Windows CI run, on a release the user is about to
+  cut. Fetched the crate's docs first rather than trusting memory, and the
+  summary still left the exact `.set()` vs `.set_version_info()` split
+  ambiguous enough not to trust blind. Left it undone and said why, rather
+  than landing a plausible-looking build.rs neither of us could check.
+- **A staging step that cherry-picks individual files instead of copying a
+  directory silently rots the moment new content is added to that
+  directory.** `release.yml`'s "Stage game files" step copied only
+  `textures/blocks/README.md` and `textures/sky/README.md` into the release
+  archive - not the actual `.png` files. That was invisible for a long time
+  because `textures/blocks/` held only a README when the step was written;
+  once `dirt.png`/`stone.png` were added to the repo, every released build
+  silently kept shipping the procedural placeholder art for every block,
+  with the real textures sitting right there in the source tree the whole
+  time and zero error or warning anywhere - `atlas.rs`'s own fallback logic
+  (missing custom texture -> use the procedural painter) is *designed* to
+  degrade silently, which is exactly right for a genuinely absent file and
+  exactly wrong for a packaging bug hiding a file that does exist. Fixed by
+  copying the whole `textures` directory (`cp -r textures "$stage/textures"`)
+  instead of naming individual files, so anything dropped into
+  `textures/blocks/` or `textures/sky/` in the future ships automatically -
+  verified by running the exact staging commands locally and checking the
+  resulting file list, not just reading the YAML and assuming it was right.
+- **A "query everything registered, including future mods" feature needs a
+  registry to query, not a second hardcoded list next to the first one.**
+  Command autocomplete could have been built as its own name list inside
+  `chat.rs`, kept in sync with `commands.rs`'s dispatch `match` by hand - the
+  two would drift the first time either changed without the other.
+  `commands::CommandRegistry` (mirroring `BlockRegistry`'s already-
+  established shape: `with_defaults()` seeds the built-ins, `.register()` is
+  the same call a mod's `build()` would make) is the single source both
+  `execute` and `chat.rs`'s dropdown read from - a command is discoverable
+  in the dropdown *because* it's real, invocable data, not a separately
+  maintained fact about it. The cheats flag moved from `execute`'s call site
+  into `CommandRegistry::execute` itself for the same reason: a mod's
+  command needs to trip it too, and putting the check in every handler would
+  be exactly the kind of fact a mod author could forget to include.
+- **A test whose input coincidentally satisfies the guard some *other* way
+  isn't testing the guard.** The chat autocomplete dropdown stops offering
+  suggestions once a space appears (composing an argument, not still typing
+  the command name) - `command_suggestions`' `rest.contains(char::
+  is_whitespace)` check. The first test written for this used `"/mode c"`/
+  `"/mode "` as inputs and passed - but deleting the guard entirely left it
+  passing too, because no built-in command name contains a space, so
+  `starts_with`'s own length check already rejects any prefix longer than a
+  real name regardless of the guard. The guard only has an observable effect
+  when some registered name's own text would otherwise still prefix-match
+  past the space - reproduced with a test command literally named `"big
+  heal"`, where `"big "` genuinely is a valid prefix of it and only the
+  explicit whitespace check stops it being suggested. Same lesson as
+  CLAUDE.md's other regression-test entries, generalized: before trusting a
+  new test, break the thing it claims to guard and confirm the test actually
+  turns red - a test that stays green either way isn't a regression test,
+  it's a coincidence with good intentions.
 - **The launcher exposed a real packaging bug that had been latent for
   months: the Windows release zip contained only `craftmjne.exe`.** That was
   fine while the only consumer was the old in-game updater, which extracted

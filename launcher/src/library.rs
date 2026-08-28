@@ -65,6 +65,30 @@ impl Library {
     pub fn total_bytes(&self) -> u64 {
         self.installed().iter().map(|v| dir_size(&self.paths.version_dir(v))).sum()
     }
+
+    /// The one deliberate exception to "no index file": which commit the
+    /// currently-installed `dev` build (`remote::DEV_VERSION_SLOT`) was
+    /// built from, read from a small sidecar file the launcher writes
+    /// itself right after installing it (`record_dev_commit`). This can't
+    /// live in the archive the way everything else under `versions/dev/`
+    /// does - the commit isn't known until `dev-build.yml` runs, and the
+    /// game executable itself carries no version string for an unreleased
+    /// build - so it's the launcher's own bookkeeping, same spirit as
+    /// `instances.json`, just scoped to this one directory instead of the
+    /// whole library.
+    pub fn dev_commit(&self) -> Option<String> {
+        std::fs::read_to_string(self.dev_commit_path()).ok().map(|s| s.trim().to_string())
+    }
+
+    /// Records which commit `versions/dev/` now holds - called once, right
+    /// after a dev build finishes installing.
+    pub fn record_dev_commit(&self, commit: &str) -> std::io::Result<()> {
+        std::fs::write(self.dev_commit_path(), commit)
+    }
+
+    fn dev_commit_path(&self) -> PathBuf {
+        self.paths.version_dir(crate::remote::DEV_VERSION_SLOT).join(".dev-commit")
+    }
 }
 
 fn dir_size(dir: &std::path::Path) -> u64 {
@@ -239,5 +263,33 @@ mod tests {
         assert!(library.installed().is_empty());
         assert_eq!(library.total_bytes(), 0);
         assert!(!library.is_installed("1.0.0"));
+    }
+
+    #[test]
+    fn dev_commit_is_none_until_one_is_recorded() {
+        let root = temp_root();
+        let library = Library::new(Paths::at(root.0.clone()));
+        assert_eq!(library.dev_commit(), None);
+
+        install(&library.paths, crate::remote::DEV_VERSION_SLOT, 10);
+        // Installing the build itself doesn't record a commit - that's a
+        // separate, deliberate step (`app.rs`'s `poll_jobs`, on a
+        // successful `JobDone::DevInstalled`), so a dev build that's on
+        // disk but whose commit write somehow didn't happen must read as
+        // unknown rather than silently matching whatever's latest.
+        assert_eq!(library.dev_commit(), None);
+
+        library.record_dev_commit("abc123").unwrap();
+        assert_eq!(library.dev_commit(), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn recording_a_dev_commit_overwrites_the_previous_one() {
+        let root = temp_root();
+        let library = Library::new(Paths::at(root.0.clone()));
+        install(&library.paths, crate::remote::DEV_VERSION_SLOT, 10);
+        library.record_dev_commit("old-sha").unwrap();
+        library.record_dev_commit("new-sha").unwrap();
+        assert_eq!(library.dev_commit(), Some("new-sha".to_string()));
     }
 }
