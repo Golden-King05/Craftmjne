@@ -1116,6 +1116,59 @@ etc.) instead of inventing a new approach:
   new-world treatment - verified both actually fail without the
   `world_data_exists` guard before trusting them, same discipline as every
   other regression test in this file.
+- **"Enable dev builds" needed a rolling GitHub Release, not a new
+  distribution mechanism, and the game version machinery didn't need to
+  know dev builds exist at all.** Asked for a launcher toggle that installs
+  whatever's on `main` without cutting a real `vX.Y.Z` release each time,
+  the shape that reuses the most existing, working code: `dev-build.yml`
+  builds on every push to `main` and replaces one fixed `dev`-tagged
+  GitHub Release (`gh release delete dev --yes --cleanup-tag || true` then
+  `gh release create dev ... --target "$GITHUB_SHA"` - delete-then-recreate
+  is what actually moves the tag, not an in-place update), reusing the
+  exact staging/packaging steps `release.yml` already has proven working.
+  `remote::fetch_dev_build` finds that one release by its known tag,
+  `remote::install` (already generic over "a URL and a destination
+  directory") installs it into `versions/dev/` exactly like a tagged
+  version installs into `versions/1.3.0/` - `instances.rs`/`launch.rs`
+  needed zero changes, since an `Instance.version` was already just a
+  directory-name string with no assumption it came from a real release.
+  The one genuinely new piece: `self_update::Release` carries no per-build
+  identity for something that isn't semver-tagged, so "is the installed
+  dev build stale" needed a real answer - `dev-manifest.json` (`{"commit":
+  "<sha>"}`), published as an extra release asset alongside the platform
+  archives, is what the commit travels in; `Library::dev_commit`/
+  `record_dev_commit` are the launcher's own bookkeeping for what's
+  actually on disk (a small sidecar file in `versions/dev/`, the one
+  deliberate exception to this module's "no index file, the directory
+  *is* the record" rule - the commit isn't something a directory listing
+  can ever answer on its own).
+- **A GitHub Actions release job needs to filter by asset name, not assume
+  "this repo's releases are all mine to list."** Reported as "the launcher
+  shows its own version in the game's version list": `RemoteVersion`'s
+  fetch matched any release with an asset containing the target-triple
+  substring, and a launcher release's asset name (`craftmjne-launcher-
+  x86_64-...`) contains that substring too, same as a game release's does -
+  `self_update`'s own `version` field (tag with a leading `v` stripped)
+  doesn't filter this out either, since `"launcher-v1.0.2"` doesn't start
+  with `v`. `dev` (this session's own new tag) would have hit the exact
+  same bug. Fixed with `looks_like_a_game_version` (starts with a digit) -
+  deliberately a property of what a real version string looks like, not a
+  list of the other tag prefixes that happen to exist today, so a future
+  tag this repo publishes for some other reason doesn't need this function
+  edited to stay excluded.
+- **A plain (unquoted) YAML `run:` scalar containing `": "` anywhere breaks
+  the parser - `run: |` (a block scalar) is the safe default for any shell
+  command with punctuation, not just multi-line ones.** `dev-build.yml`'s
+  manifest-writing step was originally `run: echo "{\"commit\": \"${{
+  github.sha }}\"}" > dist/dev-manifest.json` on one line - valid-looking
+  bash, but YAML parses an unquoted scalar's `: ` as a mapping key
+  separator wherever it appears, not just at the start, so this failed to
+  parse at all rather than running wrong. Caught by actually validating the
+  YAML (`python3 -c "import yaml; yaml.safe_load(...)"`) before trusting
+  it, the same "verify by actually running it" instinct as everywhere else
+  in this file - a workflow file with a syntax error doesn't even queue,
+  so this would otherwise have surfaced as "nothing happened" on the very
+  first real push, with no clue why from the change itself.
 - **A running process spawning a hidden supervisor of itself to reappear
   later is exactly the shape antivirus heuristics are built to catch -
   don't reach for it even when the goal (auto-reopen after a child

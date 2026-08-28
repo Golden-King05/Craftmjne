@@ -63,11 +63,20 @@ impl Instance {
     }
 }
 
-/// The whole instance list, as stored in `instances.json`.
+/// The whole instance list, as stored in `instances.json` - the launcher's
+/// one persisted-preferences file, so a single extra boolean lives here
+/// rather than in a dedicated file of its own.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Instances {
     #[serde(default)]
     pub items: Vec<Instance>,
+    /// Whether the Versions tab offers the rolling "dev" build (built
+    /// straight from `main` by `.github/workflows/dev-build.yml`, not a
+    /// tagged release - see `remote::fetch_dev_build`). Off by default: an
+    /// unstable, untested build shouldn't be one click away for someone who
+    /// never asked for it.
+    #[serde(default)]
+    pub dev_builds_enabled: bool,
 }
 
 impl Instances {
@@ -166,6 +175,21 @@ mod tests {
 
         let loaded = Instances::load(&path);
         assert_eq!(loaded.items, instances.items);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_builds_enabled_round_trips_through_disk_and_defaults_to_off() {
+        let dir = std::env::temp_dir().join(format!("craftmjne-launcher-devflag-{}", std::process::id()));
+        let path = dir.join("instances.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut instances = Instances::default();
+        assert!(!instances.dev_builds_enabled, "off by default - not a click someone didn't ask for");
+        instances.dev_builds_enabled = true;
+        instances.save(&path).unwrap();
+
+        assert!(Instances::load(&path).dev_builds_enabled);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -7,7 +7,7 @@
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use crate::remote::{Progress, RemoteVersion};
+use crate::remote::{DevBuild, Progress, RemoteVersion};
 use crate::selfupdate::SelfUpdate;
 
 /// A finished (or failed) background job.
@@ -18,6 +18,14 @@ pub enum JobDone {
     /// The game process `app.rs`'s `play` spawned and hid the launcher for
     /// has exited - time to show the launcher window again.
     GameExited,
+    /// `remote::fetch_dev_build` finished - `Ok(None)` means no dev build
+    /// exists yet for this platform (not an error, just nothing to offer).
+    DevBuild(Result<Option<DevBuild>, String>),
+    /// A dev build finished downloading. Carries the commit it was
+    /// installed *from* (not re-derived from disk afterward) so
+    /// `app.rs`'s `poll_jobs` can call `Library::record_dev_commit`
+    /// without a second round-trip to figure out what just landed.
+    DevInstalled { commit: String, result: Result<(), String> },
 }
 
 pub struct Jobs {

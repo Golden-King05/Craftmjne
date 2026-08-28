@@ -56,6 +56,21 @@ enum Releases {
     Failed(String),
 }
 
+/// State of the rolling dev-build check (`remote::fetch_dev_build`) -
+/// separate from `Releases` because it only exists once the "Enable dev
+/// builds" toggle is on, and "no dev build has been published yet" is a
+/// real, expected `Failed`-shaped state here rather than the "GitHub is
+/// unreachable" meaning `Releases::Failed` carries.
+enum DevBuildState {
+    /// The toggle hasn't triggered a fetch yet - covers a saved
+    /// `instances.json` that already has it enabled, so a fetch still
+    /// needs to happen once, on the first frame this renders.
+    Idle,
+    Loading,
+    Loaded(remote::DevBuild),
+    Failed(String),
+}
+
 pub struct LauncherApp {
     paths: Paths,
     library: Library,
@@ -63,6 +78,7 @@ pub struct LauncherApp {
     selected: Option<usize>,
     tab: Tab,
     releases: Releases,
+    dev_build: DevBuildState,
     jobs: Jobs,
     downloads: Downloads,
     /// Result of the startup launcher self-check, once it lands.
@@ -81,6 +97,16 @@ impl LauncherApp {
         let staging = paths.staging_dir();
         jobs.spawn(move || JobDone::SelfUpdate(selfupdate::check_and_apply(staging)));
 
+        // Dev builds only get checked if the saved preference already has
+        // them on - unlike the two checks above, this one is opt-in, not
+        // something every launch should spend a request on.
+        let dev_build = if instances.dev_builds_enabled {
+            jobs.spawn(|| JobDone::DevBuild(remote::fetch_dev_build()));
+            DevBuildState::Loading
+        } else {
+            DevBuildState::Idle
+        };
+
         Self {
             library: Library::new(paths.clone()),
             paths,
@@ -88,6 +114,7 @@ impl LauncherApp {
             selected: None,
             tab: Tab::Instances,
             releases: Releases::Loading,
+            dev_build,
             jobs,
             downloads: Downloads::default(),
             self_update: None,
@@ -130,6 +157,26 @@ impl LauncherApp {
                     // what actually brings the window back at all.
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
+                JobDone::DevBuild(Ok(Some(build))) => self.dev_build = DevBuildState::Loaded(build),
+                JobDone::DevBuild(Ok(None)) => {
+                    self.dev_build =
+                        DevBuildState::Failed("No dev build has been published for this platform yet.".to_string());
+                }
+                JobDone::DevBuild(Err(err)) => self.dev_build = DevBuildState::Failed(err),
+                JobDone::DevInstalled { commit, result } => {
+                    self.downloads.finish(remote::DEV_VERSION_SLOT);
+                    self.status = match result {
+                        Ok(()) => match self.library.record_dev_commit(&commit) {
+                            Ok(()) => "Dev build installed.".to_string(),
+                            // The build is on disk and playable either way -
+                            // only the "is it stale" comparison degrades,
+                            // silently reading as "needs update" forever
+                            // until a later install manages to record it.
+                            Err(err) => format!("Dev build installed, but couldn't record its commit: {err}"),
+                        },
+                        Err(err) => format!("Couldn't install the dev build: {err}"),
+                    };
+                }
             }
         }
     }
@@ -146,6 +193,26 @@ impl LauncherApp {
         self.jobs.spawn(move || JobDone::Installed {
             result: remote::install(&url, &dest, &progress),
             version: name,
+        });
+    }
+
+    fn refresh_dev_build(&mut self) {
+        self.dev_build = DevBuildState::Loading;
+        self.jobs.spawn(|| JobDone::DevBuild(remote::fetch_dev_build()));
+    }
+
+    fn start_dev_download(&mut self, build: &remote::DevBuild) {
+        if self.downloads.progress(remote::DEV_VERSION_SLOT).is_some() {
+            return;
+        }
+        let progress = self.downloads.start(remote::DEV_VERSION_SLOT);
+        let dest = self.paths.version_dir(remote::DEV_VERSION_SLOT);
+        let url = build.download_url.clone();
+        let commit = build.commit.clone();
+        self.status = "Downloading the dev build...".to_string();
+        self.jobs.spawn(move || JobDone::DevInstalled {
+            result: remote::install(&url, &dest, &progress),
+            commit,
         });
     }
 
@@ -486,6 +553,92 @@ impl LauncherApp {
                 Ok(()) => format!("Removed Craftmjne {version}. Your worlds are untouched."),
                 Err(err) => format!("Couldn't remove {version}: {err}"),
             };
+        }
+
+        self.dev_build_panel(ui);
+    }
+
+    /// The "Enable dev builds" toggle and, once on, the rolling dev build's
+    /// status - at the bottom of the Versions tab since it's the exception,
+    /// not something most people installing this launcher want to see by
+    /// default. Once installed, a dev build is playable through the exact
+    /// same instance/version machinery as any tagged release - it just
+    /// installs under the fixed `remote::DEV_VERSION_SLOT` ("dev") name
+    /// instead of a version number, so nothing in `instances.rs`/`launch.rs`
+    /// needed to change to support it.
+    fn dev_build_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+
+        let was_enabled = self.instances.dev_builds_enabled;
+        ui.checkbox(
+            &mut self.instances.dev_builds_enabled,
+            "Enable dev builds (unstable - built straight from main, not a real release)",
+        );
+        if self.instances.dev_builds_enabled != was_enabled {
+            self.save_instances();
+            if self.instances.dev_builds_enabled {
+                self.refresh_dev_build();
+            }
+        }
+        if !self.instances.dev_builds_enabled {
+            return;
+        }
+
+        let mut want_refresh = false;
+        let mut to_download_dev: Option<remote::DevBuild> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Dev build").strong());
+            if ui.small_button("Check again").clicked() {
+                want_refresh = true;
+            }
+        });
+
+        match &self.dev_build {
+            // Reached only if the toggle was already on when this app was
+            // constructed and that startup fetch somehow hasn't landed yet
+            // (or, defensively, any other way this state is seen at all) -
+            // the toggle-changed branch above already covers the live
+            // flip-it-on case.
+            DevBuildState::Idle => want_refresh = true,
+            DevBuildState::Loading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Checking for a dev build...");
+                });
+            }
+            DevBuildState::Failed(err) => {
+                ui.colored_label(egui::Color32::from_rgb(230, 130, 130), err);
+            }
+            DevBuildState::Loaded(build) => {
+                let installed_commit = self.library.dev_commit();
+                ui.horizontal(|ui| {
+                    ui.label(format!("Latest: {}", build.short_commit));
+                    if let Some(progress) = self.downloads.progress(remote::DEV_VERSION_SLOT) {
+                        ui.spinner();
+                        ui.label(remote::format_bytes(progress.bytes()));
+                    } else if installed_commit.is_none() {
+                        if ui.button("Download").clicked() {
+                            to_download_dev = Some(build.clone());
+                        }
+                    } else if installed_commit.as_deref() == Some(build.commit.as_str()) {
+                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "Up to date");
+                    } else {
+                        if ui.button("Update").clicked() {
+                            to_download_dev = Some(build.clone());
+                        }
+                        ui.colored_label(egui::Color32::from_rgb(230, 200, 120), "Update available");
+                    }
+                });
+            }
+        }
+
+        if want_refresh {
+            self.refresh_dev_build();
+        }
+        if let Some(build) = to_download_dev {
+            self.start_dev_download(&build);
         }
     }
 }
