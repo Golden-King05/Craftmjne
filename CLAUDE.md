@@ -1169,6 +1169,24 @@ etc.) instead of inventing a new approach:
   in this file - a workflow file with a syntax error doesn't even queue,
   so this would otherwise have surfaced as "nothing happened" on the very
   first real push, with no clue why from the change itself.
+- **egui/eframe does not call `update` on a schedule of its own** - only in
+  response to input, or an explicit `Context::request_repaint_after`. A
+  periodic "check every N seconds while this is open" feature (the dev
+  build panel re-checking for a newer commit once a minute) needs that
+  call issued every frame it's still relevant, re-arming the next wake-up
+  each time, the same way the existing download-progress spinner already
+  had to (`if downloads.is_busy() { ctx.request_repaint_after(200ms) }`) -
+  otherwise the timer field being past due is true in memory but nothing
+  ever calls the code that checks it while the window sits idle with no
+  input. **Order matters when the same tick both fires the action and
+  re-arms the next wait**: computing `request_repaint_after`'s duration
+  from `last_check.elapsed()` *before* an overdue check's own refresh
+  resets that field schedules the next repaint using the stale
+  (already-elapsed, i.e. ~zero) duration, which reschedules almost
+  immediately instead of a minute out. Correct order is refresh-then-
+  reschedule (`if due { refresh() }` - which resets the timestamp -
+  `then` compute the repaint delay from the now-current field), not the
+  other way around.
 - **A running process spawning a hidden supervisor of itself to reappear
   later is exactly the shape antivirus heuristics are built to catch -
   don't reach for it even when the goal (auto-reopen after a child
