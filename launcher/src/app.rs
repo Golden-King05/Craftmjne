@@ -71,6 +71,12 @@ enum DevBuildState {
     Failed(String),
 }
 
+/// How often the Versions tab re-checks the dev build while the toggle is
+/// on and the launcher is open, so "is this stale" stays true without
+/// having to remember to click "Check again" - see `update`'s use of
+/// `last_dev_check`.
+const DEV_BUILD_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub struct LauncherApp {
     paths: Paths,
     library: Library,
@@ -79,6 +85,11 @@ pub struct LauncherApp {
     tab: Tab,
     releases: Releases,
     dev_build: DevBuildState,
+    /// When the dev build was last checked (successfully triggered, not
+    /// necessarily landed yet) - `update` compares this against
+    /// `DEV_BUILD_CHECK_INTERVAL` each frame to decide whether it's due for
+    /// another automatic check.
+    last_dev_check: std::time::Instant,
     jobs: Jobs,
     downloads: Downloads,
     /// Result of the startup launcher self-check, once it lands.
@@ -115,6 +126,7 @@ impl LauncherApp {
             tab: Tab::Instances,
             releases: Releases::Loading,
             dev_build,
+            last_dev_check: std::time::Instant::now(),
             jobs,
             downloads: Downloads::default(),
             self_update: None,
@@ -198,6 +210,7 @@ impl LauncherApp {
 
     fn refresh_dev_build(&mut self) {
         self.dev_build = DevBuildState::Loading;
+        self.last_dev_check = std::time::Instant::now();
         self.jobs.spawn(|| JobDone::DevBuild(remote::fetch_dev_build()));
     }
 
@@ -253,6 +266,20 @@ impl eframe::App for LauncherApp {
         // byte counter actually moves.
         if self.downloads.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        // Re-checks the dev build on a timer while the toggle is on, so
+        // "Update available" stays accurate without needing "Check again"
+        // clicked by hand. `request_repaint_after` is what makes this fire
+        // at all while the window is otherwise idle (egui doesn't call
+        // `update` on a schedule of its own, only in response to input or
+        // an explicit repaint request) - scheduled for exactly when the
+        // next check is actually due, so this isn't polling every frame in
+        // between.
+        if self.instances.dev_builds_enabled {
+            if self.last_dev_check.elapsed() >= DEV_BUILD_CHECK_INTERVAL {
+                self.refresh_dev_build();
+            }
+            ctx.request_repaint_after(DEV_BUILD_CHECK_INTERVAL.saturating_sub(self.last_dev_check.elapsed()));
         }
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
