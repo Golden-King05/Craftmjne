@@ -1166,6 +1166,24 @@ etc.) instead of inventing a new approach:
   summary still left the exact `.set()` vs `.set_version_info()` split
   ambiguous enough not to trust blind. Left it undone and said why, rather
   than landing a plausible-looking build.rs neither of us could check.
+- **A staging step that cherry-picks individual files instead of copying a
+  directory silently rots the moment new content is added to that
+  directory.** `release.yml`'s "Stage game files" step copied only
+  `textures/blocks/README.md` and `textures/sky/README.md` into the release
+  archive - not the actual `.png` files. That was invisible for a long time
+  because `textures/blocks/` held only a README when the step was written;
+  once `dirt.png`/`stone.png` were added to the repo, every released build
+  silently kept shipping the procedural placeholder art for every block,
+  with the real textures sitting right there in the source tree the whole
+  time and zero error or warning anywhere - `atlas.rs`'s own fallback logic
+  (missing custom texture -> use the procedural painter) is *designed* to
+  degrade silently, which is exactly right for a genuinely absent file and
+  exactly wrong for a packaging bug hiding a file that does exist. Fixed by
+  copying the whole `textures` directory (`cp -r textures "$stage/textures"`)
+  instead of naming individual files, so anything dropped into
+  `textures/blocks/` or `textures/sky/` in the future ships automatically -
+  verified by running the exact staging commands locally and checking the
+  resulting file list, not just reading the YAML and assuming it was right.
 - **A "query everything registered, including future mods" feature needs a
   registry to query, not a second hardcoded list next to the first one.**
   Command autocomplete could have been built as its own name list inside
