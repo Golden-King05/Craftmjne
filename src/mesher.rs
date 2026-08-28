@@ -228,6 +228,25 @@ pub struct MeshBucket {
     /// and interpolating packed integers produces garbage between vertices.
     /// Each channel needs its own interpolated float.
     pub sky_gb: Vec<[f32; 2]>,
+    /// Biome tint (`biome::grass_tint`) for a tinted face (`Tables::
+    /// tinted`), `[1.0, 1.0, 1.0]` (a multiply no-op) for every other -
+    /// uploaded as `Mesh::ATTRIBUTE_NORMAL`.
+    ///
+    /// Chunks have no real normals to lose: this material is fully unlit
+    /// (see the module docs), so nothing anywhere reads `world_normal` for
+    /// actual lighting math, and the vertex color + `sky_gb` already spent
+    /// every slot this renderer's baked-lighting scheme has. Bevy's
+    /// standard mesh vertex shader forwards `ATTRIBUTE_NORMAL` to the
+    /// fragment stage as `world_normal` for free the moment the attribute
+    /// is present - same "insert the attribute, get a free interpolated
+    /// varying with no custom vertex shader" trick `sky_gb` already uses
+    /// for `ATTRIBUTE_UV_1`. Safe to treat as raw, untransformed color
+    /// data specifically because chunk entities are spawned with a pure
+    /// translation `Transform` (`world.rs`) - no rotation or non-uniform
+    /// scale, so the normal matrix `mesh_normal_local_to_world` applies is
+    /// the identity, and these three floats survive that transform
+    /// completely unchanged.
+    pub tint: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 }
 
@@ -297,7 +316,18 @@ fn vertex_light(padded: &PaddedChunk, tables: &Tables, cells: [usize; 4]) -> ([f
     (block_sum.map(|v| v as f32 * inv), sky_sum.map(|v| v as f32 * inv))
 }
 
-pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
+/// `chunk_origin` is this chunk's world-space `(x, z)` (block coordinates
+/// of its `(0, 0)` corner) - the only reason `biome::grass_tint` needs it
+/// is to convert the mesher's chunk-local `x`/`z` loop variables into the
+/// world columns the biome noise is actually sampled at, so a biome region
+/// reads as continuous across a chunk boundary rather than every chunk
+/// restarting its own local pattern at `(0, 0)`.
+pub fn mesh_chunk(
+    padded: &PaddedChunk,
+    tables: &Tables,
+    biome_noise: &crate::noise::SimplexNoise,
+    chunk_origin: (i32, i32),
+) -> ChunkMeshData {
     debug_assert_eq!(padded.blocks.len(), PAD_XZ * PAD_XZ * PAD_Y);
     debug_assert_eq!(padded.fluid.len(), padded.blocks.len());
     debug_assert_eq!(padded.axis.len(), padded.blocks.len());
@@ -418,6 +448,19 @@ pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
                     let vi = bucket.positions.len() as u32;
                     let mut ao = [1.0f32; 4];
 
+                    // One tint per face, not per corner: unlike AO (which
+                    // genuinely varies per vertex), biome color is the same
+                    // across a whole quad. Indexed by the logical face `f`,
+                    // not the rotation-remapped `tile` - tinted-ness is a
+                    // property of which *slot* a block's `FaceTint` config
+                    // set, independent of which physical tile a rotated
+                    // instance happens to be showing there.
+                    let tint = if tables.tinted[id as usize * 6 + f] {
+                        crate::biome::grass_tint(biome_noise, chunk_origin.0 + x, chunk_origin.1 + z)
+                    } else {
+                        [1.0, 1.0, 1.0]
+                    };
+
                     for (ci, c) in face.corners.iter().enumerate() {
                         let mut bright = 1.0;
                         if !is_translucent {
@@ -462,6 +505,8 @@ pub fn mesh_chunk(padded: &PaddedChunk, tables: &Tables) -> ChunkMeshData {
                         // occupied, so this adds one attribute rather than
                         // moving what was already working.
                         bucket.sky_gb.push([sky_rgb[1] * shade, sky_rgb[2] * shade]);
+                        // See `MeshBucket::tint` - rides in ATTRIBUTE_NORMAL.
+                        bucket.tint.push(tint);
                     }
 
                     if ao[0] + ao[3] > ao[1] + ao[2] {
@@ -490,6 +535,14 @@ mod tests {
         (reg, tables)
     }
 
+    /// A biome noise source for tests that aren't about biome tinting at
+    /// all (every existing test predates this feature, and none of them
+    /// place grass) - the seed is arbitrary since nothing here asserts on
+    /// its output.
+    fn no_tint() -> crate::noise::SimplexNoise {
+        crate::noise::SimplexNoise::new(0)
+    }
+
     /// Uniform full sky light everywhere, so tests that aren't about
     /// lighting see the same brightness the pre-lighting mesher produced.
     fn lit_padded() -> PaddedChunk {
@@ -503,7 +556,7 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = reg.id("stone");
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert_eq!(mesh.solid.positions.len(), 6 * 4);
         assert_eq!(mesh.solid.indices.len(), 6 * 6);
         assert!(mesh.water.is_empty());
@@ -518,11 +571,11 @@ mod tests {
         // one exposed face at the top only for the interior column we check:
         // actually fully solid volume -> zero faces inside; boundary faces
         // depend on the shell, which is also stone here.
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert!(mesh.solid.is_empty());
         // poke a hole: the neighbouring block gains exactly one face
         padded.blocks[padded_index(8, 30, 8)] = 0;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert_eq!(mesh.solid.positions.len(), 6 * 4); // 6 cavity walls
     }
 
@@ -531,7 +584,7 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = lit_padded();
         padded.blocks[padded_index(4, 10, 4)] = reg.id("water");
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert!(mesh.solid.is_empty());
         assert_eq!(mesh.water.positions.len(), 6 * 4);
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
@@ -545,7 +598,7 @@ mod tests {
         let mut padded = lit_padded();
         padded.blocks[padded_index(4, 10, 4)] = water;
         padded.fluid[padded_index(4, 10, 4)] = 3; // 3 blocks from a source
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         let max_y = mesh.water.positions.iter().map(|p| p[1]).fold(0.0, f32::max);
         assert!(max_y < 10.0 + FLUID_SURFACE);
         assert!(max_y > 10.0);
@@ -560,14 +613,14 @@ mod tests {
         padded.blocks[padded_index(5, 10, 4)] = water;
         padded.fluid[padded_index(4, 10, 4)] = 1;
         padded.fluid[padded_index(5, 10, 4)] = 4; // shallower neighbour
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         // the boundary between them must render a wall face instead of being
         // fully culled (same-id neighbours at equal height cull completely).
         assert!(!mesh.water.is_empty());
 
         // sanity: identical levels on both sides fully cull that face.
         padded.fluid[padded_index(5, 10, 4)] = 1;
-        let level_mesh = mesh_chunk(&padded, &tables);
+        let level_mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
     }
 
@@ -579,7 +632,7 @@ mod tests {
         let mut padded = lit_padded();
         padded.blocks[padded_index(4, 10, 4)] = water;
         padded.blocks[padded_index(5, 10, 4)] = glass;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
 
         // Neither block culls the other's face at their shared boundary
         // (glass has real cutout holes you're meant to see the water
@@ -616,7 +669,7 @@ mod tests {
         padded.fluid[padded_index(4, 11, 4)] = FLUID_SOURCE;
         padded.blocks[padded_index(4, 10, 4)] = water;
         padded.fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
         let sliver = 10.0 + 1.0 / BASE_TILE_SIZE as f32;
@@ -643,7 +696,7 @@ mod tests {
         padded.fluid[padded_index(4, 11, 4)] = FLUID_FALLING;
         padded.blocks[padded_index(4, 10, 4)] = water;
         padded.fluid[padded_index(4, 10, 4)] = FLUID_FALLING;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
 
         let ys: Vec<f32> = mesh.water.positions.iter().map(|p| p[1]).collect();
         let sliver = 10.0 + 1.0 / BASE_TILE_SIZE as f32;
@@ -666,7 +719,7 @@ mod tests {
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = stone;
         padded.blocks[padded_index(9, 31, 8)] = stone; // occluder above the +x neighbour
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         // Some top-face vertex of the base block must now be darker than a
         // fully unoccluded one. AO rides on the sky channel here (the scene
         // has full sky light and no block light), same as it rides on every
@@ -693,7 +746,7 @@ mod tests {
         // ambient floor.
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = stone;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         let top = horizontal_face_color(&mesh, 31.0);
         assert_eq!(top[3], 1.0, "full sky light should reach the alpha channel");
         assert!(
@@ -705,7 +758,7 @@ mod tests {
         let mut padded = PaddedChunk::empty();
         padded.light.fill(LightCell { block: [MAX_LIGHT; 3], sky: [0; 3] });
         padded.blocks[padded_index(8, 30, 8)] = stone;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         let top = horizontal_face_color(&mesh, 31.0);
         assert_eq!(top[3], 0.0, "no sky light");
         assert_eq!(top[0], 1.0, "full block light");
@@ -719,7 +772,7 @@ mod tests {
         // A deep-red light: full red, half green, no blue.
         padded.light.fill(LightCell { block: [MAX_LIGHT, MAX_LIGHT / 2, 0], sky: [0; 3] });
         padded.blocks[padded_index(8, 30, 8)] = stone;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
 
         let top = horizontal_face_color(&mesh, 31.0);
         assert_eq!(top[0], 1.0);
@@ -740,7 +793,7 @@ mod tests {
         let stone = reg.id("stone");
         let mut padded = PaddedChunk::empty(); // no light at all anywhere
         padded.blocks[padded_index(8, 30, 8)] = stone;
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
 
         for c in &mesh.solid.colors {
             assert!(c[0] > 0.0, "nothing should bake to pure black: {c:?}");
@@ -772,7 +825,7 @@ mod tests {
         // the translucent pass.
         padded.blocks[padded_index(4, 30, 4)] = reg.id("stone");
         padded.blocks[padded_index(8, 30, 8)] = reg.id("water");
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
 
         for (name, bucket) in [("solid", &mesh.solid), ("water", &mesh.water)] {
             let n = bucket.positions.len();
@@ -793,6 +846,57 @@ mod tests {
             .find(|(quad, _)| quad.iter().all(|p| p[1] == y))
             .map(|(_, colors)| colors[0])
             .expect("no horizontal face at that height")
+    }
+
+    /// The tint of the first vertex of the horizontal quad sitting at
+    /// height `y` - same matching approach as `horizontal_face_color`.
+    fn horizontal_face_tint(mesh: &ChunkMeshData, y: f32) -> [f32; 3] {
+        mesh.solid
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.solid.tint.chunks_exact(4))
+            .find(|(quad, _)| quad.iter().all(|p| p[1] == y))
+            .map(|(_, tint)| tint[0])
+            .expect("no horizontal face at that height")
+    }
+
+    #[test]
+    fn grass_top_and_sides_are_tinted_but_its_dirt_bottom_is_not() {
+        let (reg, tables) = tables();
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = reg.id("grass");
+        // A real biome noise source: `grass_tint`'s output is a convex
+        // combination of DRY/LUSH/COOL, none of which come anywhere near
+        // [1,1,1] (max channel 0.70), so any real column's tint is
+        // provably distinguishable from the untinted no-op regardless of
+        // which seed/column this happens to land on.
+        let noise = crate::biome::noise_for_seed(42);
+        let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
+
+        assert_ne!(horizontal_face_tint(&mesh, 31.0), [1.0, 1.0, 1.0]); // top
+        assert_eq!(horizontal_face_tint(&mesh, 30.0), [1.0, 1.0, 1.0]); // bottom (dirt.png)
+
+        // The four side faces aren't horizontal, so they aren't reachable
+        // through `horizontal_face_tint` - check every non-horizontal quad
+        // directly instead.
+        let mut side_faces_checked = 0;
+        for (quad, tints) in mesh.solid.positions.chunks_exact(4).zip(mesh.solid.tint.chunks_exact(4)) {
+            if quad.iter().any(|p| p[1] != quad[0][1]) {
+                assert_ne!(tints[0], [1.0, 1.0, 1.0], "untinted side face");
+                side_faces_checked += 1;
+            }
+        }
+        assert_eq!(side_faces_checked, 4);
+    }
+
+    #[test]
+    fn a_block_with_no_tinted_faces_never_gets_a_real_tint() {
+        let (reg, tables) = tables();
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = reg.id("stone");
+        let noise = crate::biome::noise_for_seed(42);
+        let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
+        assert!(mesh.solid.tint.iter().all(|&t| t == [1.0, 1.0, 1.0]));
     }
 
     #[test]
@@ -852,7 +956,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_chunk(&padded, &tables);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert!(mesh.solid.positions.len() > 1000);
         assert_eq!(mesh.solid.positions.len() % 4, 0);
         assert_eq!(mesh.solid.indices.len() / 6, mesh.solid.positions.len() / 4);

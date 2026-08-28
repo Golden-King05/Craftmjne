@@ -37,6 +37,13 @@ const AUTOSAVE_INTERVAL: f32 = 30.0;
 #[derive(Resource, Clone)]
 pub struct WorldGen(pub Arc<TerrainGenerator>);
 
+/// This world's biome noise source (`biome::grass_tint`'s input), seeded
+/// once alongside `WorldGen` and shared read-only with every mesh task -
+/// same lifecycle as `Tables`, and for the same reason: expensive-ish to
+/// build (permutation tables), cheap to share via `Arc` once built.
+#[derive(Resource, Clone)]
+pub struct BiomeNoise(pub Arc<crate::noise::SimplexNoise>);
+
 /// Non-render atlas data (pixel buffer + name->tile map), built at startup.
 #[derive(Resource)]
 pub struct Atlas(pub AtlasData);
@@ -715,6 +722,7 @@ fn enter_world(
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
+    commands.insert_resource(BiomeNoise(Arc::new(crate::biome::noise_for_seed(active.meta.seed))));
     commands.insert_resource(active.meta.mode);
 
     for e in &tasks {
@@ -958,6 +966,7 @@ fn stream_chunks(
     settings: Res<WorldSettings>,
     tables: Res<BlockTables>,
     gen: Res<WorldGen>,
+    biome_noise: Res<BiomeNoise>,
     players: Query<&Player>,
 ) {
     let Ok(player) = players.single() else { return };
@@ -1022,7 +1031,9 @@ fn stream_chunks(
         let version = chunk.version;
         map.mesh_in_flight += 1;
         let tables = tables.0.clone();
-        let task = pool.spawn(async move { mesh_chunk(&padded, &tables) });
+        let biome_noise = biome_noise.0.clone();
+        let chunk_origin = (coord.x * CHUNK_SIZE, coord.y * CHUNK_SIZE);
+        let task = pool.spawn(async move { mesh_chunk(&padded, &tables, &biome_noise, chunk_origin) });
         commands.spawn(MeshTask { coord, version, task });
     }
 

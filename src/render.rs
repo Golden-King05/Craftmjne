@@ -123,6 +123,11 @@ pub fn bucket_to_mesh(bucket: MeshBucket) -> Mesh {
     // stage, which is why `chunk.wgsl` can read it with no custom vertex
     // shader and no `specialize` changes.
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, bucket.sky_gb);
+    // Not a real surface normal - biome tint (see `MeshBucket::tint`).
+    // Inserting this is what makes Bevy's mesh pipeline define
+    // VERTEX_NORMALS and pass world_normal through to the fragment stage,
+    // same free-attribute trick as ATTRIBUTE_UV_1 above.
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, bucket.tint);
     mesh.insert_indices(Indices::U32(bucket.indices));
     mesh
 }

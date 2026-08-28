@@ -20,6 +20,11 @@
 //                  uv_b carries light, not texture coordinates - chunks
 //                  sample a single atlas through uv, and this was the free
 //                  interpolated slot. See `mesher::MeshBucket::sky_gb`.
+//   in.world_normal - not a real surface normal (this material is unlit and
+//                  never does normal-based lighting math): biome tint,
+//                  [1, 1, 1] (a no-op multiply) for every untinted face,
+//                  the real color for a grass_top.png/grass_side.png-style
+//                  grayscale mask. See `mesher::MeshBucket::tint`.
 // max() rather than a sum: a torch shouldn't visibly brighten a surface
 // that's already in full daylight, it should just take over once the sun
 // goes down - per channel, so a colored light still reads as colored
@@ -50,7 +55,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let sky = vec3<f32>(in.color.a, in.uv_b.x, in.uv_b.y) * params.sky_light.rgb;
     let light = max(in.color.rgb, sky);
-    let lit = color.rgb * light;
+    let lit = color.rgb * light * in.world_normal;
     let dist = distance(view.world_position, in.world_position.xyz);
     let fog = smoothstep(params.fog_start, params.fog_end, dist);
     return vec4<f32>(mix(lit, params.fog_color.rgb, fog), color.a * params.base_alpha);
