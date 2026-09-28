@@ -231,6 +231,26 @@ impl LauncherApp {
         });
     }
 
+    /// A dev build that's genuinely newer than what's installed - `None`
+    /// while nothing's installed yet (that's a first-time "Download", not
+    /// an "update," and stays tucked in the Versions tab), already up to
+    /// date, still loading/failed, or a download of it is already under
+    /// way (the Versions tab panel's own spinner is the feedback for that,
+    /// no need to duplicate it in the banner too). Shared by the header
+    /// banner and the Versions tab's own panel so the two can never
+    /// disagree about whether an update exists.
+    fn pending_dev_update(&self) -> Option<remote::DevBuild> {
+        if !self.instances.dev_builds_enabled {
+            return None;
+        }
+        let DevBuildState::Loaded(build) = &self.dev_build else { return None };
+        if self.downloads.progress(remote::DEV_VERSION_SLOT).is_some() {
+            return None;
+        }
+        let installed = self.library.dev_commit()?;
+        (installed != build.commit).then(|| build.clone())
+    }
+
     fn play(&mut self, index: usize, ctx: &egui::Context) {
         let Some(instance) = self.instances.items.get(index).cloned() else { return };
         match launch::launch(&self.library, &instance) {
@@ -314,6 +334,30 @@ impl eframe::App for LauncherApp {
                     ui.label("Restart the launcher to use it.");
                     if let Some(notes) = notes {
                         ui.label(egui::RichText::new(notes).weak());
+                    }
+                });
+                ui.add_space(4.0);
+            });
+        }
+
+        // A dev build update sitting unnoticed at the bottom of the Versions
+        // tab - past a potentially long release list, in small text - is
+        // exactly what happened the first time this shipped: someone who
+        // only ever visits the Instances tab to hit Play had no reason to
+        // see it. This mirrors the launcher-update banner above so "there's
+        // something new to install" reads the same way regardless of which
+        // update it is or which tab you're on.
+        if let Some(build) = self.pending_dev_update() {
+            egui::TopBottomPanel::top("dev-build-update").show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("A new dev build is available ({}).", build.short_commit))
+                            .strong()
+                            .color(egui::Color32::from_rgb(230, 200, 120)),
+                    );
+                    if ui.button("Update now").clicked() {
+                        self.start_dev_download(&build);
                     }
                 });
                 ui.add_space(4.0);
@@ -644,6 +688,7 @@ impl LauncherApp {
             }
             DevBuildState::Loaded(build) => {
                 let installed_commit = self.library.dev_commit();
+                let pending_update = self.pending_dev_update();
                 ui.horizontal(|ui| {
                     ui.label(format!("Latest: {}", build.short_commit));
                     if let Some(progress) = self.downloads.progress(remote::DEV_VERSION_SLOT) {
@@ -653,7 +698,7 @@ impl LauncherApp {
                         if ui.button("Download").clicked() {
                             to_download_dev = Some(build.clone());
                         }
-                    } else if installed_commit.as_deref() == Some(build.commit.as_str()) {
+                    } else if pending_update.is_none() {
                         ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "Up to date");
                     } else {
                         if ui.button("Update").clicked() {

@@ -120,10 +120,27 @@
 //!   `dirt.png` (the same tile plain `dirt` blocks render with) and is
 //!   deliberately left untinted, since tinting that tile would tint dirt
 //!   blocks too.
+//! - `overlay` names, per face, an *extra* biome-tinted texture layered on
+//!   top of that face's own (untinted) texture, instead of tinting the
+//!   face's own texture directly - same `FaceTextures` shape as `textures`.
+//!   For a texture like `grass_side.png` that's only a thin, mostly-
+//!   transparent grass-colored fringe over an otherwise-transparent image
+//!   (matching real Minecraft's own `grass_block_side` + `..._overlay`
+//!   asset split), tinting it directly would leave most of the face
+//!   punched full of holes - the transparent majority gets discarded
+//!   ([`crate::render`]'s `alpha_cutoff`) with nothing opaque underneath.
+//!   `overlay` renders the named texture as a second, always-tinted decal
+//!   quad nudged a hair in front of the face's real (untinted) texture, so
+//!   the transparent parts of the overlay show the base through instead of
+//!   showing nothing. `blocks/grass.json`'s side faces use `textures.side:
+//!   "dirt"` (the plain base) plus `overlay.side: "grass_side"` (the tinted
+//!   fringe on top); its top face has no transparency problem to solve, so
+//!   it just uses plain `tinted.top` on `grass_top.png` directly instead.
+//!   See `mesher.rs`'s overlay decal emission.
 
 use bevy::prelude::*;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -573,6 +590,12 @@ pub struct BlockDef {
     /// Which faces get biome-tinted at mesh time. See [`FaceTint`];
     /// defaults to none, which is what every block wants except grass.
     pub tinted: FaceTint,
+    /// Per-face extra tinted overlay texture, layered over that face's own
+    /// (untinted) texture instead of tinting it directly. See [`FaceTint`]'s
+    /// doc comment and the module docs' `overlay` section for why this is a
+    /// separate mechanism from `tinted` - defaults to no overlay on any
+    /// face, which is every block except grass's sides.
+    pub overlay: FaceTextures,
 }
 
 impl BlockDef {
@@ -588,6 +611,13 @@ impl BlockDef {
             Some(suffix) => format!("{}_{suffix}", self.id),
             None => self.id.clone(),
         }
+    }
+
+    /// This face's overlay texture name, if `overlay` set one - always an
+    /// explicit name (unlike `texture_name`, there's no scheme to fall back
+    /// to for something that doesn't exist on most blocks at all).
+    pub fn overlay_name(&self, face: usize) -> Option<String> {
+        self.overlay.explicit(face).map(str::to_string)
     }
 }
 
@@ -614,6 +644,7 @@ impl Default for BlockDef {
             texture_scheme: TextureScheme::default(),
             textures: FaceTextures::default(),
             tinted: FaceTint::default(),
+            overlay: FaceTextures::default(),
         }
     }
 }
@@ -671,6 +702,8 @@ struct BlockFile {
     textures: FaceTextures,
     #[serde(default)]
     tinted: FaceTint,
+    #[serde(default)]
+    overlay: FaceTextures,
 }
 
 fn default_true() -> bool {
@@ -712,6 +745,7 @@ impl BlockFile {
             texture_scheme: self.texture_scheme,
             textures: self.textures,
             tinted: self.tinted,
+            overlay: self.overlay,
         }
     }
 }
@@ -754,8 +788,24 @@ pub struct Tables {
     /// multiplied onto it at mesh time) - `tinted[id as usize * 6 + face]`,
     /// same indexing as `tiles`, resolved from [`FaceTint`]. `false` (the
     /// atlas sample used untouched) for every face on every block except
-    /// grass's top and sides.
+    /// grass's top.
     pub tinted: Vec<bool>,
+    /// Whether that same face gets an extra tinted overlay decal quad
+    /// layered on top of it at mesh time (`overlay_tile[id*6+face]` names
+    /// which tile) - same indexing as `tiles`, resolved from `BlockDef::
+    /// overlay`. See the module docs' `overlay` section and `mesher.rs`'s
+    /// overlay decal emission. `false` for every face on every block except
+    /// grass's sides.
+    pub has_overlay: Vec<bool>,
+    /// The overlay tile for a face `has_overlay` marks - meaningless
+    /// (reads as tile 0) when `has_overlay` is false for that slot, same
+    /// "gate plus a value that's only meaningful when the gate is set"
+    /// shape as `fluid`/`flow_distance`. Unlike `tiles`, indexed only by
+    /// the logical face `f` - `mesher.rs` doesn't run this through
+    /// `rotated_tile`'s axis remap the way it does the base texture, so a
+    /// rotating block's overlay (none exist yet) would always show its
+    /// configured face regardless of physical orientation.
+    pub overlay_tile: Vec<u16>,
     /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
     /// tile_size` at compile time) - one of `atlas::ALLOWED_TILE_SIZES`.
     pub tile_size: usize,
@@ -884,15 +934,39 @@ impl BlockRegistry {
 
     /// Every distinct texture name any registered block's six faces resolve
     /// to (explicit `textures` overrides and `texture_scheme`-derived names
-    /// alike) - what `world::compile_content` walks before building the
-    /// atlas, so a block whose scheme derives a name nobody registered a
-    /// procedural painter for gets an automatic placeholder instead of
-    /// `compile()` panicking (see `atlas::Painters::ensure_registered`).
+    /// alike, plus any `overlay` names) - what `world::compile_content`
+    /// walks before building the atlas, so a block whose scheme derives a
+    /// name nobody registered a procedural painter for gets an automatic
+    /// placeholder instead of `compile()` panicking (see `atlas::Painters::
+    /// ensure_registered`).
     pub fn texture_names(&self) -> impl Iterator<Item = String> + '_ {
         self.defs
             .iter()
             .skip(1) // AIR has no texture
-            .flat_map(|def| (0..6).map(|face| def.texture_name(face)))
+            .flat_map(|def| (0..6).flat_map(|face| [Some(def.texture_name(face)), def.overlay_name(face)]))
+            .flatten()
+    }
+
+    /// Every texture name that gets biome-tinted, directly (`tinted`) or as
+    /// an overlay decal (`overlay`) - what `world::compile_content` runs
+    /// `atlas::normalize_tint_mask_tile` over after building the atlas, so
+    /// a grayscale mask whose art came out dark/low-contrast (not already a
+    /// bright near-white Minecraft-style mask) still reads at full color
+    /// once tinted. Deliberately a `HashSet`: the same name can be a
+    /// `tinted` face on one block and an `overlay` on another (or repeat
+    /// across faces of the same block), and it only needs normalizing once.
+    pub fn tint_mask_names(&self) -> HashSet<String> {
+        self.defs
+            .iter()
+            .skip(1)
+            .flat_map(|def| {
+                (0..6).flat_map(|face| {
+                    let direct = def.tinted.tinted(face).then(|| def.texture_name(face));
+                    [direct, def.overlay_name(face)]
+                })
+            })
+            .flatten()
+            .collect()
     }
 
     /// Bakes flat lookup tables. `atlas_index` maps texture names -> tiles;
@@ -917,6 +991,8 @@ impl BlockRegistry {
             transmission: vec![[u8::MAX; 3]; n],
             tiles: vec![0; n * 6],
             tinted: vec![false; n * 6],
+            has_overlay: vec![false; n * 6],
+            overlay_tile: vec![0; n * 6],
             tile_size,
             uv_pad,
             uv_span: uv_tile - 2.0 * uv_pad,
@@ -942,6 +1018,13 @@ impl BlockRegistry {
                 });
                 tables.tiles[id * 6 + face] = *tile;
                 tables.tinted[id * 6 + face] = def.tinted.tinted(face);
+                if let Some(overlay_tex) = def.overlay_name(face) {
+                    let overlay = atlas_index.get(&overlay_tex).unwrap_or_else(|| {
+                        panic!("block {:?}: no texture painter registered for overlay {overlay_tex:?}", def.id)
+                    });
+                    tables.has_overlay[id * 6 + face] = true;
+                    tables.overlay_tile[id * 6 + face] = *overlay;
+                }
             }
         }
         self.compiled = true;
@@ -977,22 +1060,30 @@ mod tests {
     }
 
     #[test]
-    fn grass_is_tinted_on_top_and_sides_but_not_its_dirt_bottom() {
+    fn grass_is_tinted_on_top_directly_and_gets_a_tinted_overlay_on_its_sides() {
         let mut reg = BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
         let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let grass = reg.id("grass") as usize;
         let dirt = reg.id("dirt") as usize;
 
-        assert!(tables.tinted[grass * 6 + 2]); // top
+        assert!(tables.tinted[grass * 6 + 2]); // top - tinted directly
         assert!(!tables.tinted[grass * 6 + 3]); // bottom - reuses dirt.png, must stay untinted
+        assert!(!tables.has_overlay[grass * 6 + 2]); // top has no separate overlay
         for face in [0, 1, 4, 5] {
-            assert!(tables.tinted[grass * 6 + face]); // sides
+            assert!(!tables.tinted[grass * 6 + face], "side {face} must not be tinted directly");
+            assert!(tables.has_overlay[grass * 6 + face], "side {face} should get a tinted overlay");
         }
-        // plain dirt blocks must never be tinted just because grass's
-        // bottom face happens to reuse the same tile.
+        // the side's own base tile is dirt - same tile as grass's bottom
+        // face and plain dirt blocks - and the overlay tile is distinct
+        // from it (a different tile, "grass_side").
+        assert_eq!(tables.tiles[grass * 6], tables.tiles[grass * 6 + 3]);
+        assert_ne!(tables.overlay_tile[grass * 6], tables.tiles[grass * 6]);
+        // plain dirt blocks must never be tinted or get an overlay just
+        // because grass's bottom/side base happens to reuse the same tile.
         for face in 0..6 {
             assert!(!tables.tinted[dirt * 6 + face]);
+            assert!(!tables.has_overlay[dirt * 6 + face]);
         }
     }
 
@@ -1007,6 +1098,30 @@ mod tests {
         assert!(tint.tinted(2)); // top
         assert!(!tint.tinted(3)); // bottom
         assert!(!tint.tinted(0)); // side
+    }
+
+    #[test]
+    fn overlay_name_only_answers_for_faces_the_block_actually_set() {
+        let def = BlockDef {
+            id: "widget".into(),
+            overlay: FaceTextures { side: Some("widget_glow".into()), ..FaceTextures::default() },
+            ..BlockDef::default()
+        };
+        assert_eq!(def.overlay_name(0), Some("widget_glow".to_string())); // side
+        assert_eq!(def.overlay_name(2), None); // top
+        assert_eq!(def.overlay_name(3), None); // bottom
+    }
+
+    #[test]
+    fn tint_mask_names_collects_both_directly_tinted_and_overlay_textures() {
+        let reg = BlockRegistry::with_defaults();
+        let names = reg.tint_mask_names();
+        // grass's top is tinted directly, and its side names a
+        // "grass_side" overlay - both must show up, but grass's untinted
+        // dirt-sharing bottom/side base must not pull "dirt" in.
+        assert!(names.contains("grass_top"));
+        assert!(names.contains("grass_side"));
+        assert!(!names.contains("dirt"));
     }
 
     #[test]

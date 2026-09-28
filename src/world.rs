@@ -687,7 +687,15 @@ pub fn compile_content(
     for name in registry.texture_names().collect::<std::collections::HashSet<_>>() {
         painters.ensure_registered(&name);
     }
-    let atlas = build_atlas(&painters);
+    let mut atlas = build_atlas(&painters);
+
+    // Contrast-stretch every texture a block actually tints (directly, or
+    // as an overlay decal) so hand-supplied grayscale mask art that didn't
+    // come out bright/near-white still reads at full color once multiplied
+    // by a biome tint - see `atlas::normalize_tint_mask_tile`'s doc comment.
+    for name in registry.tint_mask_names() {
+        crate::atlas::normalize_tint_mask_tile(&mut atlas, &name);
+    }
 
     // A real invariant check for `/texture-report`'s red tier, not a fixed
     // stub: every name the registry actually needs should have ended up in
