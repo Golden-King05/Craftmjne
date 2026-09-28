@@ -67,6 +67,17 @@ const AO_BRIGHT: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
 /// Pulling each side in by a hair fixes it with no visible seam.
 const COINCIDENT_FACE_BIAS: f32 = 1.0 / 512.0;
 
+/// How far to nudge a tinted overlay decal *outward* (toward the camera),
+/// along its own face's outward normal, from whatever plane the face's
+/// real (untinted) base texture rendered at - the opposite direction from
+/// `COINCIDENT_FACE_BIAS`, and for the same reason: two quads sitting at
+/// the exact same plane z-fight. An overlay is deliberately drawn as a
+/// second, separate quad rather than blended into the base texture at mesh
+/// time, because the tint color it needs depends on world position
+/// (`biome::grass_tint`) and can't be pre-baked into a single static atlas
+/// tile - see the `overlay` section of `blocks.rs`'s module docs.
+const OVERLAY_DECAL_BIAS: f32 = 1.0 / 512.0;
+
 /// Fluid tops sit one sixteenth of a block below the true top - a gameplay-
 /// geometry constant tied to the base 16x16 grid, deliberately independent
 /// of the atlas's actual resolution (`Tables::tile_size`): a hand-supplied
@@ -443,10 +454,6 @@ pub fn mesh_chunk(
                     let bias = if nid != 0 && nid != id { COINCIDENT_FACE_BIAS } else { 0.0 };
 
                     let tile = rotated_tile(tables, id, axis, f) as usize;
-                    let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
-                    let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
-                    let vi = bucket.positions.len() as u32;
-                    let mut ao = [1.0f32; 4];
 
                     // One tint per face, not per corner: unlike AO (which
                     // genuinely varies per vertex), biome color is the same
@@ -461,6 +468,17 @@ pub fn mesh_chunk(
                         [1.0, 1.0, 1.0]
                     };
 
+                    // Per-corner AO and baked light, computed once
+                    // regardless of how many quads this face ends up
+                    // emitting (the base texture, plus an optional tinted
+                    // overlay decal below - see `Tables::has_overlay`):
+                    // neither depends on which texture or tint a particular
+                    // quad samples, only on this face's position and
+                    // neighbourhood.
+                    let mut ao = [1.0f32; 4];
+                    let mut corner_pos = [[0.0f32; 3]; 4];
+                    let mut corner_color = [[0.0f32; 4]; 4];
+                    let mut corner_skygb = [[0.0f32; 2]; 4];
                     for (ci, c) in face.corners.iter().enumerate() {
                         let mut bright = 1.0;
                         if !is_translucent {
@@ -474,15 +492,11 @@ pub fn mesh_chunk(
                         }
                         ao[ci] = bright;
 
-                        bucket.positions.push([
-                            x as f32 + c.pos[0] - bias * face.dir[0],
-                            y as f32 + if c.pos[1] == 1.0 { cap } else { bottom } - bias * face.dir[1],
-                            z as f32 + c.pos[2] - bias * face.dir[2],
-                        ]);
-                        bucket.uvs.push([
-                            tu + tables.uv_pad + c.uv[0] * tables.uv_span,
-                            tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span,
-                        ]);
+                        corner_pos[ci] = [
+                            x as f32 + c.pos[0],
+                            y as f32 + if c.pos[1] == 1.0 { cap } else { bottom },
+                            z as f32 + c.pos[2],
+                        ];
 
                         // The four cells touching this vertex outside the
                         // face - the same neighbourhood the AO above just
@@ -494,27 +508,67 @@ pub fn mesh_chunk(
                             [n_cell, at(c.ao[0]), at(c.ao[1]), at(c.ao[2])],
                         );
                         let shade = face.shade * bright;
-                        bucket.colors.push([
+                        corner_color[ci] = [
                             block_rgb[0].max(AMBIENT_LIGHT) * shade,
                             block_rgb[1].max(AMBIENT_LIGHT) * shade,
                             block_rgb[2].max(AMBIENT_LIGHT) * shade,
                             sky_rgb[0] * shade,
-                        ]);
+                        ];
                         // Sky green/blue ride in UV_1 - see `MeshBucket::
                         // sky_gb`. Red stays in the color alpha it already
                         // occupied, so this adds one attribute rather than
                         // moving what was already working.
-                        bucket.sky_gb.push([sky_rgb[1] * shade, sky_rgb[2] * shade]);
-                        // See `MeshBucket::tint` - rides in ATTRIBUTE_NORMAL.
-                        bucket.tint.push(tint);
+                        corner_skygb[ci] = [sky_rgb[1] * shade, sky_rgb[2] * shade];
                     }
 
-                    if ao[0] + ao[3] > ao[1] + ao[2] {
-                        bucket.indices.extend([vi, vi + 1, vi + 3, vi, vi + 3, vi + 2]);
-                    } else {
-                        bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
+                    // Emits one quad from this face's precomputed per-corner
+                    // AO/light - the base call below, and an optional
+                    // overlay decal call after it, both funnel through here
+                    // so the two can never disagree about AO, lighting, or
+                    // corner winding, only about which tile/tint/plane they
+                    // use.
+                    let mut push_quad = |tile: usize, tint: [f32; 3], quad_bias: f32| {
+                        let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
+                        let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
+                        let vi = bucket.positions.len() as u32;
+                        for (ci, c) in face.corners.iter().enumerate() {
+                            bucket.positions.push([
+                                corner_pos[ci][0] - quad_bias * face.dir[0],
+                                corner_pos[ci][1] - quad_bias * face.dir[1],
+                                corner_pos[ci][2] - quad_bias * face.dir[2],
+                            ]);
+                            bucket.uvs.push([
+                                tu + tables.uv_pad + c.uv[0] * tables.uv_span,
+                                tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span,
+                            ]);
+                            bucket.colors.push(corner_color[ci]);
+                            bucket.sky_gb.push(corner_skygb[ci]);
+                            // See `MeshBucket::tint` - rides in ATTRIBUTE_NORMAL.
+                            bucket.tint.push(tint);
+                        }
+                        if ao[0] + ao[3] > ao[1] + ao[2] {
+                            bucket.indices.extend([vi, vi + 1, vi + 3, vi, vi + 3, vi + 2]);
+                        } else {
+                            bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
+                        }
+                    };
+
+                    push_quad(tile, tint, bias);
+
+                    // A tinted overlay decal (see the module docs' `overlay`
+                    // section in `blocks.rs`, and `OVERLAY_DECAL_BIAS`'s own
+                    // doc comment) - a second, always-tinted quad nudged out
+                    // in front of the base quad just pushed, so an overlay
+                    // texture's transparent majority shows the untinted base
+                    // through it instead of a hole.
+                    if tables.has_overlay[id as usize * 6 + f] {
+                        let overlay_tile = tables.overlay_tile[id as usize * 6 + f] as usize;
+                        let overlay_tint =
+                            crate::biome::grass_tint(biome_noise, chunk_origin.0 + x, chunk_origin.1 + z);
+                        push_quad(overlay_tile, overlay_tint, bias - OVERLAY_DECAL_BIAS);
                     }
                 }
+
             }
         }
     }
@@ -860,8 +914,22 @@ mod tests {
             .expect("no horizontal face at that height")
     }
 
+    /// Every quad in `mesh.solid` that's a vertical (constant-`x`) face,
+    /// as `(shared x, first-vertex tint)` pairs - for isolating one of the
+    /// east/west faces' base-vs-overlay quad pair by their tint, the way
+    /// `horizontal_face_tint` isolates a horizontal one by height.
+    fn constant_x_quads(mesh: &ChunkMeshData) -> Vec<(f32, [f32; 3])> {
+        mesh.solid
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.solid.tint.chunks_exact(4))
+            .filter(|(quad, _)| quad.iter().all(|p| p[0] == quad[0][0]))
+            .map(|(quad, tint)| (quad[0][0], tint[0]))
+            .collect()
+    }
+
     #[test]
-    fn grass_top_and_sides_are_tinted_but_its_dirt_bottom_is_not() {
+    fn grass_top_is_tinted_directly_and_its_dirt_bottom_is_not() {
         let (reg, tables) = tables();
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = reg.id("grass");
@@ -875,18 +943,65 @@ mod tests {
 
         assert_ne!(horizontal_face_tint(&mesh, 31.0), [1.0, 1.0, 1.0]); // top
         assert_eq!(horizontal_face_tint(&mesh, 30.0), [1.0, 1.0, 1.0]); // bottom (dirt.png)
+    }
 
-        // The four side faces aren't horizontal, so they aren't reachable
-        // through `horizontal_face_tint` - check every non-horizontal quad
-        // directly instead.
-        let mut side_faces_checked = 0;
+    #[test]
+    fn grass_sides_get_an_untinted_dirt_base_plus_a_tinted_overlay_decal() {
+        let (reg, tables) = tables();
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = reg.id("grass");
+        let noise = crate::biome::noise_for_seed(42);
+        let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
+
+        // Every side face (4 of them on an isolated block) should now come
+        // in pairs: one untinted base quad (dirt.png) and one tinted
+        // overlay decal (grass_side.png) - not one directly-tinted quad
+        // like the top face.
+        let mut untinted = 0;
+        let mut tinted = 0;
         for (quad, tints) in mesh.solid.positions.chunks_exact(4).zip(mesh.solid.tint.chunks_exact(4)) {
             if quad.iter().any(|p| p[1] != quad[0][1]) {
-                assert_ne!(tints[0], [1.0, 1.0, 1.0], "untinted side face");
-                side_faces_checked += 1;
+                if tints[0] == [1.0, 1.0, 1.0] {
+                    untinted += 1;
+                } else {
+                    tinted += 1;
+                }
             }
         }
-        assert_eq!(side_faces_checked, 4);
+        assert_eq!(untinted, 4, "one untinted dirt base per side face");
+        assert_eq!(tinted, 4, "one tinted overlay decal per side face");
+    }
+
+    #[test]
+    fn the_overlay_decal_sits_nudged_outward_from_its_untinted_base() {
+        let (reg, tables) = tables();
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(8, 30, 8)] = reg.id("grass");
+        let noise = crate::biome::noise_for_seed(42);
+        let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
+
+        // The +x (east) face of an isolated block (only air neighbours, so
+        // no COINCIDENT_FACE_BIAS is in play) sits at the true block
+        // boundary x = 9.0 - the untinted base quad should land exactly
+        // there, and the tinted overlay decal exactly OVERLAY_DECAL_BIAS
+        // further out, matching `OVERLAY_DECAL_BIAS`'s own doc comment.
+        let near_nine = |x: f32| (x - 9.0).abs() < 0.01;
+        let quads = constant_x_quads(&mesh);
+        let base_x = quads
+            .iter()
+            .find(|(x, t)| near_nine(*x) && *t == [1.0, 1.0, 1.0])
+            .map(|(x, _)| *x)
+            .expect("untinted base quad on the +x face");
+        let overlay_x = quads
+            .iter()
+            .find(|(x, t)| near_nine(*x) && *t != [1.0, 1.0, 1.0])
+            .map(|(x, _)| *x)
+            .expect("tinted overlay quad on the +x face");
+        assert_eq!(base_x, 9.0);
+        assert!(
+            (overlay_x - (9.0 + OVERLAY_DECAL_BIAS)).abs() < 1e-6,
+            "overlay should sit exactly OVERLAY_DECAL_BIAS outside the base: got {overlay_x}"
+        );
     }
 
     #[test]

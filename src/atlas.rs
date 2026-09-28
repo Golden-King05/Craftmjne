@@ -331,6 +331,68 @@ fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
     AtlasData { pixels, indices, tile_size, texture_status }
 }
 
+/// Contrast-stretches one already-baked atlas tile's RGB channels so a
+/// hand-supplied biome-tint mask (`grass_top.png`, `grass_side.png`'s
+/// overlay fringe, ...) reads at full color once multiplied by a tint at
+/// render time, instead of muddy and dark. Real art dropped in for this
+/// purpose isn't guaranteed to already be a bright near-white mask (the
+/// convention Minecraft's own resource packs happen to use) - it's
+/// whatever range the artist's grayscale export came out at, and a
+/// dark/narrow range (say 53-79 out of 255) multiplies down to almost
+/// black against any tint. This adapts to each tile's own actual range
+/// instead of assuming one.
+///
+/// A no-op if `name` isn't in this atlas, or if the tile is flat/fully
+/// transparent (nothing to stretch) - callers don't need to check first.
+/// Transparent pixels (alpha 0, an overlay-style mask's "nothing here"
+/// marker - see `mesher.rs`'s overlay decal) are excluded from the
+/// min/max measurement and left untouched, so a mask's real content
+/// drives the stretch rather than being diluted by transparent padding.
+///
+/// Applied as a follow-up pass in `world::compile_content` (over the names
+/// `blocks::BlockRegistry::tint_mask_names` returns) rather than threaded
+/// through `build_atlas` itself, so `build_atlas`'s signature - and every
+/// test that calls it - stays untouched; this only ever needs to run for
+/// the handful of tiles an actual tinted block uses.
+pub fn normalize_tint_mask_tile(atlas: &mut AtlasData, name: &str) {
+    let Some(&tile) = atlas.indices.get(name) else { return };
+    let tile_size = atlas.tile_size;
+    let atlas_px = atlas.atlas_px();
+    let x0 = (tile as usize % ATLAS_TILES) * tile_size;
+    let y0 = (tile as usize / ATLAS_TILES) * tile_size;
+    let idx = |x: usize, y: usize| ((y0 + y) * atlas_px + (x0 + x)) * 4;
+
+    let (mut lo, mut hi) = (255u8, 0u8);
+    for y in 0..tile_size {
+        for x in 0..tile_size {
+            let i = idx(x, y);
+            if atlas.pixels[i + 3] == 0 {
+                continue;
+            }
+            lo = lo.min(atlas.pixels[i]);
+            hi = hi.max(atlas.pixels[i]);
+        }
+    }
+    if hi <= lo {
+        return;
+    }
+
+    const TARGET_MIN: f32 = 200.0;
+    let (lo_f, hi_f) = (lo as f32, hi as f32);
+    for y in 0..tile_size {
+        for x in 0..tile_size {
+            let i = idx(x, y);
+            if atlas.pixels[i + 3] == 0 {
+                continue;
+            }
+            for c in 0..3 {
+                let t = (atlas.pixels[i + c] as f32 - lo_f) / (hi_f - lo_f);
+                atlas.pixels[i + c] = (TARGET_MIN + t * (255.0 - TARGET_MIN)).round() as u8;
+            }
+        }
+    }
+}
+
 /// Runs `paint` into a fresh `BASE_TILE_SIZE` scratch tile (seeded from
 /// `name`, so the same name always paints the same way) and upscales to
 /// `tile_size` if the atlas resolution ended up larger - the one place
@@ -587,6 +649,80 @@ mod tests {
         };
         assert!(tile_alpha(stone).iter().all(|&a| a == 255));
         assert!(tile_alpha(leaves).iter().any(|&a| a == 0));
+    }
+
+    fn set_px(pixels: &mut [u8], atlas_px: usize, x: usize, y: usize, v: u8, a: u8) {
+        let i = (y * atlas_px + x) * 4;
+        pixels[i] = v;
+        pixels[i + 1] = v;
+        pixels[i + 2] = v;
+        pixels[i + 3] = a;
+    }
+
+    fn get_px(atlas: &AtlasData, x: usize, y: usize) -> (u8, u8) {
+        let i = (y * atlas.atlas_px() + x) * 4;
+        (atlas.pixels[i], atlas.pixels[i + 3])
+    }
+
+    /// A single-tile `AtlasData` (tile index 0, i.e. the atlas's top-left
+    /// corner) for `normalize_tint_mask_tile` tests - real callers get an
+    /// `AtlasData` from `build_atlas`, but this function only ever reads
+    /// `pixels`/`indices`/`tile_size`, so a hand-built one is enough and
+    /// avoids writing real PNG files just to vary per-pixel values.
+    fn one_tile_atlas(tile_size: usize, name: &str) -> AtlasData {
+        let atlas_px = ATLAS_TILES * tile_size;
+        AtlasData {
+            pixels: vec![0u8; atlas_px * atlas_px * 4],
+            indices: HashMap::from([(name.to_string(), 0u16)]),
+            tile_size,
+            texture_status: vec![],
+        }
+    }
+
+    #[test]
+    fn normalize_tint_mask_tile_stretches_the_dark_range_up_toward_full_brightness() {
+        let mut atlas = one_tile_atlas(2, "mask");
+        let px = atlas.atlas_px();
+        set_px(&mut atlas.pixels, px, 0, 0, 50, 255); // darkest
+        set_px(&mut atlas.pixels, px, 1, 0, 80, 255); // brightest
+        set_px(&mut atlas.pixels, px, 0, 1, 65, 255); // midpoint
+        set_px(&mut atlas.pixels, px, 1, 1, 50, 255); // ties the darkest
+
+        normalize_tint_mask_tile(&mut atlas, "mask");
+
+        assert_eq!(get_px(&atlas, 0, 0), (200, 255)); // darkest -> TARGET_MIN
+        assert_eq!(get_px(&atlas, 1, 0), (255, 255)); // brightest -> full white
+        assert_eq!(get_px(&atlas, 1, 1), (200, 255));
+        let (mid, _) = get_px(&atlas, 0, 1);
+        assert!((227..=228).contains(&mid), "midpoint should land about halfway: {mid}");
+    }
+
+    #[test]
+    fn normalize_tint_mask_tile_excludes_transparent_pixels_from_the_range_and_leaves_them_untouched() {
+        let mut atlas = one_tile_atlas(2, "mask");
+        let px = atlas.atlas_px();
+        // every opaque pixel is the same value - flat among the pixels that
+        // actually count, so this must stay a no-op...
+        set_px(&mut atlas.pixels, px, 0, 0, 60, 255);
+        set_px(&mut atlas.pixels, px, 1, 0, 60, 255);
+        set_px(&mut atlas.pixels, px, 0, 1, 60, 255);
+        // ...even though a transparent pixel sits at an extreme value that
+        // would otherwise blow the range wide open.
+        set_px(&mut atlas.pixels, px, 1, 1, 255, 0);
+
+        normalize_tint_mask_tile(&mut atlas, "mask");
+
+        assert_eq!(get_px(&atlas, 0, 0), (60, 255));
+        assert_eq!(get_px(&atlas, 0, 1), (60, 255));
+        assert_eq!(get_px(&atlas, 1, 1), (255, 0), "transparent pixel must be left exactly as-is");
+    }
+
+    #[test]
+    fn normalize_tint_mask_tile_is_a_no_op_for_a_name_this_atlas_does_not_have() {
+        let mut atlas = one_tile_atlas(2, "mask");
+        let before = atlas.pixels.clone();
+        normalize_tint_mask_tile(&mut atlas, "does-not-exist");
+        assert_eq!(atlas.pixels, before);
     }
 
     #[test]

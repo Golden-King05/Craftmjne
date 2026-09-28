@@ -1368,3 +1368,57 @@ etc.) instead of inventing a new approach:
   Start Menu concept to offer elsewhere), nothing on another platform ever
   calls into the module, so a stub inside it would be permanently dead
   code rather than a real fallback path.
+- **A "grayscale tint mask" bug report turned out to be two different, real
+  mismatches between what the art files actually contained and what the
+  rendering code assumed - found by decoding the actual PNG pixel bytes,
+  not by guessing from the visual symptom.** Reported as grass "not using
+  textures and tinting whole block": `grass_side.png` turned out to be
+  ~60% fully transparent (alpha 0) except a thin grass-colored fringe at
+  the top - an *overlay* asset (matching real Minecraft's own
+  `grass_block_side` + `..._overlay` split), not a full-face mask - so
+  treating it as the whole face's texture meant most of it got discarded
+  by `chunk.wgsl`'s alpha cutout with nothing opaque behind it.
+  `grass_top.png` (a real full-face mask, no transparency problem) had a
+  separate issue: its grayscale values only spanned 53-79 out of 255, not
+  the bright near-white range a "multiply by tint" scheme assumes, so it
+  read muddy and dark once tinted. Two independent fixes, chosen to adapt
+  to whatever art gets dropped in rather than demand artists re-export
+  differently:
+  - **Overlay compositing**: `BlockDef::overlay` (a `FaceTextures`,
+    mirroring `textures`'s own per-face shape) names an *extra*, always-
+    tinted decal texture layered on top of a face's own plain (untinted)
+    texture, instead of tinting that face's texture directly. `Tables::
+    has_overlay`/`overlay_tile` mirror `tinted`/`tiles`'s exact `[id*6+
+    face]` indexing. `mesher.rs` renders it as a genuinely separate second
+    quad - not a shader-side two-texture blend - because there's no spare
+    vertex attribute left for a second UV (the budget was already fully
+    spent: RGB=block light, A+UV1=sky light, NORMAL=biome tint), and
+    because a decal quad reuses 100% of the existing single-UV pipeline.
+    The overlay quad is nudged outward along the face normal
+    (`OVERLAY_DECAL_BIAS`, the mirror image of the existing
+    `COINCIDENT_FACE_BIAS` z-fight fix - same problem, opposite direction:
+    coincident quads still need separating even when one is *meant* to sit
+    in front of the other) so its transparent majority shows the untinted
+    base through it instead of a hole. `blocks/grass.json`'s side faces
+    now set `"textures": {"side": "dirt"}` (the base) plus `"overlay":
+    {"side": "grass_side"}` (the decal); its top face has no transparency
+    problem to solve, so it keeps the simpler direct `"tinted": {"top":
+    true}` from the previous session. The per-face AO/light/UV-padding
+    math is identical either way, so the mesher's per-face corner loop was
+    restructured once into a `push_quad(tile, tint, bias)` closure over
+    precomputed per-corner data, called once for the base and, when
+    `has_overlay` is set, again for the decal - so the two quads can never
+    disagree about AO, lighting, or triangle winding, only about which
+    tile/tint/plane they use.
+  - **Brightness normalization**: `atlas::normalize_tint_mask_tile`
+    contrast-stretches an already-baked atlas tile's RGB channels (min/max
+    of its *opaque* pixels only, so an overlay's transparent majority
+    doesn't dilute the measurement) up toward a bright target range,
+    applied as a follow-up pass in `world::compile_content` over every
+    name `BlockRegistry::tint_mask_names` reports (both directly-`tinted`
+    faces and `overlay` faces) - deliberately *not* threaded through
+    `build_atlas` itself as a new parameter, which would have rippled
+    through every test that constructs an atlas for no benefit to any of
+    them; this only ever needs to run for the handful of tiles an actual
+    tinted block uses, so a small targeted post-process pass over the
+    already-built pixel buffer was the smaller, more surgical change.
