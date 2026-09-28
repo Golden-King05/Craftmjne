@@ -78,9 +78,9 @@ grass's underside too.
 | `bricks.png` | bricks (all faces) |
 | `coal_ore.png` | coal_ore (all faces) |
 | `cobblestone.png` | cobblestone (all faces) |
-| `dirt.png` | dirt (all faces), grass (bottom) |
+| `dirt.png` | dirt (all faces), grass (bottom, side base) |
 | `glass.png` | glass (all faces) |
-| `grass_side.png` | grass (side faces, tinted) |
+| `grass_side.png` | grass (side overlay, tinted) |
 | `grass_top.png` | grass (top face, tinted) |
 | `gravel.png` | gravel (all faces) |
 | `iron_ore.png` | iron_ore (all faces) |
@@ -103,17 +103,38 @@ that name) forever - either way, nothing crashes.
 
 ## `grass_top.png` / `grass_side.png` are grayscale masks, not flat art
 
-`blocks/grass.json`'s `"tinted": {"top": true, "side": true}` field
-(`src/blocks.rs`'s `FaceTint`/`Tables::tinted`) multiplies a per-column
-biome color (`src/biome.rs`'s `grass_tint`, seeded per world) onto whatever
-these two files sample - the same technique Minecraft's own
-`grass_top.png`/`grass_side.png` + color-map tinting uses. A grayscale
-luminosity mask is what makes that read as natural shading rather than a
-flat wash of one color; a full-color texture here would just get darkened/
-recolored unexpectedly instead. `grass_top_color.png`/`grass_side_color.png`
-are the original flat-color versions, kept alongside in case a future block
-(or a mod) wants plain, untinted grass-style art without going through the
-biome system at all - neither is read by anything right now.
+`blocks/grass.json`'s `"tinted": {"top": true}` field (`src/blocks.rs`'s
+`FaceTint`/`Tables::tinted`) multiplies a per-column biome color
+(`src/biome.rs`'s `grass_tint`, seeded per world) directly onto whatever
+`grass_top.png` samples - the same technique Minecraft's own
+`grass_top.png` + color-map tinting uses. A grayscale luminosity mask is
+what makes that read as natural shading rather than a flat wash of one
+color; a full-color texture here would just get darkened/recolored
+unexpectedly instead. Its own actual grayscale range doesn't need to reach
+full white - `world::compile_content` contrast-stretches whichever tiles
+`BlockRegistry::tint_mask_names` names (this one included) up toward full
+brightness after the atlas is built (`atlas::normalize_tint_mask_tile`),
+so a low-contrast/dark grayscale export still tints at full color instead
+of coming out muddy.
+
+`grass_side.png` is handled differently, because it isn't a full-face
+mask at all: it's a **transparent overlay** - a thin, mostly-see-through
+grass-colored fringe over an otherwise fully-transparent image, matching
+real Minecraft's own `grass_block_side` + `..._overlay` asset split. Using
+it as a direct full-face tint (the way `grass_top.png` works) would leave
+most of the face punched full of holes, since the overlay's transparent
+majority gets discarded with nothing opaque behind it. Instead,
+`blocks/grass.json`'s `"overlay": {"side": "grass_side"}` field
+(`BlockDef::overlay`, a `FaceTextures` mirroring `textures`'s own shape)
+renders it as a *second*, always-tinted decal quad nudged a hair in front
+of the side face's own plain `dirt.png` base (`"textures": {"side":
+"dirt"}`) - see `mesher.rs`'s overlay decal emission and
+`OVERLAY_DECAL_BIAS`. The transparent parts of the overlay then show the
+dirt base through them, and the fringe shows the tint. `grass_top_color.
+png`/`grass_side_color.png` are the original flat-color versions, kept
+alongside in case a future block (or a mod) wants plain, untinted
+grass-style art without going through either mechanism - neither is read
+by anything right now.
 
 ## Where this folder needs to live
 
