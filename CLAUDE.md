@@ -1449,3 +1449,90 @@ etc.) instead of inventing a new approach:
   passes, the same way every other regression test in this file is
   checked: broke `lerp3` (`+ 0.1` on its output) and confirmed the test
   still goes red before restoring it.
+- **The first real biome (`Biome::Snow`) is a trait-method enum, not a
+  hardcoded name check anywhere it matters - the user's own framing for
+  the request ("save this water freezing feature as a biome trait so
+  whenever we institute another cold feature, we can have it do this as
+  well").** `Biome::freezes_water`/`Biome::drier` are the two behaviors
+  `Snow` needs today; a future cold biome (tundra, glacier, ...) gets both
+  just by returning `true` from the same two methods, with zero changes to
+  either `terrain.rs`'s generator or `world.rs`'s runtime freeze rule -
+  neither ever checks `== Biome::Snow` directly. `biome.rs`'s existing
+  grass-tint noise and the new biome-*region* noise are deliberately
+  separate streams (`REGION_SEED_OFFSET`, a much larger `REGION_SCALE`) -
+  a snow-biome column has no grass to tint at all, and conflating the two
+  would mean a change tuned for one cosmetic gradient silently reshaping
+  the other's regions.
+- **A biome-driven height change needs to blend on the same continuous
+  noise value a hard classification thresholds, not step at the
+  classification's own edge.** `Biome::drier` pushes terrain up (so fewer
+  columns dip below `SEA_LEVEL` and form a lake) - if that boost snapped
+  on/off exactly where `biome_at` flips from `Plains` to `Snow`, the biome
+  edge would read as a real elevation cliff, which is far more visually
+  jarring than the existing hard edge in which *texture* a column's
+  surface uses (already accepted at `SNOW_LINE`). `biome::drier_strength`
+  ramps `0.0..=1.0` across a blend window centered on the same
+  `SNOW_THRESHOLD` `biome_at` itself uses (not a second, potentially-
+  disagreeing threshold), so terrain is already rising as a column
+  approaches Snow biome and the elevation change is smooth even though the
+  surface-block change right at the edge still isn't.
+- **A trait property tested by sampling a wide grid, not by trusting the
+  formula - same discipline the grass-tint noise already established.**
+  `SNOW_THRESHOLD` was picked by writing `region_noise_area_fractions_
+  land_in_a_reasonable_range` first (sample a grid across several seeds,
+  assert the measured Snow fraction lands in a sane 5-35% range) and only
+  then choosing a threshold value that passed it, rather than guessing a
+  number against `fbm2`'s own "roughly -1..=1" bound and hoping the area
+  it carves out is reasonable.
+- **Freezing an exposed lake surface only ever needs to look one layer
+  deep, which is what makes it safe to check directly off `BlockSetEvent`
+  instead of a ticked, budgeted queue like `FluidQueue`.** Converting the
+  top water source to ice means whatever's beneath it no longer has air
+  contact at all - there's structurally nothing left to cascade into, so
+  one check per relevant event (the changed position itself, and the cell
+  below it) is the whole rule, unlike fluid spread's genuine multi-step
+  relaxation. It's also why this is written to go through the same
+  `set_block` + a written `BlockSetEvent` a player action would use,
+  *not* `set_fluid_cell`'s player-edit-bypassing sibling: freezing is a
+  one-shot, irreversible transition (water never thaws back in this
+  feature), not a continuously re-derived value the way fluid spread is,
+  so it doesn't share fluid's reason to dodge `EditLog` - `record_edits`
+  picks the written event up for free, which is what makes a frozen cell
+  survive a reload with zero extra persistence code, the same way a
+  player breaking a block does. See `world.rs`'s other simulation-pattern
+  notes for the general version of this "does this write need to dodge
+  the player-edit path" question - the answer here is no, for a different
+  reason than fluid's own "no" would have been.
+- **A system can't take both `EventReader<T>` and `EventWriter<T>` for the
+  *same* event type as separate parameters - Bevy panics at schedule
+  build time (`B0002`, `ResMut<Events<T>>` conflicting with a previous
+  `Res<Events<T>>` access) - and only the real headless integration tests
+  (`tests/headless.rs`, which build an actual `App`/schedule) caught it;
+  every isolated unit test calling the pure `try_freeze_cell` function
+  directly passed the whole time, since they never go through Bevy's
+  schedule at all.** `freeze_exposed_water` needs to both read
+  `BlockSetEvent` (what changed) and write one (the resulting ice
+  placement) in the same system, so it takes `ParamSet<(EventReader
+  <BlockSetEvent>, EventWriter<BlockSetEvent>)>` instead - Bevy's
+  mutually-exclusive-access wrapper built for exactly this "same
+  resource, two conflicting kinds of access, never needed at the same
+  instant" case. General lesson: a pure-function unit test proves the
+  *logic* is right; it says nothing about whether the system wrapping
+  that logic can even be scheduled, which is exactly the gap `tests/
+  headless.rs` exists to cover for this whole codebase.
+- **A test that searches for a column matching a condition has to use the
+  same effective value the code under test actually acts on, or it can
+  pass for the wrong reason.** The first version of `snow_biome_columns_
+  generate_snow_at_low_altitude_not_grass` searched for a column below
+  `SNOW_LINE` using `TerrainGenerator::surface_height` directly - but
+  `generate()` applies `Biome::drier`'s height boost *after* that call, so
+  the column the search found could easily have been boosted back above
+  `SNOW_LINE` by the time terrain actually placed a block there, making
+  the test pass on the pre-existing altitude-cap path even with the new
+  biome-driven override deliberately disabled (caught by breaking the
+  override and finding the test stayed green - the same "does a new test
+  actually turn red" discipline as everywhere else in this file). Fixed by
+  extracting the real formula into `TerrainGenerator::effective_height`
+  (used by both `generate()` and the test) instead of letting the test
+  re-derive its own copy that could quietly drift from the real one.
+

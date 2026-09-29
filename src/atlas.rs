@@ -560,6 +560,22 @@ pub fn default_painters() -> Painters {
         }
     });
 
+    // Pale and cold, like glass, but solid rather than see-through in the
+    // middle (real transparency comes from `transmission`, not alpha
+    // holes) - a few short crack strokes at odd angles read as distinct
+    // from glass's clean long diagonal streaks.
+    p.register("ice", |t, rng| {
+        t.noisy_fill(rng, [176.0, 214.0, 230.0], 14.0);
+        for _ in 0..3 {
+            let x0 = (rng() * 12.0) as i32;
+            let y0 = (rng() * 12.0) as i32;
+            let len = 3 + (rng() * 3.0) as i32;
+            for i in 0..len {
+                t.px((x0 + i).min(15), (y0 + i).min(15), [210.0, 232.0, 240.0]);
+            }
+        }
+    });
+
     // A wall-torch look on every face: a dark backing, a wooden stick up the
     // middle, and a bright flame at the top. The block is a plain solid cube
     // for now (see `blocks/torch.json`) - it's the lighting that makes it a
@@ -634,7 +650,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 19);
+        assert_eq!(a.indices.len(), 20);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

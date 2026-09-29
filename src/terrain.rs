@@ -6,12 +6,21 @@
 //! To customize generation, swap the generator constructed in
 //! `world::compile_content` for your own.
 
+use crate::biome::{self, Biome};
 use crate::blocks::{BlockId, BlockRegistry, Transparency, AIR, AXIS_Y, FLUID_SOURCE};
 use crate::config::{block_index, CHUNK_SIZE, CS, H, SEA_LEVEL, WORLD_HEIGHT};
 use crate::light::{LightCell, MAX_LIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
 
 const SNOW_LINE: i32 = 45;
+
+/// How far a fully `Biome::drier` column's terrain gets pushed above the
+/// plain baseline, at full `biome::drier_strength` - chosen so noticeably
+/// fewer columns dip below `SEA_LEVEL` there (see `generate`'s flooding
+/// loop) without visibly changing the mountain/plains shape language this
+/// generator already has (this only ever *adds* to whatever `detail`/
+/// `mountain` noise already produced).
+const DRIER_HEIGHT_BOOST: f64 = 6.0;
 
 /// A freshly generated chunk's block ids plus its fluid levels. Every
 /// generated fluid cell (currently just sea-level flooding) starts as a
@@ -40,6 +49,7 @@ struct TerrainIds {
     sand: BlockId,
     gravel: BlockId,
     water: BlockId,
+    ice: BlockId,
     log: BlockId,
     leaves: BlockId,
     bedrock: BlockId,
@@ -60,6 +70,13 @@ pub struct TerrainGenerator {
     mountain: SimplexNoise,
     cave_a: SimplexNoise,
     cave_b: SimplexNoise,
+    /// Which biome region a column belongs to - see `biome.rs`'s module
+    /// docs. A separate stream from `terrain`/`mountain` (built via
+    /// `biome::region_noise_for_seed`, the same function `world.rs`'s
+    /// runtime `BiomeMap` resource uses) so both agree on the exact same
+    /// classification for the same seed and column without needing to
+    /// literally share one noise object.
+    biome: SimplexNoise,
 }
 
 impl TerrainGenerator {
@@ -78,6 +95,7 @@ impl TerrainGenerator {
                 sand: reg.id("sand"),
                 gravel: reg.id("gravel"),
                 water: reg.id("water"),
+                ice: reg.id("ice"),
                 log: reg.id("log"),
                 leaves: reg.id("leaves"),
                 bedrock: reg.id("bedrock"),
@@ -89,6 +107,7 @@ impl TerrainGenerator {
             mountain: SimplexNoise::new(seed ^ 0x9e3779b9),
             cave_a: SimplexNoise::new(seed ^ 0x85ebca6b),
             cave_b: SimplexNoise::new(seed ^ 0xc2b2ae35),
+            biome: biome::region_noise_for_seed(seed),
         }
     }
 
@@ -99,6 +118,19 @@ impl TerrainGenerator {
         let detail = self.terrain.fbm2(wx as f64 * 0.011, wz as f64 * 0.011, 4);
         let h = 27.0 + detail * (5.0 + mountain * 24.0) + mountain * 10.0;
         (h.floor() as i32).clamp(2, WORLD_HEIGHT - 8)
+    }
+
+    /// `surface_height`, plus the `Biome::drier` height boost `generate`
+    /// actually places terrain at - what a column's surface height (and
+    /// therefore whether it floods into a lake) really ends up being.
+    /// `surface_height` itself stays biome-blind on purpose (its own
+    /// low-frequency mountain/plains shape has nothing to do with biome
+    /// regions), but anything that needs to know the *real* height a
+    /// specific column generated at - including this generator's own
+    /// tests - has to go through this, not `surface_height` alone.
+    fn effective_height(&self, wx: i32, wz: i32) -> i32 {
+        let boost = biome::drier_strength(&self.biome, wx, wz) as f64 * DRIER_HEIGHT_BOOST;
+        (self.surface_height(wx, wz) + boost.round() as i32).clamp(2, WORLD_HEIGHT - 8)
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> GeneratedChunk {
@@ -112,12 +144,29 @@ impl TerrainGenerator {
             for x in 0..CS {
                 let wx = cx * CHUNK_SIZE + x as i32;
                 let wz = cz * CHUNK_SIZE + z as i32;
-                let h = self.surface_height(wx, wz);
+                let biome = biome::biome_at(&self.biome, wx, wz);
+                // A `Biome::drier` column's terrain sits a bit higher than
+                // the plain baseline (continuously, via `drier_strength` -
+                // no elevation cliff at the biome edge), so fewer of its
+                // columns dip below SEA_LEVEL and flood into a lake below.
+                let h = self.effective_height(wx, wz);
                 heights[x + CS * z] = h;
 
                 let beach = h <= SEA_LEVEL + 1;
                 let snowy = h >= SNOW_LINE;
-                let top_id = if beach { ids.sand } else if snowy { ids.snow } else { ids.grass };
+                // Snow biome always shows snow at the surface - it takes
+                // priority over both the sandy-beach and mountain-altitude
+                // cases, which stay exactly as they were for every other
+                // biome.
+                let top_id = if biome == Biome::Snow {
+                    ids.snow
+                } else if beach {
+                    ids.sand
+                } else if snowy {
+                    ids.snow
+                } else {
+                    ids.grass
+                };
                 let fill_id = if beach { ids.sand } else { ids.dirt };
                 surface[x + CS * z] = top_id;
 
@@ -132,9 +181,16 @@ impl TerrainGenerator {
                         ids.stone
                     };
                 }
-                // Flood water up to sea level.
+                // Flood water up to sea level - in a biome where water
+                // freezes (`Biome::freezes_water`), the exposed top layer
+                // (the only one with air directly above it) generates as
+                // ice instead, matching what `world.rs`'s `freeze_exposed_
+                // water` would convert it to anyway if a later change
+                // exposed a still-liquid top layer to air.
                 for y in (h + 1)..=SEA_LEVEL {
-                    blocks[base + y as usize] = ids.water;
+                    let exposed = y == SEA_LEVEL;
+                    blocks[base + y as usize] =
+                        if exposed && biome.freezes_water() { ids.ice } else { ids.water };
                 }
                 // Gravel patches on the sea floor.
                 if h < SEA_LEVEL && hash2(wx, wz, seed ^ 0x1234) < 0.3 {
@@ -297,5 +353,82 @@ mod tests {
         let a = TerrainGenerator::new(1, &reg).generate(0, 0).blocks;
         let b = TerrainGenerator::new(2, &reg).generate(0, 0).blocks;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn snow_biome_columns_generate_snow_at_low_altitude_not_grass() {
+        let reg = BlockRegistry::with_defaults();
+        let snow = reg.id("snow");
+        let seed = 7;
+        let gen = TerrainGenerator::new(seed, &reg);
+        let noise = crate::biome::region_noise_for_seed(seed);
+
+        // A real Snow-biome column *below* the pre-existing mountain-
+        // altitude SNOW_LINE, so this can only pass because of the biome
+        // itself, not the altitude cap that already put snow on
+        // mountaintops before this feature existed.
+        let mut checked = false;
+        'search: for cx in -20..20 {
+            for cz in -20..20 {
+                let wx = cx * CHUNK_SIZE + 8;
+                let wz = cz * CHUNK_SIZE + 8;
+                if crate::biome::biome_at(&noise, wx, wz) != crate::biome::Biome::Snow {
+                    continue;
+                }
+                if gen.effective_height(wx, wz) >= SNOW_LINE {
+                    continue; // would trivially be snow via altitude anyway
+                }
+                let chunk = gen.generate(cx, cz);
+                let (_, top) = column_top(&chunk, 8, 8);
+                assert_eq!(top, snow, "snow-biome column at ({wx},{wz}) did not generate snow");
+                checked = true;
+                break 'search;
+            }
+        }
+        assert!(checked, "no low-altitude Snow-biome column found in the sampled area");
+    }
+
+    #[test]
+    fn snow_biome_lake_surfaces_generate_as_ice_not_water() {
+        let reg = BlockRegistry::with_defaults();
+        let ice = reg.id("ice");
+        let seed = 7;
+        let gen = TerrainGenerator::new(seed, &reg);
+        let noise = crate::biome::region_noise_for_seed(seed);
+
+        let mut found = false;
+        'search: for cx in -15..15 {
+            for cz in -15..15 {
+                let chunk = gen.generate(cx, cz);
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let wx = cx * CHUNK_SIZE + x as i32;
+                        let wz = cz * CHUNK_SIZE + z as i32;
+                        if crate::biome::biome_at(&noise, wx, wz) != crate::biome::Biome::Snow {
+                            continue;
+                        }
+                        if chunk.blocks[block_index(x, SEA_LEVEL as usize, z)] == ice {
+                            found = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "no snow-biome lake surface generated as ice in the sampled area");
+    }
+
+    /// The topmost non-air block in column `(x, z)`, as `(y, id)` - for
+    /// tests that care about what a real generated column's surface
+    /// actually ended up as, not what `surface_height` alone would predict
+    /// (which doesn't include `generate`'s biome height boost).
+    fn column_top(chunk: &GeneratedChunk, x: usize, z: usize) -> (i32, BlockId) {
+        for y in (0..H).rev() {
+            let id = chunk.blocks[block_index(x, y, z)];
+            if id != AIR {
+                return (y as i32, id);
+            }
+        }
+        panic!("column ({x}, {z}) is entirely air");
     }
 }

@@ -83,6 +83,7 @@ grass's underside too.
 | `grass_side.png` | grass (side overlay, tinted) |
 | `grass_top.png` | grass (top face, tinted) |
 | `gravel.png` | gravel (all faces) |
+| `ice.png` | ice (all faces) |
 | `iron_ore.png` | iron_ore (all faces) |
 | `leaves.png` | leaves (all faces) |
 | `log_side.png` | log (side faces) |
