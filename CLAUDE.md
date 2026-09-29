@@ -1535,4 +1535,114 @@ etc.) instead of inventing a new approach:
   extracting the real formula into `TerrainGenerator::effective_height`
   (used by both `generate()` and the test) instead of letting the test
   re-derive its own copy that could quietly drift from the real one.
+- **"So land doesn't just become one giant undivided landmass" plus "rivers
+  that run high down to sea level, real flow simulation" is two genuinely
+  different features wearing one request - oceans need large-scale
+  *connectivity*, rivers need genuine per-tile *flow accumulation*, and
+  they don't share a mechanism.** Oceans turned out to need no architecture
+  change at all: `terrain.rs`'s `continent`/`CONTINENT_SCALE` is just one
+  more very-low-frequency noise stream blended into height (mirrors the
+  existing `mountain` mask's own low-freq-decides-the-shape pattern),
+  blended toward a real `DEEP_OCEAN_FLOOR` via `surface_height`'s
+  `ocean_t` - still a pure per-column function, zero cross-chunk
+  dependency. Rivers are the opposite: a river's shape is fundamentally
+  non-local (it has to know what's uphill of it, arbitrarily far away), so
+  before writing any code the real fork was surfaced to the user via
+  `AskUserQuestion` - a cheap noise-band approximation (zero architecture
+  change) vs. genuine flow accumulation (needs a precomputed/cached
+  heightmap, a real change to "chunks generate independently"). The user
+  picked real simulation, so `terrain.rs`'s own "no cross-chunk
+  dependencies" invariant (this file's very first line about the module)
+  got its first deliberate, documented exception.
+- **A genuinely global flow simulation has no valid implementation for a
+  chunk generator with no fixed world size** - there's no upper bound on
+  how far upstream a river's catchment could extend in an unbounded world,
+  so "real flow simulation" necessarily means *bounded*-region flow
+  simulation, not literally-global. `terrain.rs`'s `RegionHydrology` picks
+  a large but finite macro-region (`REGION_BLOCKS = 512`, a `FLOW_GRID`
+  cheap enough - 64x64 - to flood/sort every time it's needed) as the
+  honest middle ground the `AskUserQuestion` answer itself named ("world-
+  scale heightmap up front (**or per-region**)"). Each river's drainage
+  basin is confined to one region and its own `sample_carve`'s bilinear
+  lookup deliberately fades any carve to exactly zero at the region's own
+  padded edge (a 1-cell halo forced to zero) - not because that's
+  hydrologically correct, but because it turns an inherent limitation
+  (a river's catchment stopping at an arbitrary line) into something that
+  reads as a minor tributary petering out rather than a visible cliff at a
+  fixed grid coordinate.
+- **A chunk generator whose whole design is "no cross-chunk dependencies,
+  any order, any thread" needs real interior mutability - and a `Mutex`
+  guarding a per-region cache is the right shape specifically because nothing
+  about it needs to be fast under contention.** `TerrainGenerator::hydrology`
+  (`Mutex<HashMap<(i32,i32), Arc<RegionHydrology>>>`) is read from every
+  `generate()` call, across however many chunk-gen tasks `world.rs`'s async
+  compute pool is running at once (up to `MAX_GEN_TASKS`) - but a region is
+  only ever actually *built* once (subsequent lookups for the same key hit
+  the cache), and a build is a few thousand cheap float comparisons, not a
+  hot per-block operation. Two tasks racing to build the same brand-new
+  region just means one of them does a small amount of redundant work
+  before losing the `HashMap::entry` race - correct and cheap either way,
+  so there was no reason to reach for anything more clever (a `RwLock`, a
+  lock-free structure, sharding by region) than the simplest thing that's
+  provably correct.
+- **Give the flow-accumulation algorithm a synthetic input it can be
+  unit-tested against, the same "give tests a way to inject the controlled
+  input a real entry point resolves automatically" split as `atlas::
+  build_atlas`/`build_atlas_from_dir`.** `terrain::carve_from_heights` is
+  the actual steepest-descent-plus-priority-accumulation algorithm, pulled
+  out as a pure function of a plain height slice; `RegionHydrology::build`
+  is the only thing that resolves that input from real noise. A synthetic
+  V-shaped valley (steep side slope, shallow along-valley slope) lets
+  `carve_from_heights_channels_every_column_into_one_widening_stream`
+  assert the *real* algorithm actually channels scattered inflow into one
+  widening stream and carves deepest at the outlet - properties that would
+  be nearly impossible to assert against noise-driven real terrain, where
+  you can't hand-predict what should happen at a given coordinate. Broke
+  the threshold check (`if a > RIVER_THRESHOLD` -> `if false`) and
+  confirmed the test actually goes red before trusting it, per this file's
+  own standing rule.
+- **Hand-picked constants for a brand new noise-driven system are exactly
+  the case this file's "measure, don't assume" rule exists for, and a
+  first guess was wrong in a way that was only visible by measuring, not
+  by reasoning about the formula.** `MAX_ACCUM_FOR_FULL_CARVE` was first
+  guessed at `700` (near `FLOW_GRID`'s full `64*64` cell count, reasoning
+  "a river could in principle drain the whole region") - real fbm terrain
+  never gets close: a throwaway test dumping the actual accumulated-flow
+  grid for several seeds showed real maximums landing around `25-70`, not
+  in the hundreds, because `mountain`/`terrain`'s own local relief (not
+  just the broad regional slope) constantly redirects steepest-descent
+  paths before they can all converge into one channel. Left at `700`, the
+  real rivers this produced were carving only 1-3 blocks deep everywhere -
+  technically "a river" by the `> 0` test that first caught it, but nowhere
+  near strong enough to read as a real feature. Recalibrated to `55`
+  (near the measured ceiling) so a genuinely well-fed real channel reaches
+  full depth. Similarly, `OCEAN_THRESHOLD` was first set assuming "land
+  should stay the clear majority, like before oceans existed" - but a
+  real connectivity test (flood-filling sampled land/ocean grids) showed
+  that with land as the strong majority, land *itself* becomes the one
+  giant connected mass (with the ocean fragmented into many small inland
+  seas) - the exact mirror image of the original complaint, just with the
+  labels swapped. Moving the threshold toward the point where land and
+  ocean are close to evenly split is what actually let *both* sides
+  percolate into multiple large, separate connected regions - a basic
+  percolation-theory fact (a minority phase on a random field fragments;
+  only a share close to 50/50 lets either phase form multiple large
+  components) that wasn't obvious from the formula alone and only showed
+  up by measuring real connected-component sizes.
+- **The "is this really solved" test has to match the user's literal
+  complaint, and the naive version of that test can be topologically
+  impossible to satisfy.** A first attempt at the ocean test asserted a
+  *single* connected ocean covering most of total ocean area, mirroring
+  how `region_noise_area_fractions_land_in_a_reasonable_range` measures a
+  single fraction - but real coastlines legitimately produce several
+  separate seas (Pacific, Atlantic, Indian...), so demanding one dominant
+  basin is stricter than reality itself. `oceans_split_land_into_multiple_
+  masses_separated_by_real_seas` instead asserts what the user actually
+  asked for: at least two *real* (>=1% of sampled area, so a handful of
+  noise-driven single-cell ponds in the long tail don't count) separate
+  landmasses, and at least one ocean basin large enough to read as a real
+  sea - satisfiable by both "two continents, one ocean" and "three
+  continents, several seas," because the user's complaint was about
+  landmass separation existing at all, not about ocean topology
+  specifically.
 

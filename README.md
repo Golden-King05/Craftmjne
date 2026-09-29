@@ -403,7 +403,7 @@ src/
 ├── blocks.rs    # BlockRegistry: loads blocks/*.json -> compiled flat lookup Tables
 ├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
-├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
+├── terrain.rs   # TerrainGenerator: heightmap, oceans, rivers, biomes, caves, ores, trees
 ├── light.rs     # LightPlugin: colored block light + sky light propagation
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
@@ -758,7 +758,11 @@ fn my_system(mut map: ResMut<craftmjne::world::ChunkMap>) {
 swap in your own generator there. Generation is deterministic per
 `(seed, chunk)` with no cross-chunk dependencies so chunks can generate in any
 order on any thread — keep that property (trees use a border margin for
-exactly this reason).
+exactly this reason). Rivers are the one deliberate exception: they need a
+real flow-accumulation simulation over a large area, so many chunks share one
+lazily-built, cached `RegionHydrology` (a 512×512-block macro-region) behind
+a mutex — see `terrain.rs`'s module doc comment before changing how
+generation is parallelized.
 
 ## Tests
 
