@@ -1422,3 +1422,30 @@ etc.) instead of inventing a new approach:
     them; this only ever needs to run for the handful of tiles an actual
     tinted block uses, so a small targeted post-process pass over the
     already-built pixel buffer was the smaller, more surgical change.
+- **Once the overlay/brightness fix above actually shipped, the follow-up
+  report ("works! but colorings off, its too light needs to look like a
+  health green") was pure art direction, not a mechanism bug - and worth
+  telling apart from one.** The mask this multiplies against is itself
+  bright (stretched toward white by `normalize_tint_mask_tile`), so a
+  correspondingly pale/desaturated tint color reads as washed-out pastel
+  once combined with it - `biome.rs`'s `DRY`/`LUSH`/`COOL` moved to
+  noticeably darker, more saturated values (`LUSH` in particular: `[0.42,
+  0.70, 0.32]` -> `[0.20, 0.62, 0.18]`, a real "health bar green" rather
+  than a mid-tone one). This is a color you can't get right from a remote
+  session with no display - said so plainly and treated the change as a
+  best-effort first pass to react to, not a final answer. **Changing the
+  darker constants moved `the_gradient_is_continuous_at_its_midpoint`'s
+  `assert_eq!` from "happened to round exactly" to "off by one f32 ULP"**
+  (`lerp3(DRY, LUSH, 1.0)` came out `[0.20000002, 0.62, 0.18]` against a
+  `LUSH` of `[0.2, 0.62, 0.18]`) - `a + (b - a) * 1.0` was never guaranteed
+  bit-identical to `b` in floating point, the old constants just happened
+  to round away the error and the new ones don't. Fixed by switching to an
+  epsilon comparison (`1e-6`, matching this file's other float-tolerance
+  tests) rather than picking constants to dodge the rounding - a test
+  asserting a *design invariant* (the two branches must agree at the
+  boundary) shouldn't constrain which numbers are allowed to be chosen for
+  unrelated (art-direction) reasons. Verified the epsilon is still tight
+  enough to catch a real discontinuity, not just loosened until anything
+  passes, the same way every other regression test in this file is
+  checked: broke `lerp3` (`+ 0.1` on its output) and confirmed the test
+  still goes red before restoring it.

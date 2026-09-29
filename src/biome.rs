@@ -28,12 +28,18 @@ const SEED_OFFSET: u32 = 0x7f4a_7c15;
 const SCALE: f64 = 180.0;
 
 /// Grass color at the dry/warm end of the gradient (noise near `-1`).
-const DRY: [f32; 3] = [0.65, 0.68, 0.32];
+const DRY: [f32; 3] = [0.48, 0.52, 0.14];
 /// Grass color at the middle of the gradient (noise near `0`) - an
-/// ordinary plains green.
-const LUSH: [f32; 3] = [0.42, 0.70, 0.32];
+/// ordinary plains green. Deliberately saturated and on the dark side (a
+/// "health bar" green, not a pastel one) - the grayscale mask this
+/// multiplies onto (`grass_top.png`/`grass_side.png`, brightened toward
+/// white by `atlas::normalize_tint_mask_tile`) is itself quite bright, so
+/// a pale tint here reads as washed-out once combined with it; a stronger,
+/// darker color here is what survives that multiply and still looks like
+/// grass instead of pastel mint.
+const LUSH: [f32; 3] = [0.20, 0.62, 0.18];
 /// Grass color at the cool/wet end of the gradient (noise near `1`).
-const COOL: [f32; 3] = [0.32, 0.60, 0.46];
+const COOL: [f32; 3] = [0.14, 0.50, 0.32];
 
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
@@ -121,10 +127,15 @@ mod tests {
         // grass_tint branches on n < 0.0 vs n >= 0.0 - if the two branches'
         // endpoints didn't actually agree, grass would visibly snap to a
         // different color right at the boundary. Both branches evaluate to
-        // exactly LUSH there by construction (lerp3(DRY, LUSH, 1.0) and
-        // lerp3(LUSH, COOL, 0.0)), so this pins that down as a real
-        // invariant rather than something that just happens to look right.
-        assert_eq!(lerp3(DRY, LUSH, 1.0), LUSH);
-        assert_eq!(lerp3(LUSH, COOL, 0.0), LUSH);
+        // (within float rounding) exactly LUSH there by construction
+        // (lerp3(DRY, LUSH, 1.0) and lerp3(LUSH, COOL, 0.0)), so this pins
+        // that down as a real invariant rather than something that just
+        // happens to look right. An epsilon, not `assert_eq!`, because
+        // `a + (b - a) * 1.0` isn't guaranteed bit-identical to `b` in f32 -
+        // some constant pairs round exactly, some don't, and the *color
+        // choice* shouldn't be constrained by which ones happen to.
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-6);
+        assert!(close(lerp3(DRY, LUSH, 1.0), LUSH));
+        assert!(close(lerp3(LUSH, COOL, 0.0), LUSH));
     }
 }
