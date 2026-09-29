@@ -15,6 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
+use crate::biome;
 use crate::blocks::{
     BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
 };
@@ -43,6 +44,16 @@ pub struct WorldGen(pub Arc<TerrainGenerator>);
 /// build (permutation tables), cheap to share via `Arc` once built.
 #[derive(Resource, Clone)]
 pub struct BiomeNoise(pub Arc<crate::noise::SimplexNoise>);
+
+/// This world's biome *region* noise source (`biome::biome_at`'s input) -
+/// a wholly separate stream from `BiomeNoise`'s grass-tint noise, built
+/// the same way (`biome::region_noise_for_seed`) `terrain.rs`'s
+/// `TerrainGenerator` builds its own copy of, so both agree on the exact
+/// same classification for a given seed and column without needing to
+/// literally share one object. Read by `freeze_exposed_water` to decide
+/// whether a newly-air-exposed water source should freeze.
+#[derive(Resource, Clone)]
+pub struct BiomeMap(pub Arc<crate::noise::SimplexNoise>);
 
 /// Non-render atlas data (pixel buffer + name->tile map), built at startup.
 #[derive(Resource)]
@@ -731,6 +742,7 @@ fn enter_world(
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
     commands.insert_resource(BiomeNoise(Arc::new(crate::biome::noise_for_seed(active.meta.seed))));
+    commands.insert_resource(BiomeMap(Arc::new(crate::biome::region_noise_for_seed(active.meta.seed))));
     commands.insert_resource(active.meta.mode);
 
     for e in &tasks {
@@ -807,6 +819,73 @@ fn record_edits(mut events: EventReader<BlockSetEvent>, mut log: ResMut<EditLog>
     for e in events.read() {
         log.0.insert(e.pos, (e.id, e.axis));
     }
+}
+
+/// Freezes an exposed lake surface in a biome where water freezes
+/// (`biome::Biome::freezes_water`) - a water *source* block (not flowing
+/// water; matches what actually forms a lake surface, not a stream) that
+/// ends up with air directly above it converts straight to ice.
+///
+/// Checked directly off `BlockSetEvent` rather than a ticked queue like
+/// `FluidQueue`: unlike fluid spread, this never has to cascade or
+/// re-check further - freezing the top layer means whatever's beneath it
+/// no longer has air contact at all, so one check per relevant event
+/// (the changed position itself, for newly-placed/exposed water, and the
+/// cell below it, for something that just stopped covering water) is the
+/// whole rule.
+///
+/// Goes through the same `set_block` + a written `BlockSetEvent` a player
+/// action would use, not `set_fluid_cell`'s player-edit-bypassing sibling -
+/// this is a one-shot, irreversible transition (water never thaws back),
+/// not a continuously re-derived value like fluid spread, so it doesn't
+/// have fluid's reason to dodge `EditLog`. `record_edits` picks the
+/// written event up for free, which is what makes a frozen cell survive a
+/// reload with zero extra persistence code, the same way a player breaking
+/// a block does.
+fn freeze_exposed_water(
+    mut params: ParamSet<(EventReader<BlockSetEvent>, EventWriter<BlockSetEvent>)>,
+    mut map: ResMut<ChunkMap>,
+    registry: Res<BlockRegistry>,
+    biome_map: Res<BiomeMap>,
+) {
+    let water = registry.id("water");
+    let ice = registry.id("ice");
+    let mut candidates = Vec::new();
+    for e in params.p0().read() {
+        candidates.push(e.pos);
+        candidates.push(e.pos - IVec3::Y);
+    }
+    for pos in candidates {
+        if let Some(prev) = try_freeze_cell(&mut map, pos, water, ice, &biome_map.0) {
+            params.p1().write(BlockSetEvent { pos, id: ice, prev, axis: crate::blocks::AXIS_Y });
+        }
+    }
+}
+
+/// The core "does this specific cell now qualify to freeze" check - see
+/// `freeze_exposed_water`'s own doc comment for the full rule. Pure and
+/// directly testable, the same "the system is a thin Bevy wrapper around a
+/// plain function" split `process_fluid_updates`/`recompute_cell` already
+/// use. Returns the previous block id (for the caller to build a
+/// `BlockSetEvent` from, mirroring what `set_block` itself returns) if
+/// this cell froze, `None` if it didn't qualify.
+fn try_freeze_cell(
+    map: &mut ChunkMap,
+    pos: IVec3,
+    water: BlockId,
+    ice: BlockId,
+    biome_noise: &crate::noise::SimplexNoise,
+) -> Option<BlockId> {
+    if map.get_block(pos) != water || map.get_fluid_level(pos) != FLUID_SOURCE {
+        return None; // not a still water source at all
+    }
+    if map.get_block(pos + IVec3::Y) != AIR {
+        return None; // not exposed to air
+    }
+    if !biome::biome_at(biome_noise, pos.x, pos.z).freezes_water() {
+        return None;
+    }
+    map.set_block(pos, ice)
 }
 
 /// Serializes the current `EditLog` + exact fluid state + player pose and
@@ -1213,7 +1292,7 @@ impl Plugin for WorldPlugin {
             )
             .add_systems(
                 Update,
-                (record_edits, autosave)
+                (record_edits, autosave, freeze_exposed_water)
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(
@@ -1344,5 +1423,92 @@ mod tests {
         drain(&mut map, &tables, next);
 
         assert_eq!(map.get_block(next), AIR);
+    }
+
+    fn freeze_setup(pos: IVec3) -> (BlockId, BlockId, BlockId, ChunkMap) {
+        let reg = BlockRegistry::with_defaults();
+        let water = reg.id("water");
+        let ice = reg.id("ice");
+        let stone = reg.id("stone");
+        // Load whichever chunk `pos` actually falls in - `find_biome_column`
+        // below searches far and wide (region patches are hundreds of
+        // blocks across, so a single chunk isn't big enough to reliably
+        // contain both biomes), so this can't just always be `IVec2::ZERO`
+        // the way the fluid tests' `setup()` gets away with.
+        let coord = IVec2::new(pos.x.div_euclid(CHUNK_SIZE), pos.z.div_euclid(CHUNK_SIZE));
+        let map = ChunkMap { chunks: HashMap::from([(coord, empty_chunk())]), ..ChunkMap::default() };
+        (water, ice, stone, map)
+    }
+
+    /// Finds a real `(x, z)` column that classifies as `want` for this
+    /// noise - same scanning grid `biome.rs`'s own `region_noise_area_
+    /// fractions_land_in_a_reasonable_range` test already confirmed turns
+    /// up a real mix of both biomes, so this doesn't have to hand-pick
+    /// coordinates that happen to work for one specific seed.
+    fn find_biome_column(noise: &crate::noise::SimplexNoise, want: biome::Biome) -> IVec3 {
+        for i in -40..40 {
+            for j in -40..40 {
+                let (x, z) = (i * 97, j * 131);
+                if biome::biome_at(noise, x, z) == want {
+                    return IVec3::new(x, 10, z);
+                }
+            }
+        }
+        panic!("no {want:?} column found in the sampled grid");
+    }
+
+    #[test]
+    fn try_freeze_cell_converts_an_exposed_source_to_ice_in_a_freezing_biome() {
+        let noise = biome::region_noise_for_seed(1);
+        let pos = find_biome_column(&noise, biome::Biome::Snow);
+        let (water, ice, _stone, mut map) = freeze_setup(pos);
+        map.set_fluid_cell(pos, water, FLUID_SOURCE);
+        // Nothing placed above `pos` in a fresh chunk, so it's already
+        // exposed to air.
+
+        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+
+        assert_eq!(prev, Some(water));
+        assert_eq!(map.get_block(pos), ice);
+    }
+
+    #[test]
+    fn try_freeze_cell_leaves_plains_water_as_water() {
+        let noise = biome::region_noise_for_seed(1);
+        let pos = find_biome_column(&noise, biome::Biome::Plains);
+        let (water, ice, _stone, mut map) = freeze_setup(pos);
+        map.set_fluid_cell(pos, water, FLUID_SOURCE);
+
+        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+
+        assert_eq!(prev, None);
+        assert_eq!(map.get_block(pos), water);
+    }
+
+    #[test]
+    fn try_freeze_cell_leaves_flowing_water_alone_even_in_a_freezing_biome() {
+        let noise = biome::region_noise_for_seed(1);
+        let pos = find_biome_column(&noise, biome::Biome::Snow);
+        let (water, ice, _stone, mut map) = freeze_setup(pos);
+        map.set_fluid_cell(pos, water, 3); // flowing, not a source
+
+        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+
+        assert_eq!(prev, None);
+        assert_eq!(map.get_block(pos), water);
+    }
+
+    #[test]
+    fn try_freeze_cell_leaves_covered_water_alone_even_in_a_freezing_biome() {
+        let noise = biome::region_noise_for_seed(1);
+        let pos = find_biome_column(&noise, biome::Biome::Snow);
+        let (water, ice, stone, mut map) = freeze_setup(pos);
+        map.set_fluid_cell(pos, water, FLUID_SOURCE);
+        map.set_block(pos + IVec3::Y, stone); // covered, not exposed to air
+
+        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+
+        assert_eq!(prev, None);
+        assert_eq!(map.get_block(pos), water);
     }
 }
