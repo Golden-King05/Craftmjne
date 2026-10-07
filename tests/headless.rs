@@ -14,8 +14,10 @@ use craftmjne::config::{WorldSettings, CHUNK_SIZE};
 use craftmjne::light::{LightPlugin, LightQueue, LEVEL_STEP, MAX_LIGHT};
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
-use craftmjne::save::{GameMode, SaveStore};
+use craftmjne::save::{FluidCell, GameMode, SaveStore};
 use craftmjne::sky::DayNightClock;
+use craftmjne::snapshot::ChunkStore;
+use craftmjne::terrain::TerrainGenerator;
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::world::{BlockSetEvent, ChunkMap, WorldPlugin};
 
@@ -599,4 +601,78 @@ fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
         [0; 3],
         "removing the only light source must leave nothing behind"
     );
+}
+
+/// Chunks a world has generated are saved, and loaded back instead of
+/// regenerated - so a chunk keeps whatever terrain it was first made with.
+/// Stands in for "the generator changed" by replacing spawn's snapshot with
+/// one made by a different seed's generator, then checking a reload shows
+/// exactly that terrain rather than what seed 7 would generate.
+#[test]
+fn a_reload_shows_saved_chunk_snapshots_not_freshly_generated_terrain() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let origin = IVec2::ZERO;
+    assert!(run_until(
+        &mut app,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    let slug = app.world().resource::<ActiveWorld>().slug.clone();
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    let chunks = app.world().resource::<SaveStore>().chunks_dir(&slug);
+    assert!(chunks.join("c.0.0.bin").is_file(), "generated chunks should be saved");
+    let registry = app.world().resource::<BlockRegistry>();
+    let other_gen = TerrainGenerator::new(99, registry);
+    std::fs::remove_file(chunks.join("c.0.0.bin")).unwrap();
+    let replaced = ChunkStore::new(Some(chunks.clone()), registry).load_or_generate(&other_gen, 0, 0).blocks;
+    assert!(replaced != TerrainGenerator::new(7, registry).generate(0, 0).blocks);
+
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(
+        &mut app2,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    let loaded = app2.world().resource::<ChunkMap>().chunks[&origin].blocks.clone().unwrap();
+    assert!(loaded == replaced);
+}
+
+/// A world saved before chunk snapshots existed has its fluid saved over
+/// the *old* terrain - every ocean and river cell. Once that terrain is
+/// generated anew, putting the old water back would leave seas hanging over
+/// the new land, so fluid only goes back onto a chunk restored from its
+/// snapshot.
+#[test]
+fn fluid_saved_over_since_regenerated_terrain_is_not_put_back() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let origin = IVec2::ZERO;
+    assert!(run_until(
+        &mut app,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    let slug = app.world().resource::<ActiveWorld>().slug.clone();
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    // Turn it into a pre-snapshot world: no chunks saved, and fluid saved
+    // where only the old terrain had water - here, high in the air.
+    let store = app.world().resource::<SaveStore>();
+    std::fs::remove_dir_all(store.chunks_dir(&slug)).unwrap();
+    let mut data = store.load_data(&slug);
+    let floating = IVec3::new(4, 60, 4);
+    data.fluids.push(FluidCell { x: floating.x, y: floating.y, z: floating.z, block: "water".into(), level: 3 });
+    store.save_data(&slug, &data).unwrap();
+
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(
+        &mut app2,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    assert_eq!(app2.world().resource::<ChunkMap>().get_block(floating), 0);
 }

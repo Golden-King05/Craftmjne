@@ -287,6 +287,12 @@ impl SaveStore {
         self.saves_dir().join(slug).join("data.json")
     }
 
+    /// Where `slug`'s chunk snapshots live (see `snapshot.rs`) - one file
+    /// per chunk the world has ever generated.
+    pub fn chunks_dir(&self, slug: &str) -> PathBuf {
+        self.saves_dir().join(slug).join("chunks")
+    }
+
     /// Whether `slug` has ever been saved to before - i.e. whether the next
     /// [`Self::load_data`] would be resuming real progress or handing back
     /// a fresh [`WorldData::default`]. `world.rs`'s `enter_world` uses this

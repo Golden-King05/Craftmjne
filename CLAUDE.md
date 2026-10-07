@@ -1835,3 +1835,67 @@ etc.) instead of inventing a new approach:
   steep coast's raised headland) therefore keeps its region biome, and the
   `Mountain` biome can never appear somewhere the terrain wasn't actually
   built as a mountain.
+- **"Generator changes never alter explored land" is a snapshot of each
+  chunk's *generated* terrain, not a save of every block.** `snapshot.rs`
+  writes a chunk once, the first time it generates
+  (`saves/<world>/chunks/c.<cx>.<cz>.bin`, ~2.5 KB deflated: a block-*name*
+  palette plus `u16` indices). Every later visit loads it instead of
+  generating. Player edits and fluid still ride the existing
+  `EditLog`/fluid-save paths on top, unchanged. The write is temp file +
+  rename, so a neighbour reading the file concurrently sees it whole or not
+  at all. An unreadable file is generated again and replaced, never a crash.
+- **Only chunks from a *different* generator count as old, or the blend
+  creeps outward forever.** A new chunk blends into old neighbours
+  (`TerrainGenerator::generate_beside`): height is offset by the nearest
+  old column's difference from the current generator, fading over
+  `BLEND_DISTANCE` (16). A river fades to dry ground within
+  `RIVER_FADE_DISTANCE` (8). If *every* saved neighbour were old, chunk B
+  would blend into chunk A, which already blended into O, and so on
+  without end. Results would also depend on load order. Each snapshot
+  stores a fingerprint of the generator's actual *output* (FNV over a few
+  sample chunks, plus a manual `GENERATOR_REVISION`), and only neighbours
+  with a different fingerprint are blended against. Old chunks are never
+  written again, so the set a new chunk blends against is fixed, and two
+  new chunks agree on every column between them in either order.
+  `new_chunks_come_out_the_same_whichever_generates_first` goes red the
+  moment same-fingerprint neighbours are treated as old. Hashing output
+  rather than a version number has a useful side effect: a spurious
+  mismatch (a refactor, a toolchain change) is harmless, because an old
+  column that matches what the generator makes now contributes an offset
+  of zero (`an_old_chunk_this_generator_would_have_made_anyway_changes_
+  nothing`).
+- **Water in or near old chunks needs the levee rule's guarantee across
+  the seam too.** Three rules, each with a test that goes red without it:
+  - A new river near a *differing* old column is filled to its own water
+    level and eased to natural ground. The ordinary levee rule then holds
+    back the water still upstream.
+  - A blended channel whose bed ends up at or above its water counts as
+    dry.
+  - A new column beside old water standing above sea level is raised to
+    hold it in.
+  The leak test checks old land both higher *and* lower than the new
+  terrain. Only the lower case can actually leak, and the first draft
+  tested only the higher one.
+- **`write_save` was saving every fluid cell in every loaded chunk,
+  including every generated ocean cell, and that was hiding a migration
+  bug.** Harmless while terrain was deterministic from the seed. Once a
+  world's terrain can be generated anew (a pre-snapshot world opened on a
+  changed generator), those saved cells would put the old seas and rivers
+  back, floating over the new land. Two fixes:
+  - `Chunk::base_fluid` (one bit per cell, set where the chunk was
+    generated with fluid) lets `write_save` skip sources the snapshot
+    already restores.
+  - `collect_gen_tasks` only reapplies saved fluid onto a chunk restored
+    from its snapshot (`GeneratedChunk::restored`).
+  The bit has to be cleared whenever a cell's block changes (`set_block`,
+  and `set_fluid_cell` when the id changes). Otherwise generated water
+  that was edited to air and then refilled by the sim as a source looks
+  "generated", gets skipped, and the reload shows the edit's air instead.
+  The existing `water_restores_exactly_after_leaving_and_reentering_a_world`
+  caught exactly that, because its pocket happened to sit in a lake.
+- **To test "the generator changed" without changing the generator, use a
+  different seed.** It makes entirely different terrain through the same
+  code, which is all a snapshot or blend test needs. `snapshot.rs`'s tests
+  and `tests/headless.rs`'s `a_reload_shows_saved_chunk_snapshots_not_
+  freshly_generated_terrain` (which swaps spawn's snapshot for a seed-99
+  one) both do this.

@@ -28,6 +28,7 @@ use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
 use crate::sky::{DayNightClock, NEW_WORLD_START_TIME};
 use crate::state::{ActiveWorld, AppState};
+use crate::snapshot::ChunkStore;
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
 use crate::texture_report::TextureReport;
 
@@ -37,6 +38,12 @@ const AUTOSAVE_INTERVAL: f32 = 30.0;
 
 #[derive(Resource, Clone)]
 pub struct WorldGen(pub Arc<TerrainGenerator>);
+
+/// The current world's chunk snapshots - see `snapshot.rs`. Chunk
+/// generation goes through this, so a chunk generated once loads the same
+/// forever after, whatever the generator becomes.
+#[derive(Resource)]
+pub struct ChunkSnapshots(pub Arc<ChunkStore>);
 
 /// This world's biome noise source (`biome::grass_tint`'s input), seeded
 /// once alongside `WorldGen` and shared read-only with every mesh task -
@@ -68,6 +75,15 @@ pub struct BlockSetEvent {
 #[derive(Event)]
 pub struct ChunkMeshedEvent(pub IVec2);
 
+/// Once a cell's block changes, a fluid source there is no longer the one
+/// the snapshot restores (even if it's water again - an edit may have
+/// emptied it first), so it has to be saved like any other fluid.
+fn forget_base_fluid(base_fluid: &mut Option<Vec<u64>>, idx: usize) {
+    if let Some(bits) = base_fluid {
+        bits[idx / 64] &= !(1 << (idx % 64));
+    }
+}
+
 #[derive(Default)]
 pub struct Chunk {
     pub blocks: Option<Vec<BlockId>>,
@@ -87,6 +103,11 @@ pub struct Chunk {
     /// spread, light is a pure function of the block grid, so loading a world
     /// recomputes it exactly rather than risking a different answer.
     pub light: Option<Vec<LightCell>>,
+    /// One bit per cell (`block_index`), set where the chunk was generated
+    /// with fluid. A fluid source still standing there is part of the
+    /// chunk's snapshot (`snapshot.rs`), so `write_save` leaves it out of the
+    /// saved fluid state - otherwise every ocean cell would be saved twice.
+    pub base_fluid: Option<Vec<u64>>,
     pub version: u32,
     pub dirty: bool,
     pub meshing: bool,
@@ -248,6 +269,7 @@ impl ChunkMap {
             return None;
         }
         blocks[idx] = id;
+        forget_base_fluid(&mut chunk.base_fluid, idx);
         chunk.version += 1;
         chunk.dirty = true;
 
@@ -329,6 +351,9 @@ impl ChunkMap {
             return false;
         };
         let idx = block_index(lx as usize, pos.y as usize, lz as usize);
+        if blocks[idx] != id {
+            forget_base_fluid(&mut chunk.base_fluid, idx);
+        }
         blocks[idx] = id;
         levels[idx] = level;
         chunk.version += 1;
@@ -731,6 +756,10 @@ fn enter_world(
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
+    commands.insert_resource(ChunkSnapshots(Arc::new(ChunkStore::new(
+        Some(store.chunks_dir(&active.slug)),
+        &registry,
+    ))));
     commands.insert_resource(BiomeNoise(Arc::new(crate::biome::noise_for_seed(active.meta.seed))));
     commands.insert_resource(active.meta.mode);
 
@@ -885,7 +914,8 @@ fn try_freeze_cell(
 /// through `BlockSetEvent` (see `set_fluid_cell`'s doc comment), so nothing
 /// incrementally tracks them the way `record_edits` tracks block edits.
 /// Instead this scans every *currently loaded* chunk fresh, every time -
-/// an exact snapshot, not a diff against terrain - and only falls back to
+/// every fluid cell except sources the chunk was generated with, which its
+/// snapshot (`snapshot.rs`) already restores - and only falls back to
 /// `OriginalFluids`' untouched data for chunks the player didn't revisit
 /// this session (those couldn't have changed, so there's nothing to
 /// rescan; using the fresh scan there instead would just be "no fluid
@@ -924,6 +954,10 @@ fn write_save(
                     let id = blocks[idx];
                     if !tables.fluid[id as usize] {
                         continue;
+                    }
+                    let generated = chunk.base_fluid.as_ref().is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1);
+                    if generated && levels[idx] == FLUID_SOURCE {
+                        continue; // restored from the snapshot
                     }
                     fluids.push(FluidCell {
                         x: coord.x * CHUNK_SIZE + x as i32,
@@ -1042,6 +1076,7 @@ fn stream_chunks(
     settings: Res<WorldSettings>,
     tables: Res<BlockTables>,
     gen: Res<WorldGen>,
+    snapshots: Res<ChunkSnapshots>,
     biome_noise: Res<BiomeNoise>,
     players: Query<&Player>,
 ) {
@@ -1091,7 +1126,8 @@ fn stream_chunks(
         map.chunks.insert(coord, Chunk::default());
         map.gen_in_flight += 1;
         let gen = gen.0.clone();
-        let task = pool.spawn(async move { gen.generate(coord.x, coord.y) });
+        let snapshots = snapshots.0.clone();
+        let task = pool.spawn(async move { snapshots.load_or_generate(&gen, coord.x, coord.y) });
         commands.spawn(GenTask { coord, task });
     }
 
@@ -1152,6 +1188,13 @@ fn collect_gen_tasks(
             continue; // world was exited/switched while this chunk was generating
         }
         let chunk = map.chunks.get_mut(&gen_task.coord).unwrap();
+        let mut base_fluid = vec![0u64; generated.blocks.len().div_ceil(64)];
+        for (i, &id) in generated.blocks.iter().enumerate() {
+            if tables.0.fluid[id as usize] {
+                base_fluid[i / 64] |= 1 << (i % 64);
+            }
+        }
+        chunk.base_fluid = Some(base_fluid);
         chunk.blocks = Some(generated.blocks);
         chunk.fluid_level = Some(generated.fluid);
         chunk.axis = Some(generated.axis);
@@ -1168,7 +1211,13 @@ fn collect_gen_tasks(
         // fluid cell (not just sources a player placed - flowing/falling
         // cells the simulation spread into are just as real here), so a
         // reload never needs to re-derive anything, only place it back.
-        if let Some(fluids) = pending_fluids.0.remove(&gen_task.coord) {
+        //
+        // Only onto a chunk restored from its snapshot, though: fluid saved
+        // over terrain that has since been generated anew (a world from
+        // before snapshots existed, played on a changed generator) would
+        // put the old terrain's seas and rivers back over the new land.
+        let fluids = pending_fluids.0.remove(&gen_task.coord).filter(|_| generated.restored);
+        if let Some(fluids) = fluids {
             for (pos, id, level) in fluids {
                 map.set_block(pos, id);
                 map.set_fluid_level_raw(pos, level);

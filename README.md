@@ -106,9 +106,16 @@ block *name*, not numeric id, so saves survive block-registry changes).
 `meta.json` also records the save format the world was written with, which
 is what lets every installed version safely share one saves folder — see
 "The launcher" below.
-Terrain itself is never saved — it's deterministic from the seed, so only the
-diff from procedural generation needs to persist. Autosaves every 30s and on
-returning to the menu.
+Each chunk's generated terrain is also saved, once, the first time it
+generates (`chunks/`, about 2.5 KB a chunk; see `snapshot.rs`). Revisiting a
+chunk loads it from there instead of generating it again, so an update that
+changes world generation never changes land you've already explored. Only
+unexplored chunks use the new generator, and where they meet old ones they
+blend in over about a chunk's width. Height eases from the old ground to the
+new terrain, and a river heading into old land runs dry a few blocks short
+of it. A world from before snapshots existed regenerates once with the
+current generator, then is protected the same way. Autosaves every 30s and
+on returning to the menu.
 
 ### Game modes
 
@@ -453,6 +460,7 @@ src/
 ├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, oceans, rivers, biomes, caves, ores, trees
+├── snapshot.rs  # saves each generated chunk once so later generator changes never alter it
 ├── drainage.rs  # unbounded, lazily memoized drainage network rivers are routed over
 ├── light.rs     # LightPlugin: colored block light + sky light propagation
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)

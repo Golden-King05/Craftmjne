@@ -1965,6 +1965,7 @@ version = "1.3.0"
 dependencies = [
  "arboard",
  "bevy",
+ "flate2",
  "image",
  "serde",
  "serde_json",
