@@ -1922,3 +1922,27 @@ etc.) instead of inventing a new approach:
   - Measured over 6000x6000 blocks on three seeds: roughly as many falls
     into the sea as inland, up to 28 blocks tall. Generation stays at
     ~2-3ms per chunk.
+- **Two lighting bugs that looked unrelated had one shared cost: a FIFO
+  light queue flooded by work that shouldn't have existed.**
+  - *Dark lines along every chunk border under the sea.* The generator's
+    straight-down sky fill passed full sunlight through water, because
+    water isn't opaque. Propagation dims it. `seed_new_chunk` skips
+    interior full-sky cells but always seeds border cells, so the borders
+    settled dim and the interiors stayed wrong until a slow cascade crept
+    in from the edges. Fixed by sharing one rule: `light::sky_falling_into`
+    is both `offered`'s downward case and what `TerrainGenerator::
+    sky_columns` steps with. **A "settles eventually" test can't catch
+    this.** The first version of `sunlight_under_the_sea_has_no_seams_at_
+    chunk_borders` checked for a fixed point and passed with the bug
+    reintroduced, because the cascade does get there (9 s instead of
+    0.25 s). It now asserts the generator's fill already equals the
+    settled light in open sea.
+  - *A mined hole stays dark for a long time.* The light values were
+    right (`digging_a_shaft_lets_sunlight_down_it` passed at once). The
+    edit's updates were waiting at the back of a queue full of streaming
+    work, much of it that cascade. `LightQueue` now has an `urgent` queue
+    for `BlockSetEvent` work and everything it re-enqueues, drained first,
+    with a remesh flush the moment it empties.
+    `a_mined_hole_lights_up_even_while_chunks_are_still_loading` piles on
+    background work before digging and goes red if edits share the normal
+    queue.

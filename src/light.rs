@@ -206,14 +206,26 @@ fn offered(from: LightCell, toward_down: bool, transmit: [u8; 3]) -> LightCell {
     let mut out = LightCell::DARK;
     for c in 0..3 {
         out.block[c] = attenuate(from.block[c].saturating_sub(LEVEL_STEP), transmit[c]);
-        let travelled = if toward_down && from.sky[c] == MAX_LIGHT {
-            MAX_LIGHT
+        out.sky[c] = if toward_down {
+            sky_falling_into(from.sky, transmit)[c]
         } else {
-            from.sky[c].saturating_sub(LEVEL_STEP)
+            attenuate(from.sky[c].saturating_sub(LEVEL_STEP), transmit[c])
         };
-        out.sky[c] = attenuate(travelled, transmit[c]);
     }
     out
+}
+
+/// The sky light a cell receives from the one directly above it - `offered`'s
+/// downward rule on its own. Terrain generation's straight-down sky fill
+/// (`TerrainGenerator::sky_columns`) uses this too: if the two disagreed,
+/// every cell the propagation queue revisits would settle to a different
+/// value than the untouched cells beside it, which is what drew a dark line
+/// along every chunk border under the sea.
+pub fn sky_falling_into(above: [u8; 3], transmit: [u8; 3]) -> [u8; 3] {
+    std::array::from_fn(|c| {
+        let travelled = if above[c] == MAX_LIGHT { MAX_LIGHT } else { above[c].saturating_sub(LEVEL_STEP) };
+        attenuate(travelled, transmit[c])
+    })
 }
 
 /// Recomputes one cell from its 6 neighbours and writes it back if it
@@ -332,6 +344,11 @@ fn flush_touched(map: &mut ChunkMap, touched: &mut HashSet<IVec2>) {
 /// through `set_fluid_cell`, which dirties as it goes).
 #[derive(Resource, Default)]
 pub struct LightQueue {
+    /// Work from block edits - a player mining or placing - and everything
+    /// it leads to. Always drained before `queue`, so a block broken while
+    /// chunks are streaming in lights up at once instead of waiting behind
+    /// every freshly loaded chunk's seeding.
+    urgent: VecDeque<IVec3>,
     queue: VecDeque<IVec3>,
     touched: HashSet<IVec2>,
     /// Frames the pending remesh flush has been held back waiting for the
@@ -347,7 +364,7 @@ impl LightQueue {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+        self.queue.is_empty() && self.urgent.is_empty()
     }
 }
 
@@ -365,9 +382,9 @@ const LIGHT_FLUSH_MAX_FRAMES: u32 = 6;
 /// next door" in one rule, exactly like `enqueue_fluid_updates`.
 fn enqueue_light_updates(mut events: EventReader<BlockSetEvent>, mut lights: ResMut<LightQueue>) {
     for e in events.read() {
-        lights.push(e.pos);
+        lights.urgent.push_back(e.pos);
         for d in LIGHT_NEIGHBORS {
-            lights.push(e.pos + d);
+            lights.urgent.push_back(e.pos + d);
         }
     }
 }
@@ -378,9 +395,17 @@ fn process_light_updates(
     mut lights: ResMut<LightQueue>,
 ) {
     let lights = &mut *lights;
+    let had_urgent = !lights.urgent.is_empty();
     for _ in 0..LIGHT_BUDGET_PER_FRAME {
-        let Some(pos) = lights.queue.pop_front() else { break };
-        recompute_light_cell(&mut map, &tables.0, pos, &mut lights.queue, &mut lights.touched);
+        // Whatever an edit's update queues goes back on the urgent queue,
+        // so the edit settles completely before background work resumes.
+        if let Some(pos) = lights.urgent.pop_front() {
+            recompute_light_cell(&mut map, &tables.0, pos, &mut lights.urgent, &mut lights.touched);
+        } else if let Some(pos) = lights.queue.pop_front() {
+            recompute_light_cell(&mut map, &tables.0, pos, &mut lights.queue, &mut lights.touched);
+        } else {
+            break;
+        }
     }
 
     if lights.touched.is_empty() {
@@ -388,7 +413,10 @@ fn process_light_updates(
         return;
     }
     lights.frames_pending += 1;
-    if lights.queue.is_empty() || lights.frames_pending >= LIGHT_FLUSH_MAX_FRAMES {
+    // An edit's own lighting is shown the moment it settles, without
+    // waiting for unrelated background work to drain.
+    let edit_settled = had_urgent && lights.urgent.is_empty();
+    if lights.is_empty() || edit_settled || lights.frames_pending >= LIGHT_FLUSH_MAX_FRAMES {
         flush_touched(&mut map, &mut lights.touched);
         lights.frames_pending = 0;
     }

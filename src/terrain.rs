@@ -27,7 +27,7 @@
 use crate::biome::{self, Biome};
 use crate::blocks::{BlockId, BlockRegistry, Transparency, AIR, AXIS_Y, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{block_index, CHUNK_SIZE, CS, H, SEA_LEVEL, WORLD_HEIGHT};
-use crate::light::{LightCell, MAX_LIGHT};
+use crate::light::{sky_falling_into, LightCell, MAX_LIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -310,6 +310,9 @@ pub struct TerrainGenerator {
     /// when a generator is constructed, and which generation otherwise has
     /// no reason to depend on).
     opaque: Vec<bool>,
+    /// Per-block-id light transmission, as `Tables::transmission` - so the
+    /// sky fill dims through water exactly the way `light.rs` does.
+    transmission: Vec<[u8; 3]>,
     terrain: SimplexNoise,
     /// The mountain-*range* mask - see `MOUNTAIN_SCALE` and `mountainness`.
     mountain: SimplexNoise,
@@ -341,6 +344,11 @@ impl TerrainGenerator {
                 .defs
                 .iter()
                 .map(|def| def.transparency == Transparency::No)
+                .collect(),
+            transmission: reg
+                .defs
+                .iter()
+                .map(|def| if def.transparency == Transparency::No { [0; 3] } else { def.transmission.to_fixed() })
                 .collect(),
             ids: TerrainIds {
                 stone: reg.id("stone"),
@@ -918,8 +926,10 @@ impl TerrainGenerator {
     }
 
     /// Sunlight straight down: every column starts at full strength from the
-    /// top of the world and keeps it until the first opaque block, below
-    /// which it's dark until `light.rs` propagates something in sideways.
+    /// top of the world, dims through water exactly the way `light.rs`'s own
+    /// propagation does (`sky_falling_into`), and stops at the first opaque
+    /// block, below which it's dark until `light.rs` propagates something in
+    /// sideways.
     ///
     /// Doing this here rather than leaving it entirely to the propagation
     /// queue is what keeps chunk streaming cheap: it needs no neighbour
@@ -933,11 +943,17 @@ impl TerrainGenerator {
         for z in 0..CS {
             for x in 0..CS {
                 let base = block_index(x, 0, z);
+                let mut sky = [MAX_LIGHT; 3];
                 for y in (0..H).rev() {
-                    if self.opaque[blocks[base + y] as usize] {
+                    let id = blocks[base + y] as usize;
+                    if self.opaque[id] {
                         break;
                     }
-                    light[base + y].sky = [MAX_LIGHT; 3];
+                    sky = sky_falling_into(sky, self.transmission[id]);
+                    if sky == [0; 3] {
+                        break;
+                    }
+                    light[base + y].sky = sky;
                 }
             }
         }
