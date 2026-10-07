@@ -65,11 +65,21 @@ const OCEAN_THRESHOLD: f32 = -0.02;
 /// blend spans - a coastline that fades in over a few hundred blocks
 /// instead of snapping at an exact contour line.
 const COAST_BLEND: f32 = 0.06;
-/// The land->ocean blend width a *fully steep* coast uses instead of
-/// `COAST_BLEND` - narrow enough (the continent field changes by roughly
-/// 0.001 per block) that the drop from the land to the sea floor happens
-/// over a handful of blocks: a cliff, not a beach.
-const CLIFF_BLEND: f32 = 0.0013;
+/// How far, in blocks, a cliff's edge wanders in and out of the line the
+/// continent field alone would put it on - harder and softer rock eroding
+/// at different rates, which is what makes a cliffed coast a run of
+/// headlands and bays rather than one straight wall.
+const CLIFF_EDGE_WOBBLE: f64 = 12.0;
+/// Feature size of that wandering: headlands and bays a few dozen blocks
+/// across.
+const CLIFF_EDGE_SCALE: f64 = 0.02;
+/// Width range of the wave-cut platform - the flat rocky shelf, just under
+/// the water, that a retreating cliff leaves at its foot.
+const PLATFORM_WIDTH: (f64, f64) = (3.0, 9.0);
+/// Feature size and threshold of sea stacks: the pillars of harder rock a
+/// cliff leaves standing offshore as it retreats.
+const STACK_SCALE: f64 = 0.07;
+const STACK_THRESHOLD: f64 = 0.55;
 /// How much higher a fully steep coast's whole landmass sits than it would
 /// otherwise - what makes its cliffs *tower* over the water rather than
 /// being a short step down from land barely above sea level. Applied to the
@@ -200,6 +210,18 @@ struct RiverSample {
     depth: f64,
     incision: f64,
     valley_width: f64,
+}
+
+/// Which part of a cliffed coast a column is (see
+/// `TerrainGenerator::coast_shape`) - decides its surface: these are bare
+/// rock, not sand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoastPart {
+    Open,
+    /// The wave-cut platform at a cliff's foot, and the boulders on it.
+    Platform,
+    /// A sea stack.
+    Stack,
 }
 
 /// What a single world column generates as: its solid surface height, and
@@ -448,23 +470,67 @@ impl TerrainGenerator {
     /// Land relief meeting the ocean - the terrain before any biome boost
     /// or river, unclamped.
     fn base_height(&self, wx: i32, wz: i32) -> f64 {
+        self.coast_shape(wx, wz).0
+    }
+
+    /// `base_height`, plus which part of a cliffed coast the column is, if
+    /// any.
+    ///
+    /// A gentle coast fades from land to sea floor over a long beach. A
+    /// steep one is modelled on real sea cliffs: land runs right up to a
+    /// near-vertical edge, which wanders in and out (`CLIFF_EDGE_WOBBLE`)
+    /// into headlands and bays; at its foot a wave-cut platform sits just
+    /// under the water, scattered with fallen boulders, before the sea
+    /// floor drops away; and here and there a sea stack stands offshore.
+    /// Stretches in between mix the two profiles.
+    fn coast_shape(&self, wx: i32, wz: i32) -> (f64, CoastPart) {
         let steep = self.coast_steepness(wx, wz);
         // The soft ceiling goes on exactly once, over everything that can
         // raise land - applying it inside `land_relief` too compressed every
         // peak twice and quietly kept ranges below the snow line.
         let land = soft_ceiling(self.land_relief(wx, wz) + CLIFF_UPLIFT * steep);
-        // Interpolated geometrically, not linearly: the blend width spans
-        // ~45x between a beach and a cliff, and a linear mix would leave
-        // even a mostly-steep coast hundreds of blocks wide.
-        let blend = (COAST_BLEND as f64).powf(1.0 - steep) * (CLIFF_BLEND as f64).powf(steep);
-        let ocean_t = ((OCEAN_THRESHOLD - self.continent_value(wx, wz)) as f64 / blend).clamp(0.0, 1.0);
-        if ocean_t <= 0.0 {
-            return land;
-        }
+        let c = self.continent_value(wx, wz);
         // A bit of the existing detail noise, scaled down, keeps the
         // seafloor from reading as a perfectly flat plate.
-        let seafloor_detail = self.terrain.fbm2(wx as f64 * 0.02, wz as f64 * 0.02, 3) * 3.0;
-        lerp(land, DEEP_OCEAN_FLOOR + seafloor_detail, ocean_t)
+        let floor = || DEEP_OCEAN_FLOOR + self.terrain.fbm2(wx as f64 * 0.02, wz as f64 * 0.02, 3) * 3.0;
+
+        let ocean_t = ((OCEAN_THRESHOLD - c) as f64 / COAST_BLEND as f64).clamp(0.0, 1.0);
+        let beach = if ocean_t <= 0.0 { land } else { lerp(land, floor(), ocean_t) };
+        if steep <= 0.0 {
+            return (beach, CoastPart::Open);
+        }
+
+        // Blocks inland of the cliff edge: the continent field's distance
+        // past the threshold, divided by how fast it changes here.
+        let dc = |dx: i32, dz: i32| self.continent_value(wx + dx, wz + dz) as f64;
+        let gradient = (((dc(4, 0) - dc(-4, 0)) / 8.0).powi(2) + ((dc(0, 4) - dc(0, -4)) / 8.0).powi(2)).sqrt();
+        let (fx, fz) = (wx as f64, wz as f64);
+        let hardness = self.coast.fbm2(fx * CLIFF_EDGE_SCALE + 311.7, fz * CLIFF_EDGE_SCALE - 97.3, 3);
+        let inland = (c - OCEAN_THRESHOLD) as f64 / gradient.max(1e-6) + hardness * CLIFF_EDGE_WOBBLE;
+
+        let shelf = SEA_LEVEL as f64 - 1.0;
+        let platform = lerp(PLATFORM_WIDTH.0, PLATFORM_WIDTH.1, hash2(wx >> 3, wz >> 3, self.seed ^ 0x9a7f) as f64);
+        let (cliff, part) = if inland >= 0.0 {
+            (land, CoastPart::Open)
+        } else if -inland <= platform {
+            // Fallen blocks lie thickest right under the face.
+            let near = 1.0 - (-inland / platform);
+            let r = hash2(wx, wz, self.seed ^ 0xb01d) as f64;
+            let boulder = if r < 0.06 * near { 2.0 } else if r < 0.22 * near { 1.0 } else { 0.0 };
+            (shelf + boulder, CoastPart::Platform)
+        } else {
+            (lerp(shelf, floor(), smoothstep((-inland - platform) / 10.0)), CoastPart::Open)
+        };
+        let stack = self.coast.fbm2(fx * STACK_SCALE - 801.1, fz * STACK_SCALE + 55.5, 2);
+        let (cliff, part) = if steep > 0.7 && (-40.0..-4.0).contains(&inland) && stack > STACK_THRESHOLD {
+            (land - 2.0 - (stack - STACK_THRESHOLD) * 30.0, CoastPart::Stack)
+        } else {
+            (cliff, part)
+        };
+        // Fully cliff-shaped from half steepness up: mixing a cliff's
+        // profile with a beach's leaves a low ridge of land standing just
+        // offshore of the platform, which reads as a glitch, not a sandbar.
+        (lerp(beach, cliff, smoothstep(steep * 2.0)), if steep > 0.5 { part } else { CoastPart::Open })
     }
 
     /// The continent/coast/mountain terrain alone, with no biome boost and
@@ -768,12 +834,30 @@ impl TerrainGenerator {
         let mut columns = Vec::with_capacity(CS * CS);
         let mut fluid = vec![FLUID_SOURCE; blocks.len()];
 
+        // Every column's profile plus a one-column ring around the chunk:
+        // what a column needs to know about its neighbours (how steep it
+        // sits, whether a river beside it stands higher) without asking for
+        // any profile twice.
+        const G: i32 = CHUNK_SIZE + 2;
+        let grid: Vec<ColumnProfile> = (0..G * G)
+            .map(|i| self.column_profile_in(cx * CHUNK_SIZE + i % G - 1, cz * CHUNK_SIZE + i / G - 1, &blend))
+            .collect();
+        let at = |x: i32, z: i32| grid[((x + 1) + G * (z + 1)) as usize];
+
         for z in 0..CS {
             for x in 0..CS {
                 let wx = cx * CHUNK_SIZE + x as i32;
                 let wz = cz * CHUNK_SIZE + z as i32;
-                let col = self.column_profile_in(wx, wz, &blend);
+                let col = at(x as i32, z as i32);
                 let h = col.height;
+                let sides = [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| at(x as i32 + dx, z as i32 + dz));
+                // How far the ground falls away beside this column, and how
+                // far it rises: a big drop is a cliff's top edge, a big drop
+                // *and* rise is somewhere on its face.
+                let drop = h - sides.iter().map(|n| n.height).min().unwrap();
+                let rise = sides.iter().map(|n| n.height).max().unwrap() - h;
+                let coast = if h <= SEA_LEVEL + 2 || h >= SEA_LEVEL + 6 { self.coast_shape(wx, wz).1 } else { CoastPart::Open };
+                let rock = matches!(coast, CoastPart::Platform | CoastPart::Stack) || (drop >= 4 && rise >= 3);
                 heights[x + CS * z] = h;
                 columns.push(ColumnSurface { ground: h, water: col.water_top });
                 let biome = self.biome_with_height(wx, wz, h);
@@ -785,8 +869,15 @@ impl TerrainGenerator {
                 // bed; the Mountain biome is bare rock up to the snow line;
                 // the Snow biome is snow (over beaches too); then beaches
                 // and river banks, the altitude snow cap, and grass.
-                let top_id = if underwater {
+                let top_id = if coast == CoastPart::Platform {
+                    ids.stone
+                } else if underwater {
                     ids.sand
+                } else if rock && biome != Biome::Snow {
+                    // Bare rock: a cliff's face and its fallen boulders,
+                    // and a sea stack's flanks. A stack tall enough keeps a
+                    // grassy cap like the clifftop it broke from.
+                    if coast == CoastPart::Stack && rise == 0 && h >= SEA_LEVEL + 6 { ids.grass } else { ids.stone }
                 } else if biome == Biome::Mountain {
                     if snowy { ids.snow } else { ids.stone }
                 } else if biome == Biome::Snow {
@@ -798,7 +889,9 @@ impl TerrainGenerator {
                 } else {
                     ids.grass
                 };
-                let fill_id = if underwater || beach {
+                let fill_id = if rock || coast == CoastPart::Stack {
+                    ids.stone
+                } else if underwater || beach {
                     ids.sand
                 } else if biome == Biome::Mountain {
                     ids.stone
@@ -807,12 +900,16 @@ impl TerrainGenerator {
                 };
                 surface[x + CS * z] = top_id;
 
+                // Soil is a thin cap where the ground falls away steeply -
+                // a cliff top shows a line of earth over bare rock, not a
+                // band of dirt as deep as anywhere else.
+                let soil = if drop >= 4 { 1 } else { 3 };
                 let base = block_index(x, 0, z);
                 blocks[base] = ids.bedrock;
                 for y in 1..=h {
                     blocks[base + y as usize] = if y == h {
                         top_id
-                    } else if y >= h - 3 {
+                    } else if y >= h - soil {
                         fill_id
                     } else {
                         ids.stone
@@ -839,8 +936,7 @@ impl TerrainGenerator {
                     // `world.rs`'s fluid sim would make there. Frozen solid
                     // where water freezes.
                     let mut fall_top = top;
-                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let n = self.column_profile_in(wx + dx, wz + dz, &blend);
+                    for n in sides {
                         if let (true, Some(t)) = (n.in_river, n.water_top) {
                             if t - top >= WATERFALL_CURTAIN {
                                 fall_top = fall_top.max(t);
@@ -864,6 +960,15 @@ impl TerrainGenerator {
                     // Scree on bare mountain rock.
                     if top_id == ids.stone {
                         blocks[base + h as usize] = ids.gravel;
+                    }
+                }
+
+                // A wave-cut notch: the sea undercuts a cliff just above
+                // the waterline, leaving the face overhanging its foot.
+                let seaward = sides.iter().any(|n| n.height < SEA_LEVEL && n.water_top == Some(SEA_LEVEL));
+                if seaward && drop >= 8 && !underwater && hash2(wx >> 2, wz >> 2, seed ^ 0x2017) < 0.6 {
+                    for y in (SEA_LEVEL + 1)..=(SEA_LEVEL + 2).min(h - 4) {
+                        blocks[base + y as usize] = AIR;
                     }
                 }
 
@@ -1929,5 +2034,69 @@ mod tests {
         }
         assert!(capped >= 100, "only {capped} river columns ease down");
         assert!(exact * 4 >= capped * 3, "only {exact} of {capped} flowing levels match the fluid sim");
+    }
+
+    /// Cliffed coasts look like real sea cliffs rather than a staircase of
+    /// grassy ledges: a tall face of bare rock under a thin soil cap, a
+    /// rocky wave-cut platform at its foot just under the water, and sea
+    /// stacks offshore.
+    #[test]
+    fn cliffed_coasts_have_rock_faces_platforms_and_sea_stacks() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let ids = &gen.ids;
+        let (mut platforms, mut stacks, mut faces) = (0, 0, 0);
+        let mut ledges = 0;
+        'search: for z in (-3000..3000).step_by(48) {
+            for x in (-3000..3000).step_by(48) {
+                if gen.coast_steepness(x, z) < 0.95 || gen.mountainness(x, z) > 0.0 {
+                    continue;
+                }
+                let (cx, cz) = (x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+                let chunk = gen.generate(cx, cz);
+                for lz in 0..CS {
+                    for lx in 0..CS {
+                        let (wx, wz) = (cx * CHUNK_SIZE + lx as i32, cz * CHUNK_SIZE + lz as i32);
+                        let col = chunk.columns[lx + CS * lz];
+                        let base = block_index(lx, 0, lz);
+                        let block = |y: i32| chunk.blocks[base + y as usize];
+                        match gen.coast_shape(wx, wz).1 {
+                            CoastPart::Platform => {
+                                platforms += 1;
+                                assert!(col.ground >= SEA_LEVEL - 1, "a platform sits at the waterline");
+                                assert!([ids.stone, ids.gravel].contains(&block(col.ground)), "a platform is rock, not sand");
+                            }
+                            CoastPart::Stack => stacks += 1,
+                            CoastPart::Open => {}
+                        }
+                        // A face: ground falling 8+ blocks right beside it.
+                        let drop = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                            .iter()
+                            .map(|(dx, dz)| col.ground - gen.effective_height(wx + dx, wz + dz))
+                            .max()
+                            .unwrap();
+                        if drop >= 8 && col.water.is_none() {
+                            faces += 1;
+                            // Thin soil: rock from two below the top down.
+                            if block(col.ground - 2) != ids.stone && block(col.ground - 2) != AIR {
+                                ledges += 1;
+                            }
+                        }
+                    }
+                }
+                if platforms > 200 && faces > 50 {
+                    break 'search;
+                }
+            }
+        }
+        assert!(platforms > 200 && faces > 50, "only {platforms} platform / {faces} cliff-face columns found");
+        assert!(ledges * 10 <= faces, "{ledges} of {faces} cliff tops have deep soil instead of rock");
+        // Stacks are rarer; count them over a wider sweep of cliffed coast.
+        for z in (-3000..3000).step_by(4) {
+            for x in (-400..-300).step_by(4) {
+                stacks += (gen.coast_shape(x, z).1 == CoastPart::Stack) as i32;
+            }
+        }
+        assert!(stacks > 0, "no sea stacks anywhere");
     }
 }

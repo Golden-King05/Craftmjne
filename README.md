@@ -231,8 +231,12 @@ own noise stream:
 - **Continents and coasts.** A very low-frequency continent field splits
   land from sea into several separate landmasses. A second field decides
   each stretch of coast's *style*: gentle coasts fade into the sea over a
-  long beach, steep ones hold the land high right up to a cliff with deep
-  water at its foot.
+  long beach. Steep ones are modelled on real sea cliffs: a near-vertical
+  face of bare rock under a thin line of soil; an edge that wanders in and
+  out into headlands and bays; a wave-cut notch at the foot of some faces;
+  a rocky wave-cut platform just under the water, littered with fallen
+  boulders; and sea stacks standing offshore. Steep slopes inland (and on
+  mountains) are bare rock too, rather than grass ledges.
 - **Mountain ranges.** A range mask (`mountainness`) decides where ranges
   are; inside one, ridged noise lifts the terrain into ridgelines that reach
   well above the snow line. Heights are eased toward the build ceiling

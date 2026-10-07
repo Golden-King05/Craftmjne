@@ -1967,3 +1967,33 @@ etc.) instead of inventing a new approach:
   beside `column_profile`, which is the drift this file keeps warning
   about. `river_surfaces_ease_down_in_flowing_levels_between_steps` keeps
   the 75% floor and checks the generated blocks carry the level.
+- **Cliffs read as "a terrain glitch" when they were a steep *ramp* with
+  grass on every step. Modelling them on real sea-cliff geomorphology
+  fixed that, as the user suggested.** The old steep coast just narrowed
+  the land-to-sea-floor blend (`CLIFF_BLEND`), which still left a ramp a
+  few blocks wide. Every column in it got the normal grass + 3 dirt +
+  stone, so the face was a staircase of grassy ledges. `coast_shape` now
+  converts the continent field into *blocks inland of the edge* (value
+  past the threshold divided by its local gradient) and builds the
+  features coastal geomorphology describes:
+  - a vertical edge, pushed in and out by a "rock hardness" noise into
+    headlands and bays (`CLIFF_EDGE_WOBBLE`)
+  - a wave-cut platform at `SEA_LEVEL - 1` with boulders thickest under
+    the face
+  - sea stacks offshore
+  In `generate`:
+  - Any column with a 4+ block drop *and* a 3+ block rise beside it is
+    bare rock.
+  - Any column with a 4+ drop keeps only one block of soil.
+  - Sea-facing faces get a wave-cut notch above the waterline.
+  These are generic slope rules, so steep mountain ground benefits too.
+  `generate` now builds one profile grid with a one-column ring
+  (`at(x, z)`) and reads neighbours from it. That serves both the slope
+  rules and the waterfall curtains without asking for any profile twice.
+  Mapping the result (an ASCII height map of a real stretch of coast,
+  printed from a throwaway test) caught a leftover: partly steep coasts
+  mixed the cliff and beach profiles into a thin low ridge just past the
+  platform. Cliff shape now applies fully from half steepness up
+  (`smoothstep(steep * 2)`).
+  `cliffed_coasts_have_rock_faces_platforms_and_sea_stacks` goes red for
+  deep soil on faces or sand on platforms.
