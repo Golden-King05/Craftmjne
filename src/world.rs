@@ -75,8 +75,8 @@ pub struct BlockSetEvent {
 #[derive(Event)]
 pub struct ChunkMeshedEvent(pub IVec2);
 
-/// Once a cell's block changes, a fluid source there is no longer the one
-/// the snapshot restores (even if it's water again - an edit may have
+/// Once a cell's block or fluid level changes, its fluid is no longer what
+/// the snapshot restores (even if it's the same again - an edit may have
 /// emptied it first), so it has to be saved like any other fluid.
 fn forget_base_fluid(base_fluid: &mut Option<Vec<u64>>, idx: usize) {
     if let Some(bits) = base_fluid {
@@ -104,9 +104,10 @@ pub struct Chunk {
     /// recomputes it exactly rather than risking a different answer.
     pub light: Option<Vec<LightCell>>,
     /// One bit per cell (`block_index`), set where the chunk was generated
-    /// with fluid. A fluid source still standing there is part of the
-    /// chunk's snapshot (`snapshot.rs`), so `write_save` leaves it out of the
-    /// saved fluid state - otherwise every ocean cell would be saved twice.
+    /// with fluid and that fluid hasn't changed since - block or level. Such
+    /// a cell is exactly what the chunk's snapshot (`snapshot.rs`) restores,
+    /// so `write_save` leaves it out of the saved fluid state - otherwise
+    /// every ocean cell would be saved twice.
     pub base_fluid: Option<Vec<u64>>,
     pub version: u32,
     pub dirty: bool,
@@ -292,7 +293,11 @@ impl ChunkMap {
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         );
-        if let Some(levels) = self.chunks.get_mut(&coord).and_then(|c| c.fluid_level.as_mut()) {
+        let Some(chunk) = self.chunks.get_mut(&coord) else { return };
+        if let Some(levels) = chunk.fluid_level.as_mut() {
+            if levels[idx] != level {
+                forget_base_fluid(&mut chunk.base_fluid, idx);
+            }
             levels[idx] = level;
         }
     }
@@ -351,7 +356,7 @@ impl ChunkMap {
             return false;
         };
         let idx = block_index(lx as usize, pos.y as usize, lz as usize);
-        if blocks[idx] != id {
+        if blocks[idx] != id || levels[idx] != level {
             forget_base_fluid(&mut chunk.base_fluid, idx);
         }
         blocks[idx] = id;
@@ -955,9 +960,8 @@ fn write_save(
                     if !tables.fluid[id as usize] {
                         continue;
                     }
-                    let generated = chunk.base_fluid.as_ref().is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1);
-                    if generated && levels[idx] == FLUID_SOURCE {
-                        continue; // restored from the snapshot
+                    if chunk.base_fluid.as_ref().is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1) {
+                        continue; // as generated: restored from the snapshot
                     }
                     fluids.push(FluidCell {
                         x: coord.x * CHUNK_SIZE + x as i32,

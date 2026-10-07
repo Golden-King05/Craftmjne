@@ -1899,3 +1899,26 @@ etc.) instead of inventing a new approach:
   and `tests/headless.rs`'s `a_reload_shows_saved_chunk_snapshots_not_
   freshly_generated_terrain` (which swaps spawn's snapshot for a seed-99
   one) both do this.
+- **Waterfalls are a step in the river's surface plus a curtain over the
+  face, and both had to follow rules that already existed.**
+  - *The step:* in a segment whose water drops by at least
+    `WATERFALL_DROP` (3), `river_sample` keeps the upper level for every
+    column whose `natural` ground can hold it, then switches to the lower
+    one. Without that per-column check, the lip would sit wherever the
+    segment's midpoint fell. A lip out past a cliff edge would leave a
+    wall of river standing over the sea.
+  - *The curtain:* any wet column beside river water at least
+    `WATERFALL_CURTAIN` (2) higher is filled up to it with a flowing
+    level-1 top cell over `FLUID_FALLING`. That's exactly the state
+    `recompute_cell` settles a ledge into, so the simulation leaves it
+    alone. Generated fluid is no longer all sources, so snapshots store
+    every non-source level (sparse index + level after the block indices),
+    and `Chunk::base_fluid`'s bit now means "this cell's fluid is exactly
+    as generated". It clears on any change to the block *or* the level.
+  - Break-testing showed the curtain fixes a gap that had been there all
+    along. With stepping disabled, the search still found 5+ block drops at
+    river mouths, so exposed walls of standing river water already existed
+    there (the profile-level leak test allows water beside lower water).
+  - Measured over 6000x6000 blocks on three seeds: roughly as many falls
+    into the sea as inland, up to 28 blocks tall. Generation stays at
+    ~2-3ms per chunk.

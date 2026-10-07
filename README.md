@@ -254,6 +254,13 @@ own noise stream:
   grow to 16 blocks across. How far a river has cut below its banks varies
   along its length. Some run flush with the ground beside them; others sit
   a few blocks down in a narrower valley, the start of a canyon.
+- **Waterfalls.** Where a river drops 3 or more blocks between two points
+  of the network, it holds its level for as long as the ground can contain
+  it, then falls. Inland, that's a waterfall down a step in the valley. At
+  a cliff coast it's a waterfall off the cliff edge into the sea (the
+  tallest found so far is 28 blocks). The curtain is real water: falling
+  water under a flowing top cell, the same thing the fluid sim makes under
+  a ledge. In freezing biomes it's frozen solid.
 
 ## Chat and commands
 

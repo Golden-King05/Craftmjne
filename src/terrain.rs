@@ -25,7 +25,7 @@
 //! `world::compile_content` for your own.
 
 use crate::biome::{self, Biome};
-use crate::blocks::{BlockId, BlockRegistry, Transparency, AIR, AXIS_Y, FLUID_SOURCE};
+use crate::blocks::{BlockId, BlockRegistry, Transparency, AIR, AXIS_Y, FLUID_FALLING, FLUID_SOURCE};
 use crate::config::{block_index, CHUNK_SIZE, CS, H, SEA_LEVEL, WORLD_HEIGHT};
 use crate::light::{LightCell, MAX_LIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
@@ -143,6 +143,15 @@ const VALLEY_WIDTH: (f64, f64) = (14.0, 5.0);
 /// river segments - enough to cover the widest river plus its widest
 /// valley plus a node's jitter (`8 + 14 + 6` blocks < 2 cells; 3 for margin).
 const SEGMENT_SEARCH_CELLS: i32 = 3;
+/// A river dropping at least this many blocks between two drainage nodes
+/// does it as a waterfall rather than a run of 1-block rapids: the upper
+/// level holds for as long as the ground can contain it, then steps down
+/// (see `river_sample`). At a sea cliff, that step is the cliff edge.
+const WATERFALL_DROP: f64 = 3.0;
+/// The smallest step in a river's surface that gets a curtain of falling
+/// water down its face (see `generate`). A 1-block step stays a plain
+/// rapid, as it always was.
+const WATERFALL_CURTAIN: i32 = 2;
 
 /// How far, in blocks, a new chunk's terrain takes to blend into an old
 /// chunk next to it (see this module's doc comment). One chunk's width, so
@@ -456,7 +465,11 @@ impl TerrainGenerator {
     /// The nearest river to `(x, z)`, if one is within reach: the closest
     /// segment between a river node and the node it drains into, with the
     /// river's properties interpolated along it.
-    fn river_sample(&self, wx: i32, wz: i32) -> Option<RiverSample> {
+    ///
+    /// `natural` is the column's `natural_height`: where a river falls
+    /// (`WATERFALL_DROP`), the upper level only reaches columns whose ground
+    /// can hold it, which is what puts a waterfall's lip at a cliff edge.
+    fn river_sample(&self, wx: i32, wz: i32, natural: f64) -> Option<RiverSample> {
         use crate::drainage::CELL;
         let net = &self.drainage;
         let home = (wx.div_euclid(CELL), wz.div_euclid(CELL));
@@ -502,7 +515,11 @@ impl TerrainGenerator {
                     d,
                     RiverSample {
                         distance: d,
-                        water: lerp(a.1, b.1, t),
+                        water: if a.1 - b.1 >= WATERFALL_DROP {
+                            if t < 1.0 && natural >= a.1.floor() { a.1 } else { b.1 }
+                        } else {
+                            lerp(a.1, b.1, t)
+                        },
                         half_width: lerp(a.2, b.2, t),
                         depth: lerp(a.3, b.3, t),
                         incision,
@@ -578,7 +595,7 @@ impl TerrainGenerator {
         let mut river_water = None;
         let (mut river_bank, mut near_river) = (false, false);
 
-        if let Some(r) = self.river_sample(wx, wz) {
+        if let Some(r) = self.river_sample(wx, wz, natural) {
             let water = r.water.floor();
             let half_width = r.half_width;
             if r.distance <= half_width + r.valley_width + 1.0 {
@@ -703,6 +720,7 @@ impl TerrainGenerator {
         let mut heights = [0i32; CS * CS];
         let mut surface = [AIR; CS * CS];
         let mut columns = Vec::with_capacity(CS * CS);
+        let mut fluid = vec![FLUID_SOURCE; blocks.len()];
 
         for z in 0..CS {
             for x in 0..CS {
@@ -765,6 +783,29 @@ impl TerrainGenerator {
                     for y in (h + 1)..=top {
                         blocks[base + y as usize] =
                             if y == top && biome.freezes_water() { ids.ice } else { ids.water };
+                    }
+                    // A waterfall: beside a river standing higher than this
+                    // column's water, its face pours down into it - falling
+                    // water under a flowing top cell, the same thing
+                    // `world.rs`'s fluid sim would make there. Frozen solid
+                    // where water freezes.
+                    let mut fall_top = top;
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let n = self.column_profile_in(wx + dx, wz + dz, &blend);
+                        if let (true, Some(t)) = (n.in_river, n.water_top) {
+                            if t - top >= WATERFALL_CURTAIN {
+                                fall_top = fall_top.max(t);
+                            }
+                        }
+                    }
+                    for y in (top + 1)..=fall_top {
+                        let i = base + y as usize;
+                        if biome.freezes_water() {
+                            blocks[i] = ids.ice;
+                        } else {
+                            blocks[i] = ids.water;
+                            fluid[i] = if y == fall_top { 1 } else { FLUID_FALLING };
+                        }
                     }
                     // Gravel patches on sea and river beds.
                     if hash2(wx, wz, seed ^ 0x1234) < 0.3 {
@@ -867,7 +908,7 @@ impl TerrainGenerator {
         }
 
         GeneratedChunk {
-            fluid: vec![FLUID_SOURCE; blocks.len()],
+            fluid,
             axis: vec![AXIS_Y; blocks.len()],
             light: self.sky_columns(&blocks),
             blocks,
@@ -1741,6 +1782,52 @@ mod tests {
         for z in 0..CS {
             let edge = chunk.columns[CS - 1 + CS * z];
             assert!(edge.ground >= 40, "column (15, {z}) at {edge:?} doesn't hold back old water at 40");
+        }
+    }
+
+    /// The first column (scanning rows outward from the origin) whose
+    /// water has a waterfall's curtain over it at least `min` tall, where
+    /// `into_sea` says whether it falls into the sea or into a river.
+    fn find_waterfall(gen: &TerrainGenerator, into_sea: bool, min: i32) -> (i32, i32, i32, i32) {
+        for r in (0..2000).step_by(2) {
+            for z in [-r, r] {
+                for x in (-2000..2000).step_by(2) {
+                    let Some(top) = gen.column_profile(x, z).water_top else { continue };
+                    if (top == SEA_LEVEL) != into_sea {
+                        continue;
+                    }
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let n = gen.column_profile(x + dx, z + dz);
+                        if let (true, Some(t)) = (n.in_river, n.water_top) {
+                            if t - top >= min {
+                                return (x, z, top, t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no waterfall found (into_sea: {into_sea})");
+    }
+
+    /// Rivers that drop sharply fall instead of stepping down a block at a
+    /// time - inland, and off sea cliffs into the sea - and the fall is real
+    /// water in the world: a flowing top cell over falling water, the same
+    /// thing the fluid sim settles to under a ledge.
+    #[test]
+    fn rivers_fall_as_waterfalls_inland_and_off_sea_cliffs() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        for into_sea in [true, false] {
+            let (x, z, top, fall_top) = find_waterfall(&gen, into_sea, 5);
+            let chunk = gen.generate(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+            let base = block_index(x.rem_euclid(CHUNK_SIZE) as usize, 0, z.rem_euclid(CHUNK_SIZE) as usize);
+            for y in (top + 1)..=fall_top {
+                let i = base + y as usize;
+                assert_eq!(chunk.blocks[i], gen.ids.water, "no water at ({x}, {y}, {z}) in the curtain");
+                assert_eq!(chunk.fluid[i], if y == fall_top { 1 } else { FLUID_FALLING });
+            }
+            assert_eq!(chunk.blocks[base + fall_top as usize + 1], AIR);
         }
     }
 }

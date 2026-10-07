@@ -20,9 +20,11 @@
 //! File layout (`saves/<world>/chunks/c.<cx>.<cz>.bin`): a small plain
 //! header - magic, format, chunk dimensions, fingerprint, then each
 //! column's ground and water height, which is all a neighbour needs to
-//! blend - followed by a deflate-compressed body: a block-name palette and
-//! one `u16` palette index per block. Names, not ids, so adding a block
-//! file that shifts ids doesn't scramble saved terrain.
+//! blend - followed by a deflate-compressed body: a block-name palette, one
+//! `u16` palette index per block, then every cell whose fluid level isn't
+//! a plain source (a waterfall's falling water) as index + level. Names,
+//! not ids, so adding a block file that shifts ids doesn't scramble saved
+//! terrain.
 
 use crate::blocks::{BlockId, BlockRegistry, AIR, AXIS_Y, FLUID_SOURCE};
 use bevy::log::warn;
@@ -170,8 +172,14 @@ impl ChunkStore {
             .chunks_exact(2)
             .map(|b| palette.get(u16::from_le_bytes([b[0], b[1]]) as usize).copied().unwrap_or(AIR))
             .collect();
+        let mut fluid = vec![FLUID_SOURCE; blocks.len()];
+        let levels = u16::from_le_bytes(take(&mut r, 2)?.try_into().ok()?) as usize;
+        for _ in 0..levels {
+            let cell = take(&mut r, 3)?;
+            *fluid.get_mut(u16::from_le_bytes([cell[0], cell[1]]) as usize)? = cell[2];
+        }
         Some(GeneratedChunk {
-            fluid: vec![FLUID_SOURCE; blocks.len()],
+            fluid,
             axis: vec![AXIS_Y; blocks.len()],
             light: gen.sky_columns(&blocks),
             blocks,
@@ -210,6 +218,12 @@ impl ChunkStore {
             body.extend_from_slice(name);
         }
         body.extend_from_slice(&indices);
+        let levels: Vec<usize> = (0..chunk.fluid.len()).filter(|&i| chunk.fluid[i] != FLUID_SOURCE).collect();
+        body.extend_from_slice(&(levels.len() as u16).to_le_bytes());
+        for i in levels {
+            body.extend_from_slice(&(i as u16).to_le_bytes());
+            body.push(chunk.fluid[i]);
+        }
 
         let mut encoder = DeflateEncoder::new(out, Compression::fast());
         // Writing into a Vec can't fail.
@@ -322,9 +336,13 @@ mod tests {
         let reg = BlockRegistry::with_defaults();
         let gen = TerrainGenerator::new(3, &reg);
         let store = ChunkStore::new(None, &reg);
-        let chunk = gen.generate(2, -1);
+        let mut chunk = gen.generate(2, -1);
+        // A waterfall's levels, which a plain source-only chunk wouldn't test.
+        chunk.fluid[100] = crate::blocks::FLUID_FALLING;
+        chunk.fluid[101] = 1;
         let back = store.decode(&gen, &store.encode(42, &chunk)).unwrap();
         assert!(back.blocks == chunk.blocks);
+        assert!(back.fluid == chunk.fluid);
         assert_eq!(back.columns, chunk.columns);
         assert_eq!(parse_header(&store.encode(42, &chunk)).unwrap().fingerprint, 42);
     }
