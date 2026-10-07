@@ -8,7 +8,7 @@
 //!   grayscale mask (`blocks/grass.json`'s `tinted`/`overlay` fields,
 //!   `Tables::tinted`/`has_overlay`) at *mesh* time so grass isn't flat
 //!   gray. Not tied to worldgen, not read by anything but the mesher.
-//! - **Biome regions** (`Biome`, `biome_at`, `region_noise_for_seed`) *are*
+//! - **Biome regions** (`Biome`, `region_biome_at`, `region_noise_for_seed`) *are*
 //!   tied to worldgen: a much larger-scale noise that partitions the map
 //!   into a handful of named regions (currently `Plains`/`Snow`),
 //!   consulted by `terrain.rs` (surface block, terrain height) and
@@ -112,6 +112,12 @@ const SNOW_THRESHOLD: f32 = 0.45;
 pub enum Biome {
     Plains,
     Snow,
+    /// The desolate upper slopes of a mountain range - bare rock and scree,
+    /// snow-capped above `terrain::SNOW_LINE`. Never a *region* biome
+    /// (`region_biome_at` can't return it): it only exists as an altitude
+    /// zone (`ALTITUDE_ZONES`) on top of whatever region a range rises out
+    /// of, so climbing a mountain changes biome as you go up.
+    Mountain,
 }
 
 impl Biome {
@@ -124,17 +130,39 @@ impl Biome {
     /// ...) gets the exact same behavior just by returning `true` here too
     /// - zero changes needed to either the generator or the runtime rule.
     pub fn freezes_water(self) -> bool {
-        matches!(self, Biome::Snow)
+        matches!(self, Biome::Snow | Biome::Mountain)
     }
 
     /// Whether this biome's terrain generates a bit higher than the plain
-    /// baseline (see `terrain.rs`'s `TerrainGenerator::height_boost`), so
+    /// baseline (see `terrain.rs`'s `DRIER_HEIGHT_BOOST`), so
     /// fewer of its columns naturally dip below sea level and flood into a
     /// lake. Same trait shape as `freezes_water`, for the same reason - a
     /// biome's *desire* for fewer lakes is a property of the biome, not
     /// something the height formula should special-case by name.
     pub fn drier(self) -> bool {
         matches!(self, Biome::Snow)
+    }
+
+    /// Every biome that exists, for anything that needs to enumerate them
+    /// (`/locate biome`'s argument autocomplete and parsing) instead of
+    /// re-deriving the list by hand - adding a biome only ever means adding
+    /// it here and to `Biome::name`, not touching any consumer.
+    pub const ALL: [Biome; 3] = [Biome::Plains, Biome::Snow, Biome::Mountain];
+
+    /// The lowercase name a player types to refer to this biome in chat
+    /// commands - the inverse of `Biome::parse`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Biome::Plains => "plains",
+            Biome::Snow => "snow",
+            Biome::Mountain => "mountain",
+        }
+    }
+
+    /// Parses a player-typed biome name (case-insensitive), the inverse of
+    /// `Biome::name`.
+    pub fn parse(s: &str) -> Option<Biome> {
+        Biome::ALL.into_iter().find(|b| b.name().eq_ignore_ascii_case(s))
     }
 }
 
@@ -148,23 +176,57 @@ pub fn region_noise_for_seed(seed: u32) -> SimplexNoise {
 }
 
 /// The raw region-noise value at world column `(x, z)`, clamped to
-/// `-1.0..=1.0`. Exposed separately from `biome_at` (rather than folding
+/// `-1.0..=1.0`. Exposed separately from `region_biome_at` (rather than folding
 /// the threshold check in) so a caller that wants a *smooth* biome-strength
 /// signal - `terrain.rs`'s height boost, so the terrain doesn't step
 /// abruptly at the exact `Biome::Snow` edge - can use the same underlying
-/// noise `biome_at`'s hard classification is built from, instead of a
+/// noise `region_biome_at`'s hard classification is built from, instead of a
 /// second, potentially-disagreeing noise stream.
 pub fn region_noise_value(noise: &SimplexNoise, x: i32, z: i32) -> f32 {
     (noise.fbm2(x as f64 / REGION_SCALE, z as f64 / REGION_SCALE, 2) as f32).clamp(-1.0, 1.0)
 }
 
-/// Which biome region world column `(x, z)` belongs to.
-pub fn biome_at(noise: &SimplexNoise, x: i32, z: i32) -> Biome {
+/// Which large-scale *region* biome world column `(x, z)` belongs to - the
+/// biome before altitude zones. Not the final answer for a column on a
+/// mountain: `terrain::TerrainGenerator::biome_at` is, and it's what
+/// worldgen and the runtime freezing rule both use. Named `region_` so this
+/// can't be mistaken for it.
+pub fn region_biome_at(noise: &SimplexNoise, x: i32, z: i32) -> Biome {
     if region_noise_value(noise, x, z) > SNOW_THRESHOLD {
         Biome::Snow
     } else {
         Biome::Plains
     }
+}
+
+/// How strongly a column must sit inside a mountain range
+/// (`terrain::TerrainGenerator::mountainness`, `0.0..=1.0`) before
+/// `ALTITUDE_ZONES` apply to it at all - outside a range, a high column
+/// (a steep coast's raised headland, say) keeps its region biome.
+pub const MOUNTAIN_RANGE_THRESHOLD: f64 = 0.5;
+
+/// One band of a mountain's vertical biome layering: at or above
+/// `min_height`, a column on a range becomes `biome`.
+pub struct AltitudeZone {
+    pub min_height: i32,
+    pub biome: Biome,
+}
+
+/// A mountain's biomes from its base upward, lowest band first - below the
+/// first band a column keeps its region biome (plains at the foot of a
+/// range). Adding a middle band later (spruce forest on the lower slopes)
+/// is one more entry here; nothing that reads it changes.
+pub const ALTITUDE_ZONES: &[AltitudeZone] = &[AltitudeZone { min_height: 44, biome: Biome::Mountain }];
+
+/// A column's full biome from its region biome, how strongly it sits in a
+/// mountain range, and its height - pure, so the zoning is testable
+/// without generating terrain. `terrain::TerrainGenerator::biome_at` is
+/// the real caller.
+pub fn zoned_biome(region: Biome, mountainness: f64, height: i32) -> Biome {
+    if mountainness < MOUNTAIN_RANGE_THRESHOLD {
+        return region;
+    }
+    ALTITUDE_ZONES.iter().rev().find(|z| height >= z.min_height).map_or(region, |z| z.biome)
 }
 
 /// How wide (in raw region-noise units) `drier_strength` ramps over,
@@ -177,7 +239,7 @@ pub fn biome_at(noise: &SimplexNoise, x: i32, z: i32) -> Biome {
 const DRIER_BLEND: f32 = 0.2;
 
 /// How strongly `Biome::drier` behavior applies at world column `(x, z)`,
-/// `0.0..=1.0` - not the same hard cutoff `biome_at`'s classification
+/// `0.0..=1.0` - not the same hard cutoff `region_biome_at`'s classification
 /// uses, so a continuous effect (`terrain.rs`'s height boost) can ramp in
 /// smoothly around that edge instead of stepping abruptly right at it.
 /// Tied to the one drier biome that exists today (`Biome::Snow`, via
@@ -259,7 +321,7 @@ mod tests {
     #[test]
     fn biome_at_is_deterministic_for_the_same_seed_and_column() {
         let noise = region_noise_for_seed(42);
-        assert_eq!(biome_at(&noise, 1000, -2000), biome_at(&noise, 1000, -2000));
+        assert_eq!(region_biome_at(&noise, 1000, -2000), region_biome_at(&noise, 1000, -2000));
     }
 
     #[test]
@@ -283,7 +345,7 @@ mod tests {
             let mut total = 0;
             for i in -40..40 {
                 for j in -40..40 {
-                    if biome_at(&noise, i * 97, j * 131) == Biome::Snow {
+                    if region_biome_at(&noise, i * 97, j * 131) == Biome::Snow {
                         snow += 1;
                     }
                     total += 1;
@@ -305,6 +367,10 @@ mod tests {
         assert!(Biome::Snow.drier());
         assert!(!Biome::Plains.freezes_water());
         assert!(!Biome::Plains.drier());
+        // Desolate peaks are cold too, but aren't a drier *region* - the
+        // height boost belongs to the Snow region's noise, not to altitude.
+        assert!(Biome::Mountain.freezes_water());
+        assert!(!Biome::Mountain.drier());
     }
 
     #[test]
@@ -329,5 +395,35 @@ mod tests {
     /// happen to produce a specific noise value.
     fn drier_strength_from_raw(n: f32) -> f32 {
         ((n - (SNOW_THRESHOLD - DRIER_BLEND)) / (2.0 * DRIER_BLEND)).clamp(0.0, 1.0)
+    }
+
+    #[test]
+    fn altitude_zones_only_apply_on_a_mountain_range() {
+        let top = ALTITUDE_ZONES[0].min_height;
+        // On a range: the region biome below the zone, Mountain at and above it.
+        assert_eq!(zoned_biome(Biome::Plains, 1.0, top - 1), Biome::Plains);
+        assert_eq!(zoned_biome(Biome::Plains, 1.0, top), Biome::Mountain);
+        assert_eq!(zoned_biome(Biome::Snow, MOUNTAIN_RANGE_THRESHOLD, top + 5), Biome::Mountain);
+        // Off a range, however high (a raised headland), the region biome stays.
+        assert_eq!(zoned_biome(Biome::Plains, MOUNTAIN_RANGE_THRESHOLD - 0.01, top + 10), Biome::Plains);
+    }
+
+    #[test]
+    fn region_noise_never_produces_an_altitude_only_biome() {
+        let noise = region_noise_for_seed(7);
+        for i in -200..200 {
+            for j in -200..200 {
+                assert_ne!(region_biome_at(&noise, i * 37, j * 41), Biome::Mountain);
+            }
+        }
+    }
+
+    #[test]
+    fn biome_names_round_trip_through_parse() {
+        for b in Biome::ALL {
+            assert_eq!(Biome::parse(b.name()), Some(b));
+            assert_eq!(Biome::parse(&b.name().to_uppercase()), Some(b));
+        }
+        assert_eq!(Biome::parse("desert"), None);
     }
 }

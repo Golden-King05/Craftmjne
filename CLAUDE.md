@@ -1467,12 +1467,12 @@ etc.) instead of inventing a new approach:
   noise value a hard classification thresholds, not step at the
   classification's own edge.** `Biome::drier` pushes terrain up (so fewer
   columns dip below `SEA_LEVEL` and form a lake) - if that boost snapped
-  on/off exactly where `biome_at` flips from `Plains` to `Snow`, the biome
+  on/off exactly where `region_biome_at` flips from `Plains` to `Snow`, the biome
   edge would read as a real elevation cliff, which is far more visually
   jarring than the existing hard edge in which *texture* a column's
   surface uses (already accepted at `SNOW_LINE`). `biome::drier_strength`
   ramps `0.0..=1.0` across a blend window centered on the same
-  `SNOW_THRESHOLD` `biome_at` itself uses (not a second, potentially-
+  `SNOW_THRESHOLD` `region_biome_at` itself uses (not a second, potentially-
   disagreeing threshold), so terrain is already rising as a column
   approaches Snow biome and the elevation change is smooth even though the
   surface-block change right at the edge still isn't.
@@ -1535,4 +1535,294 @@ etc.) instead of inventing a new approach:
   extracting the real formula into `TerrainGenerator::effective_height`
   (used by both `generate()` and the test) instead of letting the test
   re-derive its own copy that could quietly drift from the real one.
-
+- **"So land doesn't just become one giant undivided landmass" plus "rivers
+  that run high down to sea level, real flow simulation" is two genuinely
+  different features wearing one request - oceans need large-scale
+  *connectivity*, rivers need genuine per-tile *flow accumulation*, and
+  they don't share a mechanism.** Oceans turned out to need no architecture
+  change at all: `terrain.rs`'s `continent`/`CONTINENT_SCALE` is just one
+  more very-low-frequency noise stream blended into height (mirrors the
+  existing `mountain` mask's own low-freq-decides-the-shape pattern),
+  blended toward a real `DEEP_OCEAN_FLOOR` via `surface_height`'s
+  `ocean_t` - still a pure per-column function, zero cross-chunk
+  dependency. Rivers are the opposite: a river's shape is fundamentally
+  non-local (it has to know what's uphill of it, arbitrarily far away), so
+  before writing any code the real fork was surfaced to the user via
+  `AskUserQuestion` - a cheap noise-band approximation (zero architecture
+  change) vs. genuine flow accumulation (needs a precomputed/cached
+  heightmap, a real change to "chunks generate independently"). The user
+  picked real simulation, so `terrain.rs`'s own "no cross-chunk
+  dependencies" invariant (this file's very first line about the module)
+  got its first deliberate, documented exception.
+- **A genuinely global flow simulation has no valid implementation for a
+  chunk generator with no fixed world size** - there's no upper bound on
+  how far upstream a river's catchment could extend in an unbounded world,
+  so "real flow simulation" necessarily means *bounded*-region flow
+  simulation, not literally-global. `terrain.rs`'s `RegionHydrology` picks
+  a large but finite macro-region (`REGION_BLOCKS = 512`, a `FLOW_GRID`
+  cheap enough - 64x64 - to flood/sort every time it's needed) as the
+  honest middle ground the `AskUserQuestion` answer itself named ("world-
+  scale heightmap up front (**or per-region**)"). Each river's drainage
+  basin is confined to one region and `RegionHydrology::sample`
+  deliberately fades every river to nothing over `RIVER_EDGE_FADE` blocks
+  inside the region's edge - not because that's
+  hydrologically correct, but because it turns an inherent limitation
+  (a river's catchment stopping at an arbitrary line) into something that
+  reads as a minor tributary petering out rather than a visible cliff at a
+  fixed grid coordinate.
+- **A chunk generator whose whole design is "no cross-chunk dependencies,
+  any order, any thread" needs real interior mutability - and a `Mutex`
+  guarding a per-region cache is the right shape specifically because nothing
+  about it needs to be fast under contention.** `TerrainGenerator::hydrology`
+  (`Mutex<HashMap<(i32,i32), Arc<RegionHydrology>>>`) is read from every
+  `generate()` call, across however many chunk-gen tasks `world.rs`'s async
+  compute pool is running at once (up to `MAX_GEN_TASKS`) - but a region is
+  only ever actually *built* once (subsequent lookups for the same key hit
+  the cache), and a build is a few thousand cheap float comparisons, not a
+  hot per-block operation. Two tasks racing to build the same brand-new
+  region just means one of them does a small amount of redundant work
+  before losing the `HashMap::entry` race - correct and cheap either way,
+  so there was no reason to reach for anything more clever (a `RwLock`, a
+  lock-free structure, sharding by region) than the simplest thing that's
+  provably correct.
+- **Give the flow-accumulation algorithm a synthetic input it can be
+  unit-tested against, the same "give tests a way to inject the controlled
+  input a real entry point resolves automatically" split as `atlas::
+  build_atlas`/`build_atlas_from_dir`.** `terrain::carve_from_heights` is
+  the actual steepest-descent-plus-priority-accumulation algorithm, pulled
+  out as a pure function of a plain height slice; `RegionHydrology::build`
+  is the only thing that resolves that input from real noise. A synthetic
+  V-shaped valley (steep side slope, shallow along-valley slope) lets
+  `carve_from_heights_channels_every_column_into_one_widening_stream`
+  assert the *real* algorithm actually channels scattered inflow into one
+  widening stream and carves deepest at the outlet - properties that would
+  be nearly impossible to assert against noise-driven real terrain, where
+  you can't hand-predict what should happen at a given coordinate. Broke
+  the threshold check (`if a > RIVER_THRESHOLD` -> `if false`) and
+  confirmed the test actually goes red before trusting it, per this file's
+  own standing rule.
+- **Hand-picked constants for a brand new noise-driven system are exactly
+  the case this file's "measure, don't assume" rule exists for, and a
+  first guess was wrong in a way that was only visible by measuring, not
+  by reasoning about the formula.** `MAX_ACCUM_FOR_FULL_CARVE` was first
+  guessed at `700` (near `FLOW_GRID`'s full `64*64` cell count, reasoning
+  "a river could in principle drain the whole region") - real fbm terrain
+  never gets close: a throwaway test dumping the actual accumulated-flow
+  grid for several seeds showed real maximums landing around `25-70`, not
+  in the hundreds, because `mountain`/`terrain`'s own local relief (not
+  just the broad regional slope) constantly redirects steepest-descent
+  paths before they can all converge into one channel. Left at `700`, the
+  real rivers this produced were carving only 1-3 blocks deep everywhere -
+  technically "a river" by the `> 0` test that first caught it, but nowhere
+  near strong enough to read as a real feature. Recalibrated to `55`
+  (near the measured ceiling) so a genuinely well-fed real channel reaches
+  full depth. Similarly, `OCEAN_THRESHOLD` was first set assuming "land
+  should stay the clear majority, like before oceans existed" - but a
+  real connectivity test (flood-filling sampled land/ocean grids) showed
+  that with land as the strong majority, land *itself* becomes the one
+  giant connected mass (with the ocean fragmented into many small inland
+  seas) - the exact mirror image of the original complaint, just with the
+  labels swapped. Moving the threshold toward the point where land and
+  ocean are close to evenly split is what actually let *both* sides
+  percolate into multiple large, separate connected regions - a basic
+  percolation-theory fact (a minority phase on a random field fragments;
+  only a share close to 50/50 lets either phase form multiple large
+  components) that wasn't obvious from the formula alone and only showed
+  up by measuring real connected-component sizes.
+- **The "is this really solved" test has to match the user's literal
+  complaint, and the naive version of that test can be topologically
+  impossible to satisfy.** A first attempt at the ocean test asserted a
+  *single* connected ocean covering most of total ocean area, mirroring
+  how `region_noise_area_fractions_land_in_a_reasonable_range` measures a
+  single fraction - but real coastlines legitimately produce several
+  separate seas (Pacific, Atlantic, Indian...), so demanding one dominant
+  basin is stricter than reality itself. `oceans_split_land_into_multiple_
+  masses_separated_by_real_seas` instead asserts what the user actually
+  asked for: at least two *real* (>=1% of sampled area, so a handful of
+  noise-driven single-cell ponds in the long tail don't count) separate
+  landmasses, and at least one ocean basin large enough to read as a real
+  sea - satisfiable by both "two continents, one ocean" and "three
+  continents, several seas," because the user's complaint was about
+  landmass separation existing at all, not about ocean topology
+  specifically.
+- **"The autocomplete dropdown stops at the first space" was a real,
+  deliberate design decision (its own CLAUDE.md entry above) - extending it
+  to complete a command's *arguments* too (`/locate`) had to generalize
+  that decision, not just bolt a special case onto it.** The dropdown's
+  core data stayed `commands::CommandSuggestion { text, usage, description
+  }`, unchanged in shape - the only shift was what `text` means: always
+  "whatever replaces everything after the leading `/`," which used to be
+  only ever a bare command name and is now sometimes a whole `name arg1
+  arg2` line. Because `chat.rs`'s Tab-fill and click-fill handlers
+  (`chat_text_input`'s `KeyCode::Tab` arm, `click_suggestion`) already just
+  did `chat.input = format!("/{} ", suggestion.text)` with no assumption
+  baked in about *how many words* `text` holds, **neither needed a single
+  line changed** - the exact "give the general formula a no-op for the old
+  case" shape this file keeps finding elsewhere (`mesher.rs`'s
+  `rotated_tile`, `light.rs`'s `attenuate`). Only `command_suggestions`
+  itself (decide *what* to suggest for the current input) needed new logic:
+  no space yet -> still the old command-name path (`registry.suggestions`,
+  completely untouched); a space -> split into the already-finished
+  command name plus argument tokens (`split_whitespace`, with a trailing-
+  space check tracked separately so "nothing typed yet for the next token"
+  and "still mid-word" stay distinguishable - `split_whitespace` alone
+  would silently swallow a trailing space and conflate the two), look that
+  exact name up (reusing the existing private `CommandSpec::matches`, not a
+  new prefix search), and call its new optional `arg_candidates` hook if it
+  has one.
+- **An argument-completion hook only ever needs the tokens *before* the one
+  being typed, never the partial text of that token itself - prefix
+  filtering is a generic, one-time concern, not something every command's
+  hook should re-implement.** `CommandSpec::arg_candidates: Option<Box<dyn
+  Fn(&[&str]) -> Vec<ArgCandidate>>>` takes only `prior` (the fully-typed
+  tokens so far); `CommandRegistry::arg_suggestions` is the one place that
+  filters the returned candidates by whatever prefix is currently typed
+  (case-insensitive `starts_with`, mirroring `suggestions`'s own top-level
+  filtering) and sorts them. `/locate`'s own hook
+  (`locate_arg_candidates`) is consequently a two-armed `match` on `prior`'s
+  *length* (`[] =>` the qualifier position, `[qualifier] =>` that
+  qualifier's own names, reading `Biome::ALL`/`Feature::ALL` directly so a
+  third biome or feature needs zero changes here) with no filtering logic
+  of its own at all - exactly the same "declarative data, one generic
+  algorithm" shape as `sky::MoonEventDef`'s table.
+- **An argument completion must echo back whatever command name the player
+  actually typed - an alias or the primary name - never silently normalize
+  it, because normalizing would make Tab/click fill in text different from
+  what's already on screen.** `CommandRegistry::arg_suggestions` builds
+  each result's `text` by joining the literal `command_name` parameter
+  (exactly as typed) with `prior` and the new candidate, not
+  `spec.name` (the canonical name) - caught by writing `an_argument_
+  completion_echoes_back_whatever_command_name_was_actually_typed` as a
+  real regression test (a throwaway command registered under one name
+  with an alias, completed by its alias) rather than trusting the
+  "obviously correct" choice between the two fields without checking.
+- **`Biome`/`Feature` both grew an `ALL`/`name`/`parse` triplet for the same
+  reason, in two different modules, and that's a feature of the pattern,
+  not duplication worth merging.** `/locate biome <name>` needs to parse
+  and enumerate biomes; `/locate feature <name>` needs the same for
+  terrain features - but biomes and features are unrelated concepts
+  (`biome.rs` vs. a new enum local to `terrain.rs`) with no shared base
+  worth generalizing into. Each gets its own tiny, self-contained table
+  (`const ALL: [Self; N]`, `fn name`, `fn parse` derived from the other
+  two) exactly where its variants already live, so a third biome or a
+  fourth feature is a one-line edit to `ALL`/`name` in the one file that
+  already defines it - not a shared registry `/locate` would otherwise
+  need to reach into two unrelated modules to maintain.
+- **A "find the nearest X" search needs an explicit, generous-but-finite
+  search bound, or it silently promises to find something that might not
+  exist within any reachable distance.** `terrain::locate_nearest`'s
+  expanding-ring search is capped at `LOCATE_MAX_RADIUS` (6000 blocks -
+  generous relative to every noise scale a predicate could be built on:
+  `biome::REGION_SCALE` 640, river `REGION_BLOCKS` 512, continent noise's
+  far larger wavelength), returning `None` rather than looping forever if
+  nothing within that bound ever matches. It deliberately is *not* a
+  perfect global nearest-neighbor search - it stops at the first ring with
+  any match and picks that ring's own closest-by-real-distance hit, which
+  can in principle miss a slightly closer match just inside the next
+  ring's near edge. Documented as an accepted approximation rather than
+  fixed, for the same reason the bounded-region river search itself is
+  accepted as-is: a `/locate` command promises "get me close to a real
+  one," not "the provably single closest coordinate in the universe."
+- **Reusing the generator's own definitions for `/locate feature` is what
+  keeps "what counts as a river/mountain" from ever disagreeing with what
+  the generator actually placed.** `Feature::River` is `column_profile(..)
+  .in_river` - the exact wet channel `generate` floods - and
+  `Feature::Mountain` is `mountainness >= MOUNTAIN_RANGE_THRESHOLD`, the same
+  mask the range was raised by and the `Mountain` biome is gated on. (Both
+  were first written as altitude/carve-depth approximations; the river/
+  mountain rework below replaced them with these rather than keeping two
+  definitions of each concept.)
+- **"Can the game already do X?" gets answered by measuring, not by reading
+  the code that's supposed to do it.** Asked to confirm rivers could sit
+  flush or dug-in and mountains could be their own thing, a throwaway probe
+  over three seeds found ~96% of river columns at or below sea level with
+  banks *under* the water on average (rivers only formed in lowlands that
+  were already flooded; upland reaches were dry trenches), and columns
+  inside the mountain mask mostly 26-31 tall, almost never reaching the
+  snow line. Neither was visible from the code - the carve formula and the
+  mountain mask both looked reasonable in isolation. Reporting those
+  numbers was the honest answer to "confirm," and they set the targets the
+  rework was then tuned against.
+- **Water that can stand above sea level isn't held in by anything except
+  the generator's own care, so containment has to be an explicit rule with
+  its own invariant test.** Sea water is safe by construction - only
+  columns whose ground is *below* `SEA_LEVEL` fill. A river's surface sits
+  wherever its valley is, so a dry column beside the channel can easily be
+  lower than the water. `TerrainGenerator::column_profile`'s **levee rule**
+  raises any dry near-river column to at least every 4-neighbour's water
+  surface, computed from those neighbours' *raw* (pre-levee) profiles so
+  it's still a pure per-column function with no cascade.
+  `river_water_never_stands_beside_open_air_on_dry_land` checks every wet
+  column's neighbours across four real river windows, and turning the levee
+  rule off makes it fail immediately. The one deliberate exception is water
+  meeting water at different heights *within* a river - a 1-block rapid
+  where the surface steps down. Voxel water can't slope, so a river that
+  descends has to step somewhere; the step is static until something
+  nearby triggers the fluid sim.
+- **A river's surface is a pull-style value propagated downstream, and it
+  needs the same "only ever improve" cap as `recompute_cell`'s fluid
+  levels.** Each river cell's candidate surface is `bank height - incision`.
+  Incision varies along a river (`river_incision`), so a deeply incised
+  stretch followed by a flush one would have its surface jump *up* to the
+  flush stretch's banks - water climbing uphill. `river_water_levels` walks
+  cells in the same highest-first order `flow_field` already uses and caps
+  each cell at the lowest surface of anything draining into it, so a
+  river's surface can only stay level or step down. Pure functions over a
+  plain height slice, so `a_rivers_surface_never_rises_downstream_even_
+  where_its_banks_get_lower` drives them with a hand-built valley that is
+  incised upstream and flush downstream - exactly the case the cap exists
+  for.
+- **Rivers became segments with real width instead of a blurred grid, and
+  that's what made "flush vs dug in" expressible at all.** The old carve
+  field bilinearly interpolated an 8-block grid, so a river's cross-section
+  was whatever interpolation happened to produce - one fixed soft V. Each
+  river cell is now a `RiverSegment` to the cell it drains into, carrying
+  water level, half-width, depth and incision at both ends.
+  `RegionHydrology::sample` finds the nearest segment and interpolates
+  along it, so a column knows its distance from the centerline and can be
+  shaped deliberately: a rounded wet channel, then banks at `water +
+  incision` (a vertical wall `incision` blocks tall at the water's edge, or
+  none when flush), then terrain easing back to natural over
+  `VALLEY_WIDTH`. Narrower for incised rivers, the start of a canyon.
+- **A bug can hide behind an unrelated feature, and only shows when that
+  feature is switched off.** While break-testing the cliff code (setting
+  coast steepness to zero), the *mountain* tests went red: only 59 of 4,493
+  range columns reached the snow line. The soft ceiling (`soft_ceiling`,
+  which eases tall terrain toward the build limit instead of clamping it
+  flat) was being applied twice, once in `land_relief` and again in
+  `base_height`, compressing every peak below the snow line. The steep-
+  coast uplift happened to stack enough extra height on ~30% of land to
+  hide it. The break test was aimed at cliffs and caught a mountain bug -
+  worth remembering that "switch one feature off" also checks which
+  *other* tests secretly depended on it.
+- **A test can pass with its feature removed because a different feature
+  produces a lookalike - exclude the confounder rather than loosen the
+  test.** `coasts_come_both_as_cliffs_and_as_beaches` stayed green with
+  coast steepness forced to zero, because a mountain range running into
+  the sea is also a tall shore. It now skips columns with any
+  `mountainness`, after which disabling cliffs fails it (0 of 247 shoreline
+  columns). Same lesson as the `big heal` chat test: break the thing a test
+  claims to guard and confirm it goes red.
+- **Altitude-layered biomes need the column's height, so the "real" biome
+  moved onto the generator, and the region-only classifier was renamed so
+  it can't be mistaken for it.** A mountain's base keeps its region biome,
+  and `ALTITUDE_ZONES` (a declarative table, lowest band first - adding
+  spruce on the lower slopes is one entry) takes over above each band's
+  `min_height`. That makes a column's biome depend on its generated height,
+  which only `TerrainGenerator` knows. `biome::biome_at` became
+  `biome::region_biome_at` (it still can't return `Mountain`, which is
+  tested). `TerrainGenerator::biome_at` is the full answer, and every
+  consumer that cared about a column's actual biome switched to it:
+  `generate`, `world.rs`'s freeze rule (`try_freeze_cell` now takes a
+  `biome_at` closure, so its tests can still feed region noise), and
+  `/locate biome`. The `world::BiomeMap` resource, which existed only to
+  hand region noise to the freeze rule and `/locate`, was deleted rather
+  than kept around as a second, incomplete way to ask "what biome is this?"
+- **"Mountain generation separate, but in line with the mountain biome"
+  means one mask drives both.** `mountainness` is the range mask:
+  `land_relief` lifts terrain by it, `zoned_biome` only applies altitude
+  zones where it's at least `MOUNTAIN_RANGE_THRESHOLD`, and `/locate feature
+  mountain` searches for it. A tall column that *isn't* on a range (a
+  steep coast's raised headland) therefore keeps its region biome, and the
+  `Mountain` biome can never appear somewhere the terrain wasn't actually
+  built as a mountain.

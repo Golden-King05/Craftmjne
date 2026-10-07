@@ -245,6 +245,8 @@ fn chat_text_input(
     store: Res<SaveStore>,
     texture_report: Res<TextureReport>,
     registry: Res<CommandRegistry>,
+    world_gen: Res<crate::world::WorldGen>,
+    players: Query<&crate::player::Player>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     if !chat.open {
@@ -275,11 +277,14 @@ fn chat_text_input(
                 let text = chat.input.trim().to_string();
                 if !text.is_empty() {
                     if let Some(rest) = text.strip_prefix('/') {
+                        let player_pos = players.single().map(|p| p.pos).unwrap_or(Vec3::ZERO);
                         let mut ctx = CommandContext {
                             mode: &mut mode,
                             active: &mut active,
                             store: &store,
                             texture_report: &texture_report,
+                            world_gen: &world_gen.0,
+                            player_pos,
                         };
                         let outcome = registry.execute(rest, &mut ctx);
                         log.push(outcome.message());
@@ -436,9 +441,12 @@ fn sync_chat_ui(
     });
 }
 
-/// Command-name suggestions for the current chat input, or empty once the
-/// input either isn't a command at all or has moved past the command-name
-/// token into arguments.
+/// Completions for the current chat input - the command name itself while
+/// still typing it (`/mo` -> `mode`), or, once a space ends that token, one
+/// of that specific command's arguments if it has `arg_candidates` at all
+/// (`/locate biome pl` -> `locate biome plains`). Empty once the input
+/// either isn't a command, or is past the command name of one with nothing
+/// left to complete (`/mode c` - `/mode` has no `arg_candidates`).
 ///
 /// Pure and independent of `ChatState.open`/UI - `open` is checked once by
 /// `update_chat_suggestions` before calling this, and testing this directly
@@ -449,12 +457,26 @@ fn sync_chat_ui(
 /// than owning copies.
 fn command_suggestions(input: &str, registry: &CommandRegistry) -> Vec<CommandSuggestion> {
     let Some(rest) = input.strip_prefix('/') else { return Vec::new() };
-    // A space means the command name is finished and this is now an
-    // argument - `/mode c` shouldn't still be offering to complete "mode".
-    if rest.contains(char::is_whitespace) {
-        return Vec::new();
+    // No space yet: still spelling out the command name itself.
+    if !rest.contains(char::is_whitespace) {
+        return registry.suggestions(rest);
     }
-    registry.suggestions(rest)
+
+    // Past the command name - complete whichever argument token is
+    // currently being typed, using `split_whitespace` (not a raw `split`)
+    // so runs of extra whitespace don't desync the token count, and a
+    // trailing space (nothing typed yet for the *next* token) is tracked
+    // separately rather than lost the way `split_whitespace` alone would.
+    let trailing_space = rest.ends_with(char::is_whitespace);
+    let mut tokens: Vec<&str> = rest.split_whitespace().collect();
+    let Some(command_name) = (!tokens.is_empty()).then(|| tokens.remove(0)) else {
+        return Vec::new();
+    };
+    if trailing_space {
+        tokens.push(""); // a fresh, not-yet-typed token
+    }
+    let Some((partial, prior)) = tokens.split_last() else { return Vec::new() };
+    registry.arg_suggestions(command_name, prior, partial)
 }
 
 /// Runs after `chat_text_input` so it sees this frame's edited input before
@@ -565,7 +587,7 @@ mod tests {
     fn a_bare_slash_lists_every_command_alphabetically() {
         let registry = CommandRegistry::with_defaults();
         let names: Vec<String> = command_suggestions("/", &registry).into_iter().map(|s| s.text).collect();
-        assert_eq!(names, vec!["gamemode", "mode", "texture-report", "texturereport"]);
+        assert_eq!(names, vec!["gamemode", "locate", "mode", "texture-report", "texturereport"]);
     }
 
     #[test]
@@ -576,17 +598,57 @@ mod tests {
     }
 
     #[test]
-    fn a_space_after_the_command_name_ends_suggestions_since_thats_now_an_argument() {
+    fn a_space_after_the_command_name_ends_suggestions_for_a_command_with_no_arg_candidates() {
         let registry = CommandRegistry::with_defaults();
         // `/mode c` is composing an argument to `mode`, not still spelling
         // out the command name - offering to complete "mode" again here
-        // would be actively wrong, not just unhelpful. (Against the
-        // built-in commands, none of which share a name-with-space prefix,
-        // `starts_with` alone would already reject these two - see the next
-        // test for one that actually distinguishes the guard from that
-        // coincidence.)
+        // would be actively wrong, not just unhelpful. `/mode` has no
+        // `arg_candidates` hook, so there's nothing to offer for the
+        // argument position either (contrast `/locate`, which does -
+        // see the `locate_*` tests below). (Against the built-in commands,
+        // none of which share a name-with-space prefix, `starts_with`
+        // alone would already reject these two - see the next test for one
+        // that actually distinguishes the guard from that coincidence.)
         assert!(command_suggestions("/mode c", &registry).is_empty());
         assert!(command_suggestions("/mode ", &registry).is_empty());
+    }
+
+    #[test]
+    fn locate_suggests_qualifiers_then_the_chosen_qualifiers_own_names() {
+        let registry = CommandRegistry::with_defaults();
+        let texts = |input: &str| -> Vec<String> {
+            command_suggestions(input, &registry).into_iter().map(|s| s.text).collect()
+        };
+        assert_eq!(texts("/locate "), vec!["locate biome", "locate feature", "locate structure"]);
+        assert_eq!(texts("/locate bio"), vec!["locate biome"]);
+        assert_eq!(texts("/locate biome "), vec!["locate biome mountain", "locate biome plains", "locate biome snow"]);
+        assert_eq!(texts("/locate biome pl"), vec!["locate biome plains"]);
+        assert_eq!(texts("/locate feature oc"), vec!["locate feature ocean"]);
+        // `structure` has no second argument yet.
+        assert!(texts("/locate structure ").is_empty());
+        // Nothing left to complete once both arguments are already typed.
+        assert!(texts("/locate biome plains ").is_empty());
+        // An unrecognized qualifier has nothing to suggest for its "second
+        // argument" either.
+        assert!(texts("/locate bogus ").is_empty());
+    }
+
+    #[test]
+    fn an_argument_completion_echoes_back_whatever_command_name_was_actually_typed() {
+        // An argument completion shouldn't silently rewrite an alias to
+        // the command's primary name - it only completes the part the
+        // player hasn't finished typing yet.
+        let mut registry = CommandRegistry::with_defaults();
+        registry.register(
+            CommandSpec::new("seek", "/seek <thing>", "an alias test", |_, _| CommandOutcome::Ok(String::new()))
+                .alias("find")
+                .with_arg_candidates(|_prior| {
+                    vec![crate::commands::ArgCandidate::new("treasure", "")]
+                }),
+        );
+        let texts: Vec<String> =
+            command_suggestions("/find tr", &registry).into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, vec!["find treasure"]);
     }
 
     #[test]

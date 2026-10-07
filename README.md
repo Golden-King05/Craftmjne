@@ -216,6 +216,36 @@ survives a save and reload. `mesher::rotated_tile` does the actual face
 remap; it's a no-op for any block whose `rotation` is `"none"`, so adding a
 second rotating block someday needs zero mesher changes.
 
+## World generation
+
+`src/terrain.rs` builds every column from a few independent layers, each its
+own noise stream:
+
+- **Continents and coasts.** A very low-frequency continent field splits
+  land from sea into several separate landmasses. A second field decides
+  each stretch of coast's *style*: gentle coasts fade into the sea over a
+  long beach, steep ones hold the land high right up to a cliff with deep
+  water at its foot.
+- **Mountain ranges.** A range mask (`mountainness`) decides where ranges
+  are; inside one, ridged noise lifts the terrain into ridgelines that reach
+  well above the snow line. Heights are eased toward the build ceiling
+  rather than clamped, so summits stay pointed instead of flattening.
+- **Biomes, layered by altitude.** Every column has a *region* biome
+  (`plains` or `snow`). On a mountain range, `biome::ALTITUDE_ZONES` replaces
+  it by height: the foot of a range keeps its region biome, and from height
+  44 up it becomes the desolate `mountain` biome (bare rock and scree, snow
+  caps from 50). Adding a band between them later (spruce on the lower
+  slopes) is one more table entry.
+- **Rivers.** Water is routed downhill over each 512x512-block region by a
+  real flow simulation, and wherever enough of it gathers a river forms
+  with its own water surface: rivers start in the uplands *above* sea level
+  and step down toward the sea, with short rapids where the surface drops a
+  block. How far a river has cut below its banks varies along its length -
+  some run flush with the ground beside them, others sit a few blocks down
+  in a narrower valley, the start of a canyon. Rivers can't cross from one
+  region into the next, so each fades out before reaching its region's
+  edge.
+
 ## Chat and commands
 
 Press `T` to open a one-line chat box, or `/` to open it with `/` already
@@ -240,6 +270,15 @@ mainly as a place to type `/`-prefixed commands.
   hardcoded zero; see `texture_report::TextureReport`'s doc comment for
   why it should always read `0`). Below the counts it lists which specific
   names are yellow/red, in matching colors.
+- `/locate <biome|feature|structure> <name>` — reports the nearest match
+  (coordinates + distance) to wherever you're standing. `biome` searches
+  for `plains`/`snow`/`mountain` (the last being a range's desolate upper
+  slopes - see "World generation"); `feature` searches for
+  `river`/`ocean`/`mountain` against the generator's real terrain (the
+  same checks worldgen itself uses, not a second guess at what they mean -
+  `feature mountain` finds the range itself, `biome mountain` its peaks);
+  `structure` is reserved for when this game actually generates
+  structures to find, and currently just says so.
 
 Running *any* recognized command — even one that fails with a usage error —
 permanently sets a `cheats: true` flag on the world's `meta.json`
@@ -248,7 +287,15 @@ it's never shown in the UI and never cleared, and exists so a future
 achievements system can check it and skip a world that's had commands used in
 it. An unrecognized command name (a typo, not a real command) does not set it.
 
-Add a command by extending the match in `commands::execute`.
+Add a command with `CommandRegistry::register`/`CommandSpec::new` (see
+`commands::CommandRegistry::with_defaults` for the built-ins' own
+registration) — `commands.rs`'s module docs cover the full extension point,
+including the cheats-flag rule and how aliases work. The in-game chat
+dropdown (`T` or `/`, then start typing) autocompletes both the command
+name itself and, for a command built with `CommandSpec::with_arg_candidates`
+(`/locate` is the example), its arguments too - one token at a time, reusing
+whatever's already fully typed to decide what the next token's candidates
+are.
 
 ### Colored chat text
 
@@ -403,7 +450,7 @@ src/
 ├── blocks.rs    # BlockRegistry: loads blocks/*.json -> compiled flat lookup Tables
 ├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
-├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
+├── terrain.rs   # TerrainGenerator: heightmap, oceans, rivers, biomes, caves, ores, trees
 ├── light.rs     # LightPlugin: colored block light + sky light propagation
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
@@ -415,7 +462,7 @@ src/
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
-├── commands.rs  # chat command dispatcher (/mode, /texture-report ...) + the cheats-flag rule
+├── commands.rs  # chat command dispatcher (/mode, /texture-report, /locate ...) + the cheats-flag rule
 ├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
 ├── texture_report.rs # TextureReport resource: green/yellow/red texture health, read by /texture-report
 └── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel
@@ -758,7 +805,11 @@ fn my_system(mut map: ResMut<craftmjne::world::ChunkMap>) {
 swap in your own generator there. Generation is deterministic per
 `(seed, chunk)` with no cross-chunk dependencies so chunks can generate in any
 order on any thread — keep that property (trees use a border margin for
-exactly this reason).
+exactly this reason). Rivers are the one deliberate exception: they need a
+real flow-accumulation simulation over a large area, so many chunks share one
+lazily-built, cached `RegionHydrology` (a 512×512-block macro-region) behind
+a mutex — see `terrain.rs`'s module doc comment before changing how
+generation is parallelized.
 
 ## Tests
 
