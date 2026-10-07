@@ -1554,57 +1554,68 @@ etc.) instead of inventing a new approach:
   picked real simulation, so `terrain.rs`'s own "no cross-chunk
   dependencies" invariant (this file's very first line about the module)
   got its first deliberate, documented exception.
-- **A genuinely global flow simulation has no valid implementation for a
-  chunk generator with no fixed world size** - there's no upper bound on
-  how far upstream a river's catchment could extend in an unbounded world,
-  so "real flow simulation" necessarily means *bounded*-region flow
-  simulation, not literally-global. `terrain.rs`'s `RegionHydrology` picks
-  a large but finite macro-region (`REGION_BLOCKS = 512`, a `FLOW_GRID`
-  cheap enough - 64x64 - to flood/sort every time it's needed) as the
-  honest middle ground the `AskUserQuestion` answer itself named ("world-
-  scale heightmap up front (**or per-region**)"). Each river's drainage
-  basin is confined to one region and `RegionHydrology::sample`
-  deliberately fades every river to nothing over `RIVER_EDGE_FADE` blocks
-  inside the region's edge - not because that's
-  hydrologically correct, but because it turns an inherent limitation
-  (a river's catchment stopping at an arbitrary line) into something that
-  reads as a minor tributary petering out rather than a visible cliff at a
-  fixed grid coordinate.
-- **A chunk generator whose whole design is "no cross-chunk dependencies,
-  any order, any thread" needs real interior mutability - and a `Mutex`
-  guarding a per-region cache is the right shape specifically because nothing
-  about it needs to be fast under contention.** `TerrainGenerator::hydrology`
-  (`Mutex<HashMap<(i32,i32), Arc<RegionHydrology>>>`) is read from every
-  `generate()` call, across however many chunk-gen tasks `world.rs`'s async
-  compute pool is running at once (up to `MAX_GEN_TASKS`) - but a region is
-  only ever actually *built* once (subsequent lookups for the same key hit
-  the cache), and a build is a few thousand cheap float comparisons, not a
-  hot per-block operation. Two tasks racing to build the same brand-new
-  region just means one of them does a small amount of redundant work
-  before losing the `HashMap::entry` race - correct and cheap either way,
-  so there was no reason to reach for anything more clever (a `RwLock`, a
-  lock-free structure, sharding by region) than the simplest thing that's
-  provably correct.
-- **Give the flow-accumulation algorithm a synthetic input it can be
-  unit-tested against, the same "give tests a way to inject the controlled
-  input a real entry point resolves automatically" split as `atlas::
-  build_atlas`/`build_atlas_from_dir`.** `terrain::carve_from_heights` is
-  the actual steepest-descent-plus-priority-accumulation algorithm, pulled
-  out as a pure function of a plain height slice; `RegionHydrology::build`
-  is the only thing that resolves that input from real noise. A synthetic
-  V-shaped valley (steep side slope, shallow along-valley slope) lets
-  `carve_from_heights_channels_every_column_into_one_widening_stream`
-  assert the *real* algorithm actually channels scattered inflow into one
-  widening stream and carves deepest at the outlet - properties that would
-  be nearly impossible to assert against noise-driven real terrain, where
-  you can't hand-predict what should happen at a given coordinate. Broke
-  the threshold check (`if a > RIVER_THRESHOLD` -> `if false`) and
-  confirmed the test actually goes red before trusting it, per this file's
-  own standing rule.
+- **"A global flow simulation can't work in an unbounded world" turned out
+  to be wrong - it just has to be *lazy and memoized* instead of computed
+  up front.** Rivers were first built over bounded 512-block regions
+  (`RegionHydrology`, now deleted), each fading out before its region's
+  edge, on the reasoning that a catchment could extend arbitrarily far
+  upstream. The user then asked for rivers "not bound by that box."
+  `drainage.rs`'s `Network` covers the whole world. It's a 16-block cell
+  grid where each cell's downstream neighbour is a *local* fact (steepest
+  descent over its 8 neighbours). Accumulation and water level are walked
+  upstream on demand, memoized per node in `OnceLock`s inside lazily
+  created 32x32-cell tiles. Three things make it terminate and stay
+  deterministic:
+  - **Routing over a surface with no pits.** Steepest descent on raw noise
+    strands water in local dips, so rivers came out short and many ended in
+    inland lakes. The cure was routing over a separate `routing_height`:
+    ground smoothed over a 40-block ring, plus a signed
+    `SEAWARD_TILT * (continent - OCEAN_THRESHOLD)` that makes the whole
+    continent lean toward its ocean. Rivers only end at real ocean
+    (`Landscape::is_sea`); a below-sea-level inland basin is something a
+    river flows *through*, not into.
+  - **Measuring flow at the unjittered cell center.** Node positions are
+    jittered for drawing, but sampling the routing height at the jittered
+    point manufactured fake pits between cells.
+  - **A hard catchment cap.** An unbounded upstream walk OOM-killed the
+    test process (SIGKILL) on an infinite synthetic slope.
+    `MAX_ACCUMULATION` aborts any walk that has explored more than that
+    many cells and memoizes the cap. It stays order-independent because
+    whether a walk hits the cap depends only on the true catchment size,
+    never on which chunk asked first.
+  River *length* was limited by geography rather than by the algorithm
+  until `CONTINENT_SCALE` was cut 3x. Before that, land sat a median 160
+  blocks from the coast, so no river could ever be long. Measured after
+  the change: median ~300 blocks, p90 ~700, longest ~1100.
+- **A shared memo behind a `Mutex` is still the right concurrency shape for
+  chunk generation.** `Network::tiles` (`Mutex<HashMap<Cell, Arc<Tile>>>`)
+  is touched from every async gen task, but the lock is held only to find
+  or create a tile. Each node's values live in `OnceLock`s, so two tasks
+  racing on the same node at worst both compute the same deterministic
+  answer. Measured at ~2ms per chunk cold in release, no different from
+  before.
+- **Give the flow algorithm a synthetic world it can be tested against.**
+  `drainage::Landscape` is a trait (routing height, ground, sea, incision,
+  base level), and `TerrainGenerator` is just one implementation. The
+  drainage tests use a hand-built `Valley` closed by ridges, so it has a
+  finite catchment and doesn't trip the cap. With that valley they can
+  assert water reaches the sea along the valley floor, accumulation grows
+  downstream, results don't depend on query order, and a surface never
+  rises downstream. None of that can be hand-predicted on noise terrain.
+  Break-tested: removing the downstream cap on water level turns the
+  "never rises" test red.
+- **When splicing a big file with a script, anchor on something unique.** A
+  Python `rfind("#[cfg(test)]")` meant to find the test module instead
+  matched a later `#[cfg(test)]` *attribute* and silently deleted the
+  whole `mod tests` in `terrain.rs`. Caught only because the test count
+  dropped. Restored it with `git show HEAD:src/terrain.rs`. Anchor on
+  `"#[cfg(test)]\nmod tests"` instead, and check the test count after any
+  scripted edit.
 - **Hand-picked constants for a brand new noise-driven system are exactly
   the case this file's "measure, don't assume" rule exists for, and a
   first guess was wrong in a way that was only visible by measuring, not
-  by reasoning about the formula.** `MAX_ACCUM_FOR_FULL_CARVE` was first
+  by reasoning about the formula.** (Describes the old per-region version;
+  the lesson stands.) `MAX_ACCUM_FOR_FULL_CARVE` was first
   guessed at `700` (near `FLOW_GRID`'s full `64*64` cell count, reasoning
   "a river could in principle drain the whole region") - real fbm terrain
   never gets close: a throwaway test dumping the actual accumulated-flow
@@ -1713,7 +1724,7 @@ etc.) instead of inventing a new approach:
   exist within any reachable distance.** `terrain::locate_nearest`'s
   expanding-ring search is capped at `LOCATE_MAX_RADIUS` (6000 blocks -
   generous relative to every noise scale a predicate could be built on:
-  `biome::REGION_SCALE` 640, river `REGION_BLOCKS` 512, continent noise's
+  `biome::REGION_SCALE` 640, the drainage network's river catchments, continent noise's
   far larger wavelength), returning `None` rather than looping forever if
   nothing within that bound ever matches. It deliberately is *not* a
   perfect global nearest-neighbor search - it stops at the first ring with
@@ -1764,21 +1775,19 @@ etc.) instead of inventing a new approach:
   levels.** Each river cell's candidate surface is `bank height - incision`.
   Incision varies along a river (`river_incision`), so a deeply incised
   stretch followed by a flush one would have its surface jump *up* to the
-  flush stretch's banks - water climbing uphill. `river_water_levels` walks
-  cells in the same highest-first order `flow_field` already uses and caps
-  each cell at the lowest surface of anything draining into it, so a
-  river's surface can only stay level or step down. Pure functions over a
-  plain height slice, so `a_rivers_surface_never_rises_downstream_even_
-  where_its_banks_get_lower` drives them with a hand-built valley that is
-  incised upstream and flush downstream - exactly the case the cap exists
-  for.
+  flush stretch's banks - water climbing uphill. `drainage::Network::
+  water_level` caps each cell at the lowest surface of any river cell
+  draining into it (memoized, so walking upstream happens once per cell),
+  so a river's surface can only stay level or step down. Tested against the
+  synthetic `Valley` landscape in `drainage.rs` - break-tested by removing
+  the cap.
 - **Rivers became segments with real width instead of a blurred grid, and
   that's what made "flush vs dug in" expressible at all.** The old carve
   field bilinearly interpolated an 8-block grid, so a river's cross-section
   was whatever interpolation happened to produce - one fixed soft V. Each
-  river cell is now a `RiverSegment` to the cell it drains into, carrying
+  river cell is now a segment to the cell it drains into, carrying
   water level, half-width, depth and incision at both ends.
-  `RegionHydrology::sample` finds the nearest segment and interpolates
+  `TerrainGenerator::river_sample` finds the nearest segment and interpolates
   along it, so a column knows its distance from the centerline and can be
   shaped deliberately: a rounded wet channel, then banks at `water +
   incision` (a vertical wall `incision` blocks tall at the water's edge, or

@@ -8,6 +8,7 @@ pub mod blocks;
 pub mod chat;
 pub mod commands;
 pub mod config;
+pub mod drainage;
 pub mod icons;
 pub mod interact;
 pub mod inventory;

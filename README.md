@@ -236,15 +236,17 @@ own noise stream:
   44 up it becomes the desolate `mountain` biome (bare rock and scree, snow
   caps from 50). Adding a band between them later (spruce on the lower
   slopes) is one more table entry.
-- **Rivers.** Water is routed downhill over each 512x512-block region by a
-  real flow simulation, and wherever enough of it gathers a river forms
-  with its own water surface: rivers start in the uplands *above* sea level
-  and step down toward the sea, with short rapids where the surface drops a
-  block. How far a river has cut below its banks varies along its length -
-  some run flush with the ground beside them, others sit a few blocks down
-  in a narrower valley, the start of a canyon. Rivers can't cross from one
-  region into the next, so each fades out before reaching its region's
-  edge.
+- **Rivers.** Water is routed downhill over one unbounded drainage network
+  (`drainage.rs`, a 16-block grid that covers the whole world and is
+  computed lazily as you explore), and wherever enough of it gathers a river
+  forms with its own water surface. Rivers start in the uplands *above* sea
+  level, pass through any lakes on the way, and only end at the ocean,
+  stepping down with short rapids where the surface drops a block. Their
+  size depends on how much land drains into them: a short coastal stream is
+  a couple of blocks wide, and a big river can run for over a kilometre and
+  grow to 16 blocks across. How far a river has cut below its banks varies
+  along its length. Some run flush with the ground beside them; others sit
+  a few blocks down in a narrower valley, the start of a canyon.
 
 ## Chat and commands
 
@@ -451,6 +453,7 @@ src/
 ├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
 ├── terrain.rs   # TerrainGenerator: heightmap, oceans, rivers, biomes, caves, ores, trees
+├── drainage.rs  # unbounded, lazily memoized drainage network rivers are routed over
 ├── light.rs     # LightPlugin: colored block light + sky light propagation
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
@@ -806,10 +809,11 @@ swap in your own generator there. Generation is deterministic per
 `(seed, chunk)` with no cross-chunk dependencies so chunks can generate in any
 order on any thread — keep that property (trees use a border margin for
 exactly this reason). Rivers are the one deliberate exception: they need a
-real flow-accumulation simulation over a large area, so many chunks share one
-lazily-built, cached `RegionHydrology` (a 512×512-block macro-region) behind
-a mutex — see `terrain.rs`'s module doc comment before changing how
-generation is parallelized.
+real flow-accumulation simulation over a large area, so every chunk shares
+one `drainage::Network`, which memoizes per-cell flow in lazily-created
+tiles behind a mutex. Its results don't depend on which chunk asked first.
+See `drainage.rs`'s module doc comment before changing how generation is
+parallelized.
 
 ## Tests
 

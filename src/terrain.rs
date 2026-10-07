@@ -4,18 +4,14 @@
 //! margin from chunk borders so features never spill across chunks.
 //!
 //! **Rivers are the one exception to "no cross-chunk dependencies."** A
-//! river has to flow downhill across many chunks in a row, so its shape
-//! can't be decided per-chunk in isolation - see `RegionHydrology`. Chunks
-//! still generate independently of each other in the sense that matters
-//! (any order, any thread, no chunk waits on another chunk), but many
-//! chunks now share one read-only, lazily-built-and-cached region of
-//! precomputed flow data behind a `Mutex` (`TerrainGenerator::hydrology`).
+//! river has to know what's uphill of it, arbitrarily far away, so its shape
+//! can't be decided per-chunk in isolation - see `drainage.rs`. Chunks still
+//! generate independently of each other in the sense that matters (any
+//! order, any thread, no chunk waits on another chunk), but they share one
+//! lazily-filled, memoized drainage network (`TerrainGenerator::drainage`).
 //!
 //! To customize generation, swap the generator constructed in
 //! `world::compile_content` for your own.
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use crate::biome::{self, Biome};
 use crate::blocks::{BlockId, BlockRegistry, Transparency, AIR, AXIS_Y, FLUID_SOURCE};
@@ -43,7 +39,7 @@ const DRIER_HEIGHT_BOOST: f64 = 6.0;
 /// the same across many chunks in a row, which is what turns what used to
 /// be scattered small sub-sea-level dips into real seas that actually
 /// separate landmasses, instead of one giant landmass with puddles in it.
-const CONTINENT_SCALE: f64 = 0.0006;
+const CONTINENT_SCALE: f64 = 0.0002;
 /// `continent_value` is roughly -1..=1 and centered on 0; a threshold near
 /// zero is what actually produces multiple real, separated landmasses
 /// (verified by `oceans_split_land_into_multiple_masses_separated_by_real_seas`).
@@ -55,12 +51,12 @@ const OCEAN_THRESHOLD: f32 = -0.02;
 /// How much of `continent_value`'s own range a *gentle* coast's land->ocean
 /// blend spans - a coastline that fades in over a few hundred blocks
 /// instead of snapping at an exact contour line.
-const COAST_BLEND: f32 = 0.18;
+const COAST_BLEND: f32 = 0.06;
 /// The land->ocean blend width a *fully steep* coast uses instead of
 /// `COAST_BLEND` - narrow enough (the continent field changes by roughly
 /// 0.001 per block) that the drop from the land to the sea floor happens
 /// over a handful of blocks: a cliff, not a beach.
-const CLIFF_BLEND: f32 = 0.004;
+const CLIFF_BLEND: f32 = 0.0013;
 /// How much higher a fully steep coast's whole landmass sits than it would
 /// otherwise - what makes its cliffs *tower* over the water rather than
 /// being a short step down from land barely above sea level. Applied to the
@@ -89,30 +85,34 @@ const MOUNTAIN_LIFT: f64 = 15.0;
 /// Extra height a ridge line adds on top of `MOUNTAIN_LIFT`.
 const PEAK_AMPLITUDE: f64 = 16.0;
 
-/// Size of one river hydrology region, in blocks - see `RegionHydrology`.
-const REGION_BLOCKS: i32 = 512;
-/// Sample spacing within a region's flow grid, in blocks. Rivers are a
-/// landscape-scale feature; this is plenty of resolution to route a
-/// believable path and accumulate realistic flow without paying per-block
-/// cost.
-const FLOW_CELL: i32 = 8;
-const FLOW_GRID: usize = (REGION_BLOCKS / FLOW_CELL) as usize;
+/// How strongly water is steered toward the sea, in routing-height blocks
+/// per unit of `continent_value` above the coastline. Added to real terrain
+/// only for *routing* (`drainage::Landscape::routing_height`), never to the
+/// terrain itself: it gives every point on land a gentle overall tilt
+/// toward its nearest coast, so a river crossing flat ground keeps heading
+/// seaward instead of dead-ending in the first small dip, while steep
+/// ground (mountains) still routes by its own real slope.
+const SEAWARD_TILT: f64 = 750.0;
 
-/// Minimum accumulated upstream area (in flow-grid cells) before a cell
-/// counts as a river at all - below this it's just ordinary hillside
-/// runoff.
-const RIVER_THRESHOLD: f32 = 8.0;
-/// Accumulated area at which a river reaches its full width/depth. Real
-/// fbm terrain rarely channels more than ~25-70 cells into one stream
-/// within a region (measured - see CLAUDE.md), so this sits near that
-/// ceiling rather than near the grid's theoretical maximum.
-const MAX_ACCUM_FOR_FULL_SIZE: f32 = 55.0;
+/// Radius (blocks) of the ring `routing_height` averages terrain over.
+const ROUTING_SMOOTHING: f64 = 40.0;
+
+/// Upstream catchment (in `drainage::CELL`-sized cells) a point needs
+/// before it counts as a river at all - below this it's hillside runoff.
+/// ~48 cells is roughly a 110-block square of land draining through one
+/// spot, which leaves about one cell in ten a river: a network you keep
+/// running into while exploring, without a stream every few steps.
+const RIVER_THRESHOLD: f32 = 48.0;
+/// Catchment at which a river reaches its full width/depth. Sizes grow
+/// logarithmically between `RIVER_THRESHOLD` and this, so headwaters stay
+/// thin for a long way and only the trunk of a large basin gets wide.
+const MAX_ACCUM_FOR_FULL_SIZE: f32 = 2000.0;
 /// Half-width (blocks) of the wet channel for the smallest and largest
-/// rivers.
-const RIVER_HALF_WIDTH: (f64, f64) = (1.5, 5.5);
+/// rivers - a 2-block stream up to a ~16-block-wide lowland river.
+const RIVER_HALF_WIDTH: (f64, f64) = (1.0, 8.0);
 /// Depth (blocks, at the centerline) of the wet channel below the water
 /// surface for the smallest and largest rivers.
-const RIVER_DEPTH: (f64, f64) = (1.0, 4.0);
+const RIVER_DEPTH: (f64, f64) = (1.0, 5.0);
 /// The most a river's banks ever stand above its water surface - a river
 /// "dug in a little, starting to become a canyon", not a canyon yet.
 /// `0` is a flush river whose banks are level with the water.
@@ -126,13 +126,10 @@ const RIVER_CHARACTER_SCALE: f64 = 0.0015;
 /// flush river sits in a wide, gentle valley; an incised one cuts a
 /// narrower, steeper one.
 const VALLEY_WIDTH: (f64, f64) = (14.0, 5.0);
-/// How far (blocks) inside a region's edge a river fades out entirely - see
-/// `RegionHydrology`'s doc comment for why rivers can't cross regions.
-const RIVER_EDGE_FADE: f64 = 24.0;
-/// How many flow-grid cells around a column `RegionHydrology::sample`
-/// checks for river segments - enough to cover the widest river plus its
-/// widest valley (`RIVER_HALF_WIDTH.1 + VALLEY_WIDTH.0` < 4 cells).
-const SEGMENT_SEARCH_CELLS: i32 = 4;
+/// How many drainage cells around a column's own `river_sample` checks for
+/// river segments - enough to cover the widest river plus its widest
+/// valley plus a node's jitter (`8 + 14 + 6` blocks < 2 cells; 3 for margin).
+const SEGMENT_SEARCH_CELLS: i32 = 3;
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
@@ -159,118 +156,9 @@ fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Steepest-descent flow routing plus accumulation over a padded
-/// `(grid + 2)` square height field - the actual hydrology algorithm,
-/// pulled out as a pure function so tests can drive it with a synthetic,
-/// hand-picked height field (the real entry point, `RegionHydrology::
-/// build`, resolves its input by sampling noise - the same `atlas::
-/// build_atlas`/`build_atlas_from_dir` split, for the same reason).
-///
-/// Processes interior cells from highest to lowest, so every upstream
-/// contributor has already deposited its flow into its one downhill
-/// neighbour by the time a cell is visited - the standard O(n log n)
-/// priority-order accumulation; no iterative relaxation, since water only
-/// ever flows one way.
-struct FlowField {
-    /// Interior cells, highest first - the order `river_water_levels` must
-    /// also walk in.
-    order: Vec<usize>,
-    /// Accumulated upstream area per *padded* index (halo entries stay 0).
-    accum: Vec<f32>,
-    /// Each padded index's steepest-descent neighbour (another padded
-    /// index, possibly in the halo), or `None` for a pit / halo cell.
-    down: Vec<Option<usize>>,
-}
-
-fn flow_field(height: &[f32], grid: usize) -> FlowField {
-    let p = grid + 2;
-    debug_assert_eq!(height.len(), p * p);
-    let interior = |i: usize| {
-        let (x, z) = (i % p, i / p);
-        (1..=grid).contains(&x) && (1..=grid).contains(&z)
-    };
-
-    let mut order: Vec<usize> = (0..p * p).filter(|&i| interior(i)).collect();
-    order.sort_by(|&a, &b| height[b].partial_cmp(&height[a]).unwrap());
-
-    let mut accum = vec![0f32; p * p];
-    let mut down = vec![None; p * p];
-    for &i in &order {
-        accum[i] += 1.0;
-        let (gx, gz) = ((i % p) as i32, (i / p) as i32);
-        let mut best: Option<(usize, f32)> = None;
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                let n = (gx + dx) as usize + p * (gz + dz) as usize;
-                let drop = height[i] - height[n];
-                if drop > best.map_or(0.0, |(_, d)| d) {
-                    best = Some((n, drop));
-                }
-            }
-        }
-        if let Some((n, _)) = best {
-            down[i] = Some(n);
-            // Flow whose steepest descent exits into the halo leaves the
-            // region and isn't tracked further - see `RegionHydrology`.
-            if interior(n) {
-                accum[n] += accum[i];
-            }
-        }
-    }
-    FlowField { order, accum, down }
-}
-
-/// Every river cell's water-surface height, in the same padded indexing as
-/// `flow` (`None` for non-river cells). A river's surface starts at its
-/// banks' height minus its `incision` and then only ever stays level or
-/// steps *down* moving downstream - each cell's surface is capped at the
-/// lowest surface of anything flowing into it - and never drops below
-/// `SEA_LEVEL`, where it simply becomes the sea. Pure for the same reason
-/// as `flow_field`.
-fn river_water_levels(height: &[f32], flow: &FlowField, incision: &[f64]) -> Vec<Option<f64>> {
-    let mut level: Vec<Option<f64>> = vec![None; height.len()];
-    let mut cap = vec![f64::INFINITY; height.len()];
-    for &i in &flow.order {
-        if flow.accum[i] <= RIVER_THRESHOLD {
-            continue;
-        }
-        let w = (height[i] as f64 - incision[i]).min(cap[i]).max(SEA_LEVEL as f64);
-        level[i] = Some(w);
-        if let Some(n) = flow.down[i] {
-            cap[n] = cap[n].min(w);
-        }
-    }
-    level
-}
-
-/// The properties of a river at one end of a `RiverSegment`.
-#[derive(Clone, Copy)]
-struct RiverPoint {
-    x: f64,
-    z: f64,
-    /// Water surface height.
-    water: f64,
-    half_width: f64,
-    depth: f64,
-    /// How far the banks stand above `water` - see `MAX_INCISION`.
-    incision: f64,
-}
-
-/// One river cell joined to the cell it drains into - rivers are rendered
-/// as these straight segments with real width, not as a blurry grid, so a
-/// channel has a crisp edge and its width/depth/water level interpolate
-/// smoothly along its length.
-struct RiverSegment {
-    a: RiverPoint,
-    b: RiverPoint,
-}
-
 /// What a river looks like at one world column: distance from the nearest
 /// river segment's centerline, and that river's properties at the closest
-/// point on it (already faded toward nothing near the region edge).
+/// point on it.
 struct RiverSample {
     distance: f64,
     water: f64,
@@ -278,147 +166,6 @@ struct RiverSample {
     depth: f64,
     incision: f64,
     valley_width: f64,
-    /// `1.0` well inside the region, ramping to `0.0` at its edge.
-    fade: f64,
-}
-
-/// A bounded (`REGION_BLOCKS` square) patch of precomputed river data,
-/// built once per region the first time any chunk inside it is generated
-/// and cached for the lifetime of the owning `TerrainGenerator` (see
-/// `TerrainGenerator::river_sample`). This is the "real flow simulation"
-/// this generator's rivers use, chosen over a cheaper noise-band
-/// approximation: a genuinely *global* flow simulation isn't possible for
-/// a chunk generator with no fixed world size (there's no bound on how far
-/// upstream a river's catchment could extend), so a large-but-bounded
-/// region is the deliberate middle ground - each river's drainage basin is
-/// confined to a single region and fades out (`RIVER_EDGE_FADE`) before
-/// reaching that region's edge, rather than the generator ever trying to
-/// reconcile flow across an unbounded number of neighbours.
-///
-/// Deliberately *not* a `bevy::prelude::Resource` cached in `world.rs` -
-/// it's private, derived-and-disposable data belonging entirely to terrain
-/// generation.
-struct RegionHydrology {
-    origin: (i32, i32),
-    segments: Vec<RiverSegment>,
-    /// Per interior flow cell (`FLOW_GRID` square), the segment starting
-    /// there, if that cell is a river - the spatial index `sample` uses.
-    cell_segment: Vec<Option<u32>>,
-}
-
-impl RegionHydrology {
-    fn build(gen: &TerrainGenerator, region: (i32, i32)) -> Self {
-        let p = FLOW_GRID + 2;
-        let origin = (region.0 * REGION_BLOCKS, region.1 * REGION_BLOCKS);
-        // Cell `(gx, gz)`'s sample sits at its block-space center, so a
-        // segment between two cells runs center to center.
-        let center = |i: usize| {
-            let (gx, gz) = ((i % p) as i32 - 1, (i / p) as i32 - 1);
-            (
-                (origin.0 + gx * FLOW_CELL) as f64 + FLOW_CELL as f64 / 2.0,
-                (origin.1 + gz * FLOW_CELL) as f64 + FLOW_CELL as f64 / 2.0,
-            )
-        };
-
-        // The generator's own pre-river terrain, on the padded grid
-        // (including the 1-cell halo) so every interior cell's steepest
-        // descent can be found without a neighbouring region's data.
-        let height: Vec<f32> = (0..p * p)
-            .map(|i| {
-                let (x, z) = center(i);
-                gen.natural_height(x as i32, z as i32) as f32
-            })
-            .collect();
-        let incision: Vec<f64> = (0..p * p)
-            .map(|i| {
-                let (x, z) = center(i);
-                gen.river_incision(x, z)
-            })
-            .collect();
-
-        let flow = flow_field(&height, FLOW_GRID);
-        let water = river_water_levels(&height, &flow, &incision);
-
-        let point = |i: usize, w: f64| {
-            let (x, z) = center(i);
-            let size = ((flow.accum[i] - RIVER_THRESHOLD) / (MAX_ACCUM_FOR_FULL_SIZE - RIVER_THRESHOLD))
-                .clamp(0.0, 1.0)
-                .sqrt() as f64;
-            RiverPoint {
-                x,
-                z,
-                water: w,
-                half_width: lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size),
-                depth: lerp(RIVER_DEPTH.0, RIVER_DEPTH.1, size),
-                incision: incision[i],
-            }
-        };
-
-        let mut segments = Vec::new();
-        let mut cell_segment = vec![None; FLOW_GRID * FLOW_GRID];
-        for &i in &flow.order {
-            let Some(w) = water[i] else { continue };
-            let a = point(i, w);
-            let b = match flow.down[i] {
-                // Downstream is itself a river cell (it always is when
-                // it's interior - it received at least this cell's flow).
-                Some(n) if water[n].is_some() => point(n, water[n].unwrap()),
-                // Leaves the region (or a pit): extend to the next cell's
-                // center at the same size and level; the edge fade hides
-                // the rest.
-                Some(n) => {
-                    let (x, z) = center(n);
-                    RiverPoint { x, z, ..a }
-                }
-                None => a,
-            };
-            let (gx, gz) = (i % p - 1, i / p - 1);
-            cell_segment[gx + FLOW_GRID * gz] = Some(segments.len() as u32);
-            segments.push(RiverSegment { a, b });
-        }
-
-        Self { origin, segments, cell_segment }
-    }
-
-    /// The nearest river to world column `(x, z)` (which must fall inside
-    /// this region), or `None` if no segment is within reach.
-    fn sample(&self, x: i32, z: i32) -> Option<RiverSample> {
-        let (lx, lz) = (x - self.origin.0, z - self.origin.1);
-        let (cx, cz) = (lx.div_euclid(FLOW_CELL), lz.div_euclid(FLOW_CELL));
-        let (px, pz) = (x as f64 + 0.5, z as f64 + 0.5);
-
-        let mut best: Option<(f64, &RiverSegment, f64)> = None;
-        for gz in (cz - SEGMENT_SEARCH_CELLS).max(0)..=(cz + SEGMENT_SEARCH_CELLS).min(FLOW_GRID as i32 - 1) {
-            for gx in (cx - SEGMENT_SEARCH_CELLS).max(0)..=(cx + SEGMENT_SEARCH_CELLS).min(FLOW_GRID as i32 - 1) {
-                let Some(s) = self.cell_segment[gx as usize + FLOW_GRID * gz as usize] else { continue };
-                let seg = &self.segments[s as usize];
-                let (dx, dz) = (seg.b.x - seg.a.x, seg.b.z - seg.a.z);
-                let len2 = dx * dx + dz * dz;
-                let t = if len2 > 0.0 {
-                    (((px - seg.a.x) * dx + (pz - seg.a.z) * dz) / len2).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let (qx, qz) = (seg.a.x + dx * t, seg.a.z + dz * t);
-                let d = ((px - qx).powi(2) + (pz - qz).powi(2)).sqrt();
-                if best.is_none_or(|(bd, _, _)| d < bd) {
-                    best = Some((d, seg, t));
-                }
-            }
-        }
-        let (distance, seg, t) = best?;
-        let incision = lerp(seg.a.incision, seg.b.incision, t);
-        let edge = lx.min(lz).min(REGION_BLOCKS - 1 - lx).min(REGION_BLOCKS - 1 - lz) as f64;
-        Some(RiverSample {
-            distance,
-            water: lerp(seg.a.water, seg.b.water, t),
-            half_width: lerp(seg.a.half_width, seg.b.half_width, t),
-            depth: lerp(seg.a.depth, seg.b.depth, t),
-            incision,
-            valley_width: lerp(VALLEY_WIDTH.0, VALLEY_WIDTH.1, incision / MAX_INCISION),
-            fade: (edge / RIVER_EDGE_FADE).clamp(0.0, 1.0),
-        })
-    }
 }
 
 /// What a single world column generates as: its solid surface height, and
@@ -502,15 +249,11 @@ pub struct TerrainGenerator {
     /// Which *region* biome a column belongs to before altitude zones - see
     /// `biome.rs`'s module docs and `biome_at`.
     biome: SimplexNoise,
-    /// Cache of per-region river data, built lazily the first time any
-    /// chunk in that region is generated - see `RegionHydrology` and
-    /// `river_sample`. A `Mutex` because chunk generation runs on the async
-    /// compute task pool across many threads at once
-    /// (`world.rs`'s `stream_chunks`); this is the one piece of terrain
-    /// generation state that isn't purely a function of its own chunk
-    /// coordinate any more - see this module's own doc comment at the top
-    /// of the file.
-    hydrology: Mutex<HashMap<(i32, i32), Arc<RegionHydrology>>>,
+    /// The world-wide drainage network rivers are drawn from - see
+    /// `drainage.rs`. Lazily filled and memoized as chunks ask; the one
+    /// piece of terrain generation that isn't purely a function of its own
+    /// chunk coordinate - see this module's own doc comment.
+    drainage: crate::drainage::Network,
 }
 
 impl TerrainGenerator {
@@ -546,7 +289,7 @@ impl TerrainGenerator {
             cave_a: SimplexNoise::new(seed ^ 0x85ebca6b),
             cave_b: SimplexNoise::new(seed ^ 0xc2b2ae35),
             biome: biome::region_noise_for_seed(seed),
-            hydrology: Mutex::new(HashMap::new()),
+            drainage: crate::drainage::Network::new(seed),
         }
     }
 
@@ -581,7 +324,7 @@ impl TerrainGenerator {
 
     /// How far a river at `(x, z)` has cut below its banks, `0.0` (flush -
     /// banks level with the water) to `MAX_INCISION`. Sampled per river
-    /// node when a region's hydrology is built, then interpolated along the
+    /// node of the drainage network, then interpolated along the
     /// river, so a river's character drifts gradually along its length.
     fn river_incision(&self, x: f64, z: f64) -> f64 {
         let n = self.river_character.fbm2(x * RIVER_CHARACTER_SCALE, z * RIVER_CHARACTER_SCALE, 2);
@@ -635,22 +378,72 @@ impl TerrainGenerator {
     }
 
     /// The terrain rivers flow over: `base_height` plus the `Biome::drier`
-    /// boost, before any river has cut into it. What `RegionHydrology`
+    /// boost, before any river has cut into it. What `drainage.rs`
     /// routes water across, and what a river's banks are measured against.
     fn natural_height(&self, wx: i32, wz: i32) -> f64 {
         let boost = biome::drier_strength(&self.biome, wx, wz) as f64 * DRIER_HEIGHT_BOOST;
         (self.base_height(wx, wz) + boost).clamp(2.0, (WORLD_HEIGHT - 8) as f64)
     }
 
-    /// The nearest river to `(x, z)`, building and caching that region's
-    /// hydrology on first use.
+    /// The nearest river to `(x, z)`, if one is within reach: the closest
+    /// segment between a river node and the node it drains into, with the
+    /// river's properties interpolated along it.
     fn river_sample(&self, wx: i32, wz: i32) -> Option<RiverSample> {
-        let region = (wx.div_euclid(REGION_BLOCKS), wz.div_euclid(REGION_BLOCKS));
-        let hydrology = {
-            let mut cache = self.hydrology.lock().unwrap();
-            cache.entry(region).or_insert_with(|| Arc::new(RegionHydrology::build(self, region))).clone()
+        use crate::drainage::CELL;
+        let net = &self.drainage;
+        let home = (wx.div_euclid(CELL), wz.div_euclid(CELL));
+        let (px, pz) = (wx as f64 + 0.5, wz as f64 + 0.5);
+
+        // One end of a segment: (position, water, half-width, depth, incision).
+        let point = |cell: crate::drainage::Cell| {
+            let (x, z) = net.node_pos(cell);
+            let accumulation = net.accumulation(self, cell);
+            let size = ((accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln())
+                .clamp(0.0, 1.0) as f64;
+            (
+                (x, z),
+                net.water_level(self, cell, RIVER_THRESHOLD) as f64,
+                lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size),
+                lerp(RIVER_DEPTH.0, RIVER_DEPTH.1, size),
+                self.river_incision(x, z),
+            )
         };
-        hydrology.sample(wx, wz)
+
+        let mut best: Option<(f64, RiverSample)> = None;
+        for dz in -SEGMENT_SEARCH_CELLS..=SEGMENT_SEARCH_CELLS {
+            for dx in -SEGMENT_SEARCH_CELLS..=SEGMENT_SEARCH_CELLS {
+                let cell = (home.0 + dx, home.1 + dz);
+                if net.accumulation(self, cell) <= RIVER_THRESHOLD {
+                    continue;
+                }
+                let a = point(cell);
+                // Downstream of a river cell is always a river cell too (it
+                // drains at least as much); a river ending at the sea or a
+                // pit is a segment of zero length - a round end.
+                let b = net.downstream(self, cell).map_or(a, point);
+                let ((ax, az), (bx, bz)) = (a.0, b.0);
+                let (sx, sz) = (bx - ax, bz - az);
+                let len2 = sx * sx + sz * sz;
+                let t = if len2 > 0.0 { (((px - ax) * sx + (pz - az) * sz) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                let d = ((px - ax - sx * t).powi(2) + (pz - az - sz * t).powi(2)).sqrt();
+                if best.as_ref().is_some_and(|(bd, _)| *bd <= d) {
+                    continue;
+                }
+                let incision = lerp(a.4, b.4, t);
+                best = Some((
+                    d,
+                    RiverSample {
+                        distance: d,
+                        water: lerp(a.1, b.1, t),
+                        half_width: lerp(a.2, b.2, t),
+                        depth: lerp(a.3, b.3, t),
+                        incision,
+                        valley_width: lerp(VALLEY_WIDTH.0, VALLEY_WIDTH.1, incision / MAX_INCISION),
+                    },
+                ));
+            }
+        }
+        best.map(|(_, sample)| sample)
     }
 
     /// One column's profile *before* the levee rule in `column_profile` -
@@ -663,7 +456,7 @@ impl TerrainGenerator {
 
         if let Some(r) = self.river_sample(wx, wz) {
             let water = r.water.floor();
-            let half_width = r.half_width * r.fade;
+            let half_width = r.half_width;
             if r.distance <= half_width + r.valley_width + 1.0 {
                 near_river = true;
             }
@@ -682,7 +475,7 @@ impl TerrainGenerator {
                 let banks = water + r.incision;
                 if natural > banks {
                     let ease = smoothstep((r.distance - half_width) / r.valley_width);
-                    h = natural + (lerp(banks, natural, ease) - natural) * r.fade;
+                    h = lerp(banks, natural, ease);
                 }
                 river_bank = half_width >= 0.5 && r.distance <= half_width + 2.0 && h <= water + 1.0;
             }
@@ -947,6 +740,48 @@ impl TerrainGenerator {
     }
 }
 
+impl crate::drainage::Landscape for TerrainGenerator {
+    fn routing_height(&self, x: f64, z: f64) -> f64 {
+        let (wx, wz) = (x.floor() as i32, z.floor() as i32);
+        // Signed, not clamped at the coast: the tilt keeps sloping on past
+        // the shoreline, so flat coastal ground just inside the ocean zone
+        // (where the sea hasn't actually started yet) still drains to it
+        // instead of forming a dead-flat trap one step from the water.
+        let inland = (self.continent_value(wx, wz) - OCEAN_THRESHOLD) as f64;
+        // The terrain as water "sees" it at the scale of a whole valley:
+        // averaged over a ring `ROUTING_SMOOTHING` blocks out, so a dip a
+        // few blocks across can't trap a river - only a real basin can.
+        let r = ROUTING_SMOOTHING;
+        let mut sum = self.natural_height(wx, wz);
+        for k in 0..8 {
+            let a = k as f64 * std::f64::consts::FRAC_PI_4;
+            sum += self.natural_height((x + r * a.cos()).floor() as i32, (z + r * a.sin()).floor() as i32);
+        }
+        sum / 9.0 + SEAWARD_TILT * inland
+    }
+
+    fn ground_height(&self, x: f64, z: f64) -> f64 {
+        self.natural_height(x.floor() as i32, z.floor() as i32)
+    }
+
+    /// The open ocean only - a continent's sea, not every low dip in the
+    /// plains that happens to flood. Rivers flow *through* inland lakes
+    /// (their surface simply meets the lake's at sea level) and keep going;
+    /// they only end where they actually reach the sea.
+    fn is_sea(&self, x: f64, z: f64) -> bool {
+        let (wx, wz) = (x.floor() as i32, z.floor() as i32);
+        self.continent_value(wx, wz) < OCEAN_THRESHOLD && self.natural_height(wx, wz) < SEA_LEVEL as f64
+    }
+
+    fn incision(&self, x: f64, z: f64) -> f64 {
+        self.river_incision(x, z)
+    }
+
+    fn base_level(&self) -> f64 {
+        SEA_LEVEL as f64
+    }
+}
+
 /// A landscape feature `/locate feature <name>` can search for - see
 /// `Feature::matches_column` for what each one actually means on this
 /// generator's terrain, and `TerrainGenerator::locate_feature` for the
@@ -1000,8 +835,8 @@ impl Feature {
 
 /// How far out a `/locate` search goes before giving up, in blocks.
 /// Generous relative to every noise scale a search predicate could be
-/// built on here (`biome::REGION_SCALE` 640, river regions `REGION_BLOCKS`
-/// 512, `CONTINENT_SCALE`'s ocean/landmass wavelength far larger still), so
+/// built on here (`biome::REGION_SCALE` 640; land rarely sits more than
+/// ~2000 blocks from the sea at `CONTINENT_SCALE`), so
 /// a real search essentially always finds its target well inside this
 /// bound - it exists only to guarantee `/locate` terminates instead of
 /// promising to find something that could structurally not exist nearby.
@@ -1082,7 +917,6 @@ impl TerrainGenerator {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1207,10 +1041,34 @@ mod tests {
         (0..size * size).map(|i| gen.column_profile(x0 + i % size, z0 + i / size)).collect()
     }
 
-    /// Windows (on seed 7) that real rivers cross - several separate
-    /// regions, so the tests see more than one river's worth of variety.
-    const RIVER_WINDOWS: [(i32, i32); 4] = [(-512, -512), (0, 0), (300, -400), (-400, 200)];
-    const WINDOW: i32 = 200;
+    const WINDOW: i32 = 160;
+
+    /// Top-left corners of `WINDOW`-sized squares centered on real river
+    /// nodes (seed 7) - found through the drainage network rather than
+    /// hardcoded, so the tests keep looking at rivers whatever the
+    /// continents happen to do. Half are on upland rivers (surface well
+    /// above the sea), half anywhere.
+    fn river_windows(gen: &TerrainGenerator) -> Vec<(i32, i32)> {
+        let net = &gen.drainage;
+        let (mut upland, mut any) = (vec![], vec![]);
+        for i in -60..60 {
+            for j in -60..60 {
+                let cell = (i * 4, j * 4);
+                if net.accumulation(gen, cell) <= RIVER_THRESHOLD {
+                    continue;
+                }
+                let (x, z) = net.node_pos(cell);
+                let corner = (x as i32 - WINDOW / 2, z as i32 - WINDOW / 2);
+                if net.water_level(gen, cell, RIVER_THRESHOLD) >= SEA_LEVEL as f32 + 6.0 && upland.len() < 3 {
+                    upland.push(corner);
+                } else if any.len() < 3 {
+                    any.push(corner);
+                }
+            }
+        }
+        assert!(upland.len() == 3 && any.len() == 3, "found only {upland:?} upland / {any:?} other rivers");
+        upland.into_iter().chain(any).collect()
+    }
 
     /// The invariant the levee rule (`column_profile`) exists for: river
     /// water can stand above sea level, so nothing but the generator's own
@@ -1223,7 +1081,7 @@ mod tests {
         let reg = BlockRegistry::with_defaults();
         let gen = TerrainGenerator::new(7, &reg);
         let mut checked = 0;
-        for (x0, z0) in RIVER_WINDOWS {
+        for (x0, z0) in river_windows(&gen) {
             let p = profiles(&gen, x0, z0, WINDOW);
             for z in 1..WINDOW - 1 {
                 for x in 1..WINDOW - 1 {
@@ -1257,7 +1115,7 @@ mod tests {
         let (water, ice) = (reg.id("water"), reg.id("ice"));
         let gen = TerrainGenerator::new(7, &reg);
         let mut highest = None;
-        for (x0, z0) in RIVER_WINDOWS {
+        for (x0, z0) in river_windows(&gen) {
             let p = profiles(&gen, x0, z0, WINDOW);
             for (i, col) in p.iter().enumerate() {
                 if let (true, Some(top)) = (col.in_river, col.water_top) {
@@ -1285,7 +1143,7 @@ mod tests {
         let reg = BlockRegistry::with_defaults();
         let gen = TerrainGenerator::new(7, &reg);
         let (mut flush, mut dug_in) = (0, 0);
-        for (x0, z0) in RIVER_WINDOWS {
+        for (x0, z0) in river_windows(&gen) {
             let p = profiles(&gen, x0, z0, WINDOW);
             for z in 1..WINDOW - 1 {
                 for x in 1..WINDOW - 1 {
@@ -1308,6 +1166,68 @@ mod tests {
         assert!(flush > 20 && dug_in > 20, "flush banks: {flush}, dug-in banks: {dug_in}");
     }
 
+    /// Rivers aren't confined to any box: somewhere in the sampled world a
+    /// single river runs a kilometre from where it first counts as a river
+    /// to its end - about twice the side of the 512-block regions rivers
+    /// used to be trapped inside. (Measured over three seeds: median ~300
+    /// blocks, 90th percentile ~700, longest ~1000-1100 inside a 3200-block
+    /// window, which itself cuts the longest ones short.)
+    #[test]
+    fn some_rivers_run_for_over_a_kilometre() {
+        use crate::drainage::CELL;
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let net = &gen.drainage;
+        let mut longest = 0;
+        // Every cell, not a sparse sample: a river is only counted from its
+        // source, and a sparse grid mostly misses sources.
+        for i in -100..100 {
+            for j in -100..100 {
+                let cell = (i, j);
+                // A river source: a river cell no river flows into.
+                if net.accumulation(&gen, cell) <= RIVER_THRESHOLD
+                    || net.donors(&gen, cell).any(|d| net.accumulation(&gen, d) > RIVER_THRESHOLD)
+                {
+                    continue;
+                }
+                let (mut c, mut steps) = (cell, 0);
+                while let Some(d) = net.downstream(&gen, c) {
+                    c = d;
+                    steps += 1;
+                }
+                longest = longest.max(steps * CELL);
+            }
+        }
+        assert!(longest >= 1000, "longest river found runs only {longest} blocks");
+    }
+
+    /// "Wide and thin rivers": both a 2-3 block stream and a broad river
+    /// (10+ blocks across) have to actually occur.
+    #[test]
+    fn rivers_come_both_thin_and_wide() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let net = &gen.drainage;
+        let (mut thin, mut wide) = (0, 0);
+        for i in -60..60 {
+            for j in -60..60 {
+                let cell = (i * 4, j * 4);
+                let a = net.accumulation(&gen, cell);
+                if a <= RIVER_THRESHOLD {
+                    continue;
+                }
+                let size = ((a / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln()).clamp(0.0, 1.0);
+                let width = 2.0 * lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size as f64);
+                if width <= 3.0 {
+                    thin += 1;
+                } else if width >= 10.0 {
+                    wide += 1;
+                }
+            }
+        }
+        assert!(thin > 20 && wide > 3, "thin: {thin}, wide: {wide}");
+    }
+
     /// Steep coasts (`coast_steepness`) have to actually produce cliffs
     /// standing well above the water, and gentle coasts have to stay
     /// beaches - judged on columns sitting right at a continent's shoreline,
@@ -1322,11 +1242,14 @@ mod tests {
         for seed in [1u32, 7, 42] {
             let gen = TerrainGenerator::new(seed, &reg);
             let (mut cliffs, mut beaches, mut shore) = (0, 0, 0);
+            // Wide (8000 blocks a side): continents are large enough that a
+            // smaller window can contain a single stretch of coast, which
+            // may simply happen to be all beach or all cliff.
             for i in 0..250 {
                 for j in 0..250 {
-                    let (x, z) = (i * 8 - 1000, j * 8 - 1000);
+                    let (x, z) = (i * 32 - 4000, j * 32 - 4000);
                     let c = gen.continent_value(x, z);
-                    if !(OCEAN_THRESHOLD..OCEAN_THRESHOLD + 0.006).contains(&c) || gen.mountainness(x, z) > 0.0 {
+                    if !(OCEAN_THRESHOLD..OCEAN_THRESHOLD + 0.01).contains(&c) || gen.mountainness(x, z) > 0.0 {
                         continue;
                     }
                     shore += 1;
@@ -1510,99 +1433,5 @@ mod tests {
             }
         }
         panic!("column ({x}, {z}) is entirely air");
-    }
-}
-
-/// The hydrology algorithms on synthetic height fields, where what *should*
-/// happen can be worked out by hand - impossible against real noise.
-#[cfg(test)]
-mod hydrology {
-    use super::*;
-
-    /// A V-shaped valley over a padded `(grid + 2)` square: a steep side
-    /// slope funnels every column toward the center, a shallow along-valley
-    /// slope drains that channel toward low `gz`. `base` lifts the whole
-    /// thing; a tiny `gx` term breaks left/right ties.
-    fn valley_height(grid: usize, base: f32) -> Vec<f32> {
-        let p = grid + 2;
-        let cx = (grid as f32 + 1.0) / 2.0;
-        (0..p * p)
-            .map(|i| {
-                let (gx, gz) = ((i % p) as f32, (i / p) as f32);
-                base + 5.0 * (gx - cx).abs() + gz + 0.001 * gx
-            })
-            .collect()
-    }
-
-    const GRID: usize = 16;
-    const P: usize = GRID + 2;
-    const CENTER: usize = 8; // where `valley_height`'s side slope bottoms out
-
-    #[test]
-    fn flow_channels_every_column_into_one_growing_stream() {
-        let flow = flow_field(&valley_height(GRID, 100.0), GRID);
-        // The center channel gathers more flow at every step downstream...
-        let mut prev = 0.0;
-        for gz in (1..=GRID).rev() {
-            let a = flow.accum[CENTER + P * gz];
-            assert!(a >= prev, "accumulation shrank moving downstream at gz={gz}");
-            prev = a;
-        }
-        assert!(prev > RIVER_THRESHOLD * 4.0, "the outlet only gathered {prev}");
-        // ...while nothing off it ever gathers enough to count as a river.
-        for gz in 1..=GRID {
-            for gx in (1..=GRID).filter(|&gx| gx != CENTER) {
-                assert!(flow.accum[gx + P * gz] <= RIVER_THRESHOLD, "gx={gx} gz={gz} became a river");
-            }
-        }
-    }
-
-    #[test]
-    fn flat_ground_has_nowhere_to_flow() {
-        let flow = flow_field(&vec![50.0; P * P], GRID);
-        assert!(flow.down.iter().all(Option::is_none));
-        assert!(flow.order.iter().all(|&i| flow.accum[i] == 1.0));
-    }
-
-    /// The center channel's water surface, top to bottom of the valley.
-    fn channel_levels(base: f32, incision: impl Fn(usize) -> f64) -> Vec<f64> {
-        let height = valley_height(GRID, base);
-        let flow = flow_field(&height, GRID);
-        let inc: Vec<f64> = (0..P * P).map(|i| incision(i / P)).collect();
-        let levels = river_water_levels(&height, &flow, &inc);
-        (1..=GRID).rev().filter_map(|gz| levels[CENTER + P * gz]).collect()
-    }
-
-    #[test]
-    fn a_rivers_surface_never_rises_downstream_even_where_its_banks_get_lower() {
-        // Deeply incised upstream (high gz), flush downstream: without the
-        // cap, the flush stretch's surface would jump *up* to its banks
-        // where the incision ends - water climbing uphill.
-        let levels = channel_levels(60.0, |gz| if gz > 8 { 6.0 } else { 0.0 });
-        assert!(levels.len() > 3);
-        for pair in levels.windows(2) {
-            assert!(pair[1] <= pair[0], "surface rose downstream: {levels:?}");
-        }
-        assert!(levels.iter().all(|&w| w > SEA_LEVEL as f64), "this valley is all upland: {levels:?}");
-    }
-
-    #[test]
-    fn a_flush_river_runs_level_with_its_banks() {
-        let height = valley_height(GRID, 60.0);
-        let levels = channel_levels(60.0, |_| 0.0);
-        // The first river cell's surface is its own ground height exactly.
-        let first_river_gz = (1..=GRID)
-            .rev()
-            .find(|&gz| flow_field(&height, GRID).accum[CENTER + P * gz] > RIVER_THRESHOLD)
-            .unwrap();
-        assert_eq!(levels[0], height[CENTER + P * first_river_gz] as f64);
-    }
-
-    #[test]
-    fn a_river_meeting_the_sea_never_drops_below_it() {
-        // A valley whose floor sits well below sea level.
-        let levels = channel_levels(SEA_LEVEL as f32 - 20.0, |_| 3.0);
-        assert!(!levels.is_empty());
-        assert!(levels.iter().all(|&w| w >= SEA_LEVEL as f64), "{levels:?}");
     }
 }
