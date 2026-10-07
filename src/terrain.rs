@@ -378,7 +378,7 @@ impl TerrainGenerator {
     /// with either), but anything that needs to know the *real* height a
     /// specific column generated at - including this generator's own
     /// tests - has to go through this, not `surface_height` alone.
-    fn effective_height(&self, wx: i32, wz: i32) -> i32 {
+    pub fn effective_height(&self, wx: i32, wz: i32) -> i32 {
         let boost = biome::drier_strength(&self.biome, wx, wz) as f64 * DRIER_HEIGHT_BOOST;
         let carve = self.river_carve(wx, wz);
         ((self.surface_height(wx, wz) as f64 + boost - carve).round() as i32)
@@ -571,6 +571,143 @@ impl TerrainGenerator {
         }
         light
     }
+}
+
+/// A landscape feature `/locate feature <name>` can search for - see
+/// `Feature::matches_column` for what each one actually means on this
+/// generator's terrain, and `TerrainGenerator::locate_feature` for the
+/// search itself. Mirrors `Biome`'s own `ALL`/`name`/`parse` shape
+/// (`biome.rs`) so both qualifiers plug into `/locate`'s argument
+/// autocomplete and parsing the exact same way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Feature {
+    River,
+    Ocean,
+    Mountain,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 3] = [Feature::River, Feature::Ocean, Feature::Mountain];
+
+    /// The lowercase name a player types to refer to this feature in chat
+    /// commands - the inverse of `Feature::parse`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Feature::River => "river",
+            Feature::Ocean => "ocean",
+            Feature::Mountain => "mountain",
+        }
+    }
+
+    /// Parses a player-typed feature name (case-insensitive), the inverse
+    /// of `Feature::name`.
+    pub fn parse(s: &str) -> Option<Feature> {
+        Feature::ALL.into_iter().find(|f| f.name().eq_ignore_ascii_case(s))
+    }
+
+    /// Whether world column `(wx, wz)` counts as this feature, on `gen`'s
+    /// own terrain - `terrain.rs` is the one source of truth for what a
+    /// river/ocean/mountain actually is, so `/locate` never maintains a
+    /// second, potentially-disagreeing definition.
+    fn matches_column(self, gen: &TerrainGenerator, wx: i32, wz: i32) -> bool {
+        match self {
+            // The same "is this a real, visibly-carved channel" bar this
+            // module's own tests hold a river to (see `a_real_river_cuts_
+            // a_water_filled_channel_through_dry_land`), not merely "any
+            // nonzero carve at all" - a river worth locating, not a trace
+            // of hillside runoff.
+            Feature::River => gen.river_carve(wx, wz) >= 3.0,
+            Feature::Ocean => gen.surface_height(wx, wz) < SEA_LEVEL,
+            // The same altitude bar `generate` itself uses to decide a
+            // column is snow-capped-mountain terrain, regardless of biome.
+            Feature::Mountain => gen.effective_height(wx, wz) >= SNOW_LINE,
+        }
+    }
+}
+
+/// How far out a `/locate` search goes before giving up, in blocks.
+/// Generous relative to every noise scale a search predicate could be
+/// built on here (`biome::REGION_SCALE` 640, river regions `REGION_BLOCKS`
+/// 512, `CONTINENT_SCALE`'s ocean/landmass wavelength far larger still), so
+/// a real search essentially always finds its target well inside this
+/// bound - it exists only to guarantee `/locate` terminates instead of
+/// promising to find something that could structurally not exist nearby.
+const LOCATE_MAX_RADIUS: i32 = 6000;
+/// Spacing between sampled columns while searching, in blocks. A `/locate`
+/// result is meant to get the player close, not land on the single exact
+/// nearest block, so sampling coarser than every block is both cheap and
+/// plenty precise for that purpose.
+const LOCATE_STEP: i32 = 16;
+
+/// Searches outward from `(origin_x, origin_z)` in expanding square rings
+/// (each `LOCATE_STEP` further out than the last) for the nearest sampled
+/// column `is_match` accepts, returning its world `(x, z)` - or `None` if
+/// nothing matched within `LOCATE_MAX_RADIUS`. Shared by every `/locate`
+/// qualifier (biome, feature) so each just supplies its own predicate
+/// instead of reimplementing the search.
+///
+/// Stops at the first ring that has any match at all, picking that ring's
+/// own closest-by-real-distance hit - not a perfect global nearest-neighbor
+/// search (a slightly closer match can in principle sit just inside the
+/// *next* ring's near edge), but exact enough to actually get a player
+/// to a real nearby example, which is all a locate command promises.
+fn locate_nearest(origin_x: i32, origin_z: i32, is_match: impl Fn(i32, i32) -> bool) -> Option<(i32, i32)> {
+    let ox = origin_x.div_euclid(LOCATE_STEP) * LOCATE_STEP;
+    let oz = origin_z.div_euclid(LOCATE_STEP) * LOCATE_STEP;
+    if is_match(ox, oz) {
+        return Some((ox, oz));
+    }
+
+    let mut r = LOCATE_STEP;
+    while r <= LOCATE_MAX_RADIUS {
+        let mut best: Option<(i32, i32, i64)> = None;
+        for dz in (-r..=r).step_by(LOCATE_STEP as usize) {
+            for dx in (-r..=r).step_by(LOCATE_STEP as usize) {
+                if dx.abs() != r && dz.abs() != r {
+                    continue; // interior of the square - already checked on a smaller ring
+                }
+                let (x, z) = (ox + dx, oz + dz);
+                if !is_match(x, z) {
+                    continue;
+                }
+                let d2 = i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz);
+                if best.map_or(true, |(_, _, best_d2)| d2 < best_d2) {
+                    best = Some((x, z, d2));
+                }
+            }
+        }
+        if let Some((x, z, _)) = best {
+            return Some((x, z));
+        }
+        r += LOCATE_STEP;
+    }
+    None
+}
+
+impl TerrainGenerator {
+    /// `/locate feature <name>`'s search: the nearest column (to
+    /// `(origin_x, origin_z)`) that qualifies as `feature` on this
+    /// generator's own terrain, or `None` if nothing did within
+    /// `LOCATE_MAX_RADIUS`.
+    pub fn locate_feature(&self, feature: Feature, origin_x: i32, origin_z: i32) -> Option<(i32, i32)> {
+        locate_nearest(origin_x, origin_z, |x, z| feature.matches_column(self, x, z))
+    }
+}
+
+/// `/locate biome <name>`'s search: the nearest column (to `(origin_x,
+/// origin_z)`) belonging to `biome`, per `biome_noise` - the same region
+/// noise `world.rs`'s runtime `BiomeMap` and `TerrainGenerator`'s own
+/// worldgen already agree on (`biome::region_noise_for_seed`) - or `None`
+/// if nothing did within `LOCATE_MAX_RADIUS`. A free function, not a
+/// `TerrainGenerator` method, since a biome lookup only ever needs the
+/// region noise, not the rest of the generator.
+pub fn locate_biome(
+    biome_noise: &SimplexNoise,
+    biome: Biome,
+    origin_x: i32,
+    origin_z: i32,
+) -> Option<(i32, i32)> {
+    locate_nearest(origin_x, origin_z, |x, z| biome::biome_at(biome_noise, x, z) == biome)
 }
 
 #[cfg(test)]

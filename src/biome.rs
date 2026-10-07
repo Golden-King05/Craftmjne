@@ -136,6 +136,27 @@ impl Biome {
     pub fn drier(self) -> bool {
         matches!(self, Biome::Snow)
     }
+
+    /// Every biome that exists, for anything that needs to enumerate them
+    /// (`/locate biome`'s argument autocomplete and parsing) instead of
+    /// re-deriving the list by hand - adding a third biome only ever means
+    /// adding it here and to `Biome::name`, not touching any consumer.
+    pub const ALL: [Biome; 2] = [Biome::Plains, Biome::Snow];
+
+    /// The lowercase name a player types to refer to this biome in chat
+    /// commands - the inverse of `Biome::parse`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Biome::Plains => "plains",
+            Biome::Snow => "snow",
+        }
+    }
+
+    /// Parses a player-typed biome name (case-insensitive), the inverse of
+    /// `Biome::name`.
+    pub fn parse(s: &str) -> Option<Biome> {
+        Biome::ALL.into_iter().find(|b| b.name().eq_ignore_ascii_case(s))
+    }
 }
 
 /// A fresh biome-*region* noise source for one world - same lifecycle as

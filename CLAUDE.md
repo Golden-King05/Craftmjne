@@ -1645,4 +1645,95 @@ etc.) instead of inventing a new approach:
   continents, several seas," because the user's complaint was about
   landmass separation existing at all, not about ocean topology
   specifically.
+- **"The autocomplete dropdown stops at the first space" was a real,
+  deliberate design decision (its own CLAUDE.md entry above) - extending it
+  to complete a command's *arguments* too (`/locate`) had to generalize
+  that decision, not just bolt a special case onto it.** The dropdown's
+  core data stayed `commands::CommandSuggestion { text, usage, description
+  }`, unchanged in shape - the only shift was what `text` means: always
+  "whatever replaces everything after the leading `/`," which used to be
+  only ever a bare command name and is now sometimes a whole `name arg1
+  arg2` line. Because `chat.rs`'s Tab-fill and click-fill handlers
+  (`chat_text_input`'s `KeyCode::Tab` arm, `click_suggestion`) already just
+  did `chat.input = format!("/{} ", suggestion.text)` with no assumption
+  baked in about *how many words* `text` holds, **neither needed a single
+  line changed** - the exact "give the general formula a no-op for the old
+  case" shape this file keeps finding elsewhere (`mesher.rs`'s
+  `rotated_tile`, `light.rs`'s `attenuate`). Only `command_suggestions`
+  itself (decide *what* to suggest for the current input) needed new logic:
+  no space yet -> still the old command-name path (`registry.suggestions`,
+  completely untouched); a space -> split into the already-finished
+  command name plus argument tokens (`split_whitespace`, with a trailing-
+  space check tracked separately so "nothing typed yet for the next token"
+  and "still mid-word" stay distinguishable - `split_whitespace` alone
+  would silently swallow a trailing space and conflate the two), look that
+  exact name up (reusing the existing private `CommandSpec::matches`, not a
+  new prefix search), and call its new optional `arg_candidates` hook if it
+  has one.
+- **An argument-completion hook only ever needs the tokens *before* the one
+  being typed, never the partial text of that token itself - prefix
+  filtering is a generic, one-time concern, not something every command's
+  hook should re-implement.** `CommandSpec::arg_candidates: Option<Box<dyn
+  Fn(&[&str]) -> Vec<ArgCandidate>>>` takes only `prior` (the fully-typed
+  tokens so far); `CommandRegistry::arg_suggestions` is the one place that
+  filters the returned candidates by whatever prefix is currently typed
+  (case-insensitive `starts_with`, mirroring `suggestions`'s own top-level
+  filtering) and sorts them. `/locate`'s own hook
+  (`locate_arg_candidates`) is consequently a two-armed `match` on `prior`'s
+  *length* (`[] =>` the qualifier position, `[qualifier] =>` that
+  qualifier's own names, reading `Biome::ALL`/`Feature::ALL` directly so a
+  third biome or feature needs zero changes here) with no filtering logic
+  of its own at all - exactly the same "declarative data, one generic
+  algorithm" shape as `sky::MoonEventDef`'s table.
+- **An argument completion must echo back whatever command name the player
+  actually typed - an alias or the primary name - never silently normalize
+  it, because normalizing would make Tab/click fill in text different from
+  what's already on screen.** `CommandRegistry::arg_suggestions` builds
+  each result's `text` by joining the literal `command_name` parameter
+  (exactly as typed) with `prior` and the new candidate, not
+  `spec.name` (the canonical name) - caught by writing `an_argument_
+  completion_echoes_back_whatever_command_name_was_actually_typed` as a
+  real regression test (a throwaway command registered under one name
+  with an alias, completed by its alias) rather than trusting the
+  "obviously correct" choice between the two fields without checking.
+- **`Biome`/`Feature` both grew an `ALL`/`name`/`parse` triplet for the same
+  reason, in two different modules, and that's a feature of the pattern,
+  not duplication worth merging.** `/locate biome <name>` needs to parse
+  and enumerate biomes; `/locate feature <name>` needs the same for
+  terrain features - but biomes and features are unrelated concepts
+  (`biome.rs` vs. a new enum local to `terrain.rs`) with no shared base
+  worth generalizing into. Each gets its own tiny, self-contained table
+  (`const ALL: [Self; N]`, `fn name`, `fn parse` derived from the other
+  two) exactly where its variants already live, so a third biome or a
+  fourth feature is a one-line edit to `ALL`/`name` in the one file that
+  already defines it - not a shared registry `/locate` would otherwise
+  need to reach into two unrelated modules to maintain.
+- **A "find the nearest X" search needs an explicit, generous-but-finite
+  search bound, or it silently promises to find something that might not
+  exist within any reachable distance.** `terrain::locate_nearest`'s
+  expanding-ring search is capped at `LOCATE_MAX_RADIUS` (6000 blocks -
+  generous relative to every noise scale a predicate could be built on:
+  `biome::REGION_SCALE` 640, river `REGION_BLOCKS` 512, continent noise's
+  far larger wavelength), returning `None` rather than looping forever if
+  nothing within that bound ever matches. It deliberately is *not* a
+  perfect global nearest-neighbor search - it stops at the first ring with
+  any match and picks that ring's own closest-by-real-distance hit, which
+  can in principle miss a slightly closer match just inside the next
+  ring's near edge. Documented as an accepted approximation rather than
+  fixed, for the same reason the bounded-region river search itself is
+  accepted as-is: a `/locate` command promises "get me close to a real
+  one," not "the provably single closest coordinate in the universe."
+- **Reusing `TerrainGenerator::effective_height`/`river_carve` for
+  `/locate feature` is what keeps "what counts as a river/mountain" from
+  ever disagreeing with what the generator itself actually placed.**
+  `Feature::Mountain` reuses the exact `effective_height(..) >= SNOW_LINE`
+  comparison `generate()` already uses to decide snow-capped terrain
+  (not a second, hand-picked altitude), and `Feature::River` reuses
+  `river_carve` directly (not a re-derived approximation from the
+  difference between `surface_height` and `effective_height`, which would
+  also pick up the unrelated `Biome::drier` height boost and misclassify
+  columns). Both methods had to go from private to `pub` for this (`/locate`
+  lives in a different module) - a small, deliberate widening of
+  `TerrainGenerator`'s surface, not a parallel definition of either
+  concept.
 

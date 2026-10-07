@@ -240,6 +240,13 @@ mainly as a place to type `/`-prefixed commands.
   hardcoded zero; see `texture_report::TextureReport`'s doc comment for
   why it should always read `0`). Below the counts it lists which specific
   names are yellow/red, in matching colors.
+- `/locate <biome|feature|structure> <name>` — reports the nearest match
+  (coordinates + distance) to wherever you're standing. `biome` searches
+  for `plains`/`snow`; `feature` searches for `river`/`ocean`/`mountain`
+  against the generator's real terrain (the same height/biome/river-carve
+  checks worldgen itself uses, not a second guess at what they mean);
+  `structure` is reserved for when this game actually generates
+  structures to find, and currently just says so.
 
 Running *any* recognized command — even one that fails with a usage error —
 permanently sets a `cheats: true` flag on the world's `meta.json`
@@ -248,7 +255,15 @@ it's never shown in the UI and never cleared, and exists so a future
 achievements system can check it and skip a world that's had commands used in
 it. An unrecognized command name (a typo, not a real command) does not set it.
 
-Add a command by extending the match in `commands::execute`.
+Add a command with `CommandRegistry::register`/`CommandSpec::new` (see
+`commands::CommandRegistry::with_defaults` for the built-ins' own
+registration) — `commands.rs`'s module docs cover the full extension point,
+including the cheats-flag rule and how aliases work. The in-game chat
+dropdown (`T` or `/`, then start typing) autocompletes both the command
+name itself and, for a command built with `CommandSpec::with_arg_candidates`
+(`/locate` is the example), its arguments too - one token at a time, reusing
+whatever's already fully typed to decide what the next token's candidates
+are.
 
 ### Colored chat text
 
@@ -415,7 +430,7 @@ src/
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
-├── commands.rs  # chat command dispatcher (/mode, /texture-report ...) + the cheats-flag rule
+├── commands.rs  # chat command dispatcher (/mode, /texture-report, /locate ...) + the cheats-flag rule
 ├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
 ├── texture_report.rs # TextureReport resource: green/yellow/red texture health, read by /texture-report
 └── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel

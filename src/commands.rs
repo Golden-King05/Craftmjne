@@ -19,10 +19,14 @@
 //! in `CommandRegistry::execute`, not per-handler, so a mod's command gets
 //! it for free without having to know the flag exists.
 
-use bevy::prelude::Resource;
+use bevy::prelude::{Resource, Vec3};
 
+use crate::biome::Biome;
+use crate::config::SEA_LEVEL;
+use crate::noise::SimplexNoise;
 use crate::save::{GameMode, SaveStore};
 use crate::state::ActiveWorld;
+use crate::terrain::{locate_biome, Feature, TerrainGenerator};
 use crate::text_color::colorize;
 use crate::texture_report::TextureReport;
 
@@ -87,6 +91,141 @@ fn texture_report_message(report: &TextureReport) -> String {
     lines.join("\n")
 }
 
+/// `/locate`'s first argument - which kind of thing to search for. Mirrors
+/// `Biome`/`Feature`'s own `ALL`/`name`/`parse` shape (one declarative list
+/// instead of a hand-matched set of string literals), even though this one
+/// lives here rather than in a worldgen module - it's a property of the
+/// *command*, not of the terrain itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LocateQualifier {
+    Biome,
+    Feature,
+    /// Not wired to anything yet - `locate_handler` always answers
+    /// "aren't implemented yet" for this qualifier. Still listed in `ALL`
+    /// (so it's discoverable in autocomplete and `/locate structure`
+    /// gives a real answer instead of "unknown qualifier") - reserved for
+    /// when this game actually generates structures to find.
+    Structure,
+}
+
+impl LocateQualifier {
+    const ALL: [LocateQualifier; 3] =
+        [LocateQualifier::Biome, LocateQualifier::Feature, LocateQualifier::Structure];
+
+    fn name(self) -> &'static str {
+        match self {
+            LocateQualifier::Biome => "biome",
+            LocateQualifier::Feature => "feature",
+            LocateQualifier::Structure => "structure",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.name().eq_ignore_ascii_case(s))
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// `/locate`'s own argument-completion hook (`CommandSpec::arg_candidates`):
+/// qualifiers at the first position, then whatever names that specific
+/// qualifier accepts at the second - reads `Biome::ALL`/`Feature::ALL`
+/// directly, so a third biome or feature shows up here with zero changes.
+fn locate_arg_candidates(prior: &[&str]) -> Vec<ArgCandidate> {
+    match prior {
+        [] => LocateQualifier::ALL
+            .iter()
+            .map(|q| ArgCandidate::new(q.name(), format!("Locate the nearest {}", q.name())))
+            .collect(),
+        [qualifier] => match LocateQualifier::parse(qualifier) {
+            Some(LocateQualifier::Biome) => Biome::ALL
+                .iter()
+                .map(|b| ArgCandidate::new(b.name(), format!("Nearest {} biome", capitalize(b.name()))))
+                .collect(),
+            Some(LocateQualifier::Feature) => Feature::ALL
+                .iter()
+                .map(|f| ArgCandidate::new(f.name(), format!("Nearest {}", f.name())))
+                .collect(),
+            // `Structure` takes no second argument yet, and an
+            // unrecognized qualifier has nothing to suggest either.
+            Some(LocateQualifier::Structure) | None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Formats a `/locate` hit as a chat message. `is_water` picks the
+/// displayed Y: a found ocean/river column's *ground* is typically well
+/// underwater and not a useful place to stand, so those report the water
+/// surface (`SEA_LEVEL`) instead of `TerrainGenerator::effective_height`'s
+/// literal (submerged) ground height; every other qualifier reports real
+/// ground level, one block above it so the coordinate is standable-on.
+fn locate_result_message(ctx: &CommandContext, label: &str, found: (i32, i32), origin: (i32, i32), is_water: bool) -> String {
+    let (x, z) = found;
+    let y = if is_water { SEA_LEVEL } else { ctx.world_gen.effective_height(x, z) + 1 };
+    let dx = f64::from(x - origin.0);
+    let dz = f64::from(z - origin.1);
+    let distance = (dx * dx + dz * dz).sqrt().round() as i64;
+    format!("Nearest {label}: ({x}, {y}, {z}) - {distance} blocks away")
+}
+
+/// `/locate`'s handler: dispatches on the qualifier, then (for `biome`/
+/// `feature`) parses the second argument and runs the matching search -
+/// `biome::locate_biome`/`TerrainGenerator::locate_feature` are the actual
+/// searches; this just validates input and formats the result.
+fn locate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
+    const USAGE: &str = "Usage: /locate <biome|feature|structure> <name>";
+    let Some(qualifier) = args.first().and_then(|a| LocateQualifier::parse(a)) else {
+        return CommandOutcome::Usage(USAGE.to_string());
+    };
+
+    if qualifier == LocateQualifier::Structure {
+        return CommandOutcome::Usage("Structures aren't implemented yet.".to_string());
+    }
+
+    let Some(name) = args.get(1) else { return CommandOutcome::Usage(USAGE.to_string()) };
+    let origin = (ctx.player_pos.x.floor() as i32, ctx.player_pos.z.floor() as i32);
+
+    match qualifier {
+        LocateQualifier::Biome => {
+            let Some(biome) = Biome::parse(name) else {
+                let valid: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
+                return CommandOutcome::Usage(format!("Unknown biome {name:?}. Try: {}", valid.join(", ")));
+            };
+            match locate_biome(ctx.biome_noise, biome, origin.0, origin.1) {
+                Some(found) => CommandOutcome::Ok(locate_result_message(
+                    ctx,
+                    &format!("{} biome", capitalize(biome.name())),
+                    found,
+                    origin,
+                    false,
+                )),
+                None => CommandOutcome::Ok(format!("Couldn't find a nearby {} biome.", biome.name())),
+            }
+        }
+        LocateQualifier::Feature => {
+            let Some(feature) = Feature::parse(name) else {
+                let valid: Vec<&str> = Feature::ALL.iter().map(|f| f.name()).collect();
+                return CommandOutcome::Usage(format!("Unknown feature {name:?}. Try: {}", valid.join(", ")));
+            };
+            let is_water = matches!(feature, Feature::Ocean | Feature::River);
+            match ctx.world_gen.locate_feature(feature, origin.0, origin.1) {
+                Some(found) => {
+                    CommandOutcome::Ok(locate_result_message(ctx, feature.name(), found, origin, is_water))
+                }
+                None => CommandOutcome::Ok(format!("Couldn't find a nearby {}.", feature.name())),
+            }
+        }
+        LocateQualifier::Structure => unreachable!("handled above"),
+    }
+}
+
 /// What a command handler needs to do its job. Bundled into one struct
 /// rather than one parameter per resource, so adding a resource a *future*
 /// command needs doesn't change every existing handler's signature -
@@ -98,6 +237,15 @@ pub struct CommandContext<'a> {
     pub active: &'a mut ActiveWorld,
     pub store: &'a SaveStore,
     pub texture_report: &'a TextureReport,
+    /// The active world's generator - the one source of truth `/locate`
+    /// searches against, same as worldgen itself uses.
+    pub world_gen: &'a TerrainGenerator,
+    /// The active world's biome-*region* noise (`biome::region_noise_for_
+    /// seed`) - a `/locate biome` search only ever needs this, not the
+    /// rest of the generator.
+    pub biome_noise: &'a SimplexNoise,
+    /// Where to search outward from - the player's current position.
+    pub player_pos: Vec3,
 }
 
 /// One registered command: the metadata that drives both dispatch and the
@@ -112,6 +260,16 @@ pub struct CommandSpec {
     pub usage: String,
     pub description: String,
     handler: Box<dyn Fn(&[&str], &mut CommandContext) -> CommandOutcome + Send + Sync>,
+    /// Optional argument-completion hook: given the fully-typed argument
+    /// tokens *before* whichever one the player is still typing (empty for
+    /// the first argument), returns every value that token could complete
+    /// to at that point - e.g. `/locate`'s is called with `[]` for the
+    /// qualifier position and `["biome"]` for the biome-name position.
+    /// `None` for a command with no completable arguments (`/mode`,
+    /// `/texture-report`) - the dropdown simply stops offering anything
+    /// once the command name itself is fully typed, same as before this
+    /// existed.
+    arg_candidates: Option<Box<dyn Fn(&[&str]) -> Vec<ArgCandidate> + Send + Sync>>,
 }
 
 impl CommandSpec {
@@ -127,6 +285,7 @@ impl CommandSpec {
             usage: usage.into(),
             description: description.into(),
             handler: Box::new(handler),
+            arg_candidates: None,
         }
     }
 
@@ -134,6 +293,17 @@ impl CommandSpec {
     /// `CommandSpec::new("mode", ...).alias("gamemode")`.
     pub fn alias(mut self, alias: impl Into<String>) -> Self {
         self.aliases.push(alias.into());
+        self
+    }
+
+    /// Builder-style, mirroring `alias`: opts this command into argument
+    /// autocomplete - see `arg_candidates`'s own doc comment for the
+    /// closure's shape.
+    pub fn with_arg_candidates(
+        mut self,
+        candidates: impl Fn(&[&str]) -> Vec<ArgCandidate> + Send + Sync + 'static,
+    ) -> Self {
+        self.arg_candidates = Some(Box::new(candidates));
         self
     }
 
@@ -150,13 +320,31 @@ impl CommandSpec {
     }
 }
 
-/// One command name/alias offered by the chat autocomplete dropdown,
-/// already filtered to a typed prefix and sorted alphabetically by
-/// [`CommandRegistry::suggestions`].
+/// One value an argument could be completed to, at whatever position
+/// `CommandSpec::arg_candidates` was called for - see
+/// `CommandRegistry::arg_suggestions`, which turns these into the same
+/// [`CommandSuggestion`] shape the top-level command-name dropdown uses.
+pub struct ArgCandidate {
+    pub value: String,
+    pub description: String,
+}
+
+impl ArgCandidate {
+    pub fn new(value: impl Into<String>, description: impl Into<String>) -> Self {
+        Self { value: value.into(), description: description.into() }
+    }
+}
+
+/// One full `/command arg1 arg2...` completion offered by the chat
+/// autocomplete dropdown, already filtered to whatever's been typed so far
+/// and sorted alphabetically - see [`CommandRegistry::suggestions`] (for
+/// the command name itself) and [`CommandRegistry::arg_suggestions`] (for
+/// an argument).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandSuggestion {
-    /// The exact text that completes the input - may be an alias, not
-    /// necessarily the command's primary `name`.
+    /// The exact text that replaces everything after the leading `/` -
+    /// just a command name/alias while completing that, or the whole
+    /// `name arg1 arg2` line once completing an argument of it.
     pub text: String,
     pub usage: String,
     pub description: String,
@@ -202,6 +390,15 @@ impl CommandRegistry {
                 |_args, ctx| CommandOutcome::Ok(texture_report_message(ctx.texture_report)),
             )
             .alias("texturereport"),
+        );
+        reg.register(
+            CommandSpec::new(
+                "locate",
+                "/locate <biome|feature|structure> <name>",
+                "Find the nearest biome, terrain feature, or (later) structure.",
+                locate_handler,
+            )
+            .with_arg_candidates(locate_arg_candidates),
         );
         reg
     }
@@ -261,6 +458,39 @@ impl CommandRegistry {
         out.sort_by(|a, b| a.text.cmp(&b.text));
         out
     }
+
+    /// Completions for one argument of `command_name` (exactly as typed,
+    /// alias or not - echoed back verbatim in each result, never silently
+    /// rewritten to the command's primary name), given the tokens already
+    /// fully typed before it (`prior`) and whatever prefix of the current
+    /// token is typed so far (`partial`). Empty if `command_name` isn't a
+    /// real command, or is one with no `arg_candidates` hook at all - see
+    /// `chat.rs`'s `command_suggestions` for where `prior`/`partial` come
+    /// from a raw chat input string.
+    pub fn arg_suggestions(&self, command_name: &str, prior: &[&str], partial: &str) -> Vec<CommandSuggestion> {
+        let Some(spec) = self.commands.iter().find(|c| c.matches(command_name)) else {
+            return Vec::new();
+        };
+        let Some(candidates) = &spec.arg_candidates else { return Vec::new() };
+
+        let partial_lower = partial.to_ascii_lowercase();
+        let mut out: Vec<CommandSuggestion> = candidates(prior)
+            .into_iter()
+            .filter(|c| c.value.to_ascii_lowercase().starts_with(&partial_lower))
+            .map(|c| {
+                let mut tokens: Vec<&str> = vec![command_name];
+                tokens.extend_from_slice(prior);
+                tokens.push(&c.value);
+                CommandSuggestion {
+                    text: tokens.join(" "),
+                    usage: spec.usage.clone(),
+                    description: c.description,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.text.cmp(&b.text));
+        out
+    }
 }
 
 pub struct CommandsPlugin;
@@ -311,18 +541,33 @@ mod tests {
         TextureReport::default()
     }
 
+    /// A real generator/biome-noise pair, same as a running game builds in
+    /// `world::enter_world` - `/locate`'s tests need an actual world to
+    /// search, not a stub.
+    fn test_world_gen() -> TerrainGenerator {
+        TerrainGenerator::new(1, &crate::blocks::BlockRegistry::with_defaults())
+    }
+    fn test_biome_noise() -> SimplexNoise {
+        crate::biome::region_noise_for_seed(1)
+    }
+
     /// Runs `line` against the real default registry, building a
     /// `CommandContext` from the individual pieces each test already has -
     /// the same construction `chat.rs`'s system does from its own params.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         line: &str,
         mode: &mut GameMode,
         active: &mut ActiveWorld,
         store: &SaveStore,
         report: &TextureReport,
+        world_gen: &TerrainGenerator,
+        biome_noise: &SimplexNoise,
+        player_pos: Vec3,
     ) -> CommandOutcome {
         let registry = CommandRegistry::with_defaults();
-        let mut ctx = CommandContext { mode, active, store, texture_report: report };
+        let mut ctx =
+            CommandContext { mode, active, store, texture_report: report, world_gen, biome_noise, player_pos };
         registry.execute(line, &mut ctx)
     }
 
@@ -339,7 +584,7 @@ mod tests {
             let store = temp_store();
             let mut active = active_world(&store);
             let mut mode = GameMode::Survival;
-            let outcome = run(&format!("mode {arg}"), &mut mode, &mut active, &store, &no_report());
+            let outcome = run(&format!("mode {arg}"), &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
             assert!(matches!(outcome, CommandOutcome::Ok(_)));
             assert_eq!(mode, expected, "arg {arg}");
             assert_eq!(active.meta.mode, expected, "arg {arg}");
@@ -351,7 +596,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        run("mode creative", &mut mode, &mut active, &store, &no_report());
+        run("mode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert_eq!(mode, GameMode::Creative);
         assert_eq!(store.load_meta(&active.slug).unwrap().mode, GameMode::Creative);
     }
@@ -361,7 +606,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        run("gamemode creative", &mut mode, &mut active, &store, &no_report());
+        run("gamemode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert_eq!(mode, GameMode::Creative);
     }
 
@@ -372,12 +617,12 @@ mod tests {
         assert!(!active.meta.cheats);
         let mut mode = GameMode::Survival;
 
-        run("mode creative", &mut mode, &mut active, &store, &no_report());
+        run("mode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert!(active.meta.cheats);
         assert!(store.load_meta(&active.slug).unwrap().cheats);
 
         // Switching back to survival doesn't un-set it.
-        run("mode survival", &mut mode, &mut active, &store, &no_report());
+        run("mode survival", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert!(active.meta.cheats);
     }
 
@@ -386,7 +631,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("mode not-a-mode", &mut mode, &mut active, &store, &no_report());
+        let outcome = run("mode not-a-mode", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert!(matches!(outcome, CommandOutcome::Usage(_)));
         assert_eq!(mode, GameMode::Survival); // unchanged
         assert!(active.meta.cheats); // but the attempt still counts
@@ -397,7 +642,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("teleport 0 0 0", &mut mode, &mut active, &store, &no_report());
+        let outcome = run("teleport 0 0 0", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert!(matches!(outcome, CommandOutcome::Unknown(_)));
         assert!(!active.meta.cheats);
     }
@@ -414,7 +659,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("texture-report", &mut mode, &mut active, &store, &report);
+        let outcome = run("texture-report", &mut mode, &mut active, &store, &report, &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok") };
 
         assert!(message.contains("1 working"));
@@ -437,7 +682,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("texture-report", &mut mode, &mut active, &store, &report);
+        let outcome = run("texture-report", &mut mode, &mut active, &store, &report, &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok") };
 
         assert_eq!(message.lines().count(), 1, "no broken/missing means no detail lines: {message:?}");
@@ -448,7 +693,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        run("texture-report", &mut mode, &mut active, &store, &no_report());
+        run("texture-report", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
         assert!(active.meta.cheats);
     }
 
@@ -456,7 +701,7 @@ mod tests {
     fn suggestions_lists_every_name_alphabetically_for_an_empty_prefix() {
         let registry = CommandRegistry::with_defaults();
         let names: Vec<String> = registry.suggestions("").into_iter().map(|s| s.text).collect();
-        assert_eq!(names, vec!["gamemode", "mode", "texture-report", "texturereport"]);
+        assert_eq!(names, vec!["gamemode", "locate", "mode", "texture-report", "texturereport"]);
     }
 
     #[test]
@@ -479,7 +724,17 @@ mod tests {
             let store = temp_store();
             let mut active = active_world(&store);
             let mut mode = GameMode::Survival;
-            let mut ctx = CommandContext { mode: &mut mode, active: &mut active, store: &store, texture_report: &no_report() };
+            let world_gen = test_world_gen();
+            let biome_noise = test_biome_noise();
+            let mut ctx = CommandContext {
+                mode: &mut mode,
+                active: &mut active,
+                store: &store,
+                texture_report: &no_report(),
+                world_gen: &world_gen,
+                biome_noise: &biome_noise,
+                player_pos: Vec3::ZERO,
+            };
             let outcome = registry.execute(&suggestion.text, &mut ctx);
             assert!(
                 !matches!(outcome, CommandOutcome::Unknown(_)),
@@ -507,9 +762,132 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let mut ctx = CommandContext { mode: &mut mode, active: &mut active, store: &store, texture_report: &no_report() };
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let mut ctx = CommandContext {
+            mode: &mut mode,
+            active: &mut active,
+            store: &store,
+            texture_report: &no_report(),
+            world_gen: &world_gen,
+            biome_noise: &biome_noise,
+            player_pos: Vec3::ZERO,
+        };
         let outcome = registry.execute("heal", &mut ctx);
         assert!(matches!(outcome, CommandOutcome::Ok(ref m) if m == "Healed."));
         assert!(active.meta.cheats, "a mod's command should trip cheats exactly like a built-in one");
+    }
+
+    #[test]
+    fn locate_biome_finds_a_real_column_of_that_biome_and_reports_its_distance() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let outcome =
+            run("locate biome snow", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+        let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok, got a usage/unknown result") };
+        assert!(message.contains("Snow biome"), "{message:?}");
+        assert!(message.contains("blocks away"), "{message:?}");
+    }
+
+    #[test]
+    fn locate_feature_mountain_finds_a_real_elevated_column() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let outcome = run(
+            "locate feature mountain",
+            &mut mode,
+            &mut active,
+            &store,
+            &no_report(),
+            &world_gen,
+            &biome_noise,
+            Vec3::ZERO,
+        );
+        let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok, got a usage/unknown result") };
+        assert!(message.contains("mountain"), "{message:?}");
+        assert!(message.contains("blocks away"), "{message:?}");
+    }
+
+    #[test]
+    fn locate_structure_reports_it_is_not_implemented_yet() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let outcome = run(
+            "locate structure anything",
+            &mut mode,
+            &mut active,
+            &store,
+            &no_report(),
+            &world_gen,
+            &biome_noise,
+            Vec3::ZERO,
+        );
+        let CommandOutcome::Usage(message) = outcome else { panic!("expected a Usage result") };
+        assert!(message.contains("not implemented") || message.contains("implemented yet"), "{message:?}");
+    }
+
+    #[test]
+    fn locate_rejects_an_unknown_qualifier() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let outcome =
+            run("locate bogus snow", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+        assert!(matches!(outcome, CommandOutcome::Usage(_)));
+    }
+
+    #[test]
+    fn locate_biome_rejects_an_unknown_biome_name_and_lists_the_real_ones() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let outcome = run(
+            "locate biome desert",
+            &mut mode,
+            &mut active,
+            &store,
+            &no_report(),
+            &world_gen,
+            &biome_noise,
+            Vec3::ZERO,
+        );
+        let CommandOutcome::Usage(message) = outcome else { panic!("expected a Usage result") };
+        assert!(message.contains("plains") && message.contains("snow"), "{message:?}");
+    }
+
+    #[test]
+    fn locate_with_no_name_argument_is_a_usage_error() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        let outcome =
+            run("locate biome", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+        assert!(matches!(outcome, CommandOutcome::Usage(_)));
+    }
+
+    #[test]
+    fn a_recognized_locate_invocation_still_counts_as_a_command_use_even_on_a_usage_error() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let biome_noise = test_biome_noise();
+        run("locate biome desert", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+        assert!(active.meta.cheats);
     }
 }
