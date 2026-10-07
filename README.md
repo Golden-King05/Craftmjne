@@ -248,7 +248,9 @@ own noise stream:
   computed lazily as you explore), and wherever enough of it gathers a river
   forms with its own water surface. Rivers start in the uplands *above* sea
   level, pass through any lakes on the way, and only end at the ocean,
-  stepping down with short rapids where the surface drops a block. Their
+  easing down a block at a time with flowing water (the fluid sim's own
+  levels, so the surface slopes in eighths of a block rather than stepping
+  a whole one). Their
   size depends on how much land drains into them: a short coastal stream is
   a couple of blocks wide, and a big river can run for over a kilometre and
   grow to 16 blocks across. How far a river has cut below its banks varies

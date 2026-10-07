@@ -1946,3 +1946,24 @@ etc.) instead of inventing a new approach:
     `a_mined_hole_lights_up_even_while_chunks_are_still_loading` piles on
     background work before digging and goes red if edits share the normal
     queue.
+- **A river's surface eases down a block with the fluid sim's own flowing
+  levels, derived locally from the fraction the generator already had.** A
+  river's water level is a float interpolated along each segment, and the
+  surface used to be its floor: a whole-block step every few dozen blocks.
+  `RiverSample::slope` (drop per *grid step*, i.e. per Manhattan block,
+  because that's how the sim measures distance) turns the leftover
+  fraction into "how many steps downstream of the last drop is this
+  column". Within water's `flow_distance` the column gets one more water
+  block on top at that flowing level (`ColumnProfile::top_level`), which is
+  what the sim settles to downstream of a higher source. It's part of
+  `water_top`, so the levee rule raises the banks around it for free.
+  Measured against the sim's exact rule (a level is one more than the best
+  same-height neighbour), 83% of cells match. Measuring per straight-line
+  block instead of per grid step got 80% under a looser check, because a
+  diagonal river covers fewer grid steps than the sim counts. The rest are
+  diagonal stretches: static until something nearby triggers the sim,
+  which then settles them itself. An exact version would need a BFS over a
+  padded region per chunk *and* a second definition of a column's profile
+  beside `column_profile`, which is the drift this file keeps warning
+  about. `river_surfaces_ease_down_in_flowing_levels_between_steps` keeps
+  the 75% floor and checks the generated blocks carry the level.

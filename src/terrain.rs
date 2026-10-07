@@ -193,6 +193,9 @@ fn smoothstep(t: f64) -> f64 {
 struct RiverSample {
     distance: f64,
     water: f64,
+    /// How fast the surface falls along the river, in blocks per block -
+    /// zero at a waterfall, which steps instead (see `river_sample`).
+    slope: f64,
     half_width: f64,
     depth: f64,
     incision: f64,
@@ -218,6 +221,10 @@ pub struct ColumnProfile {
     /// Within reach of a river's channel or valley at all - caves are kept
     /// out of these, so a river never drains into one.
     pub near_river: bool,
+    /// The fluid level of the topmost water block: `FLUID_SOURCE`, or a
+    /// flowing level where a river's surface is easing down from one block
+    /// to the next (see `raw_column_with`).
+    pub top_level: u8,
 }
 
 /// A freshly generated chunk's block ids plus its fluid levels. Every
@@ -310,6 +317,9 @@ pub struct TerrainGenerator {
     /// when a generator is constructed, and which generation otherwise has
     /// no reason to depend on).
     opaque: Vec<bool>,
+    /// Water's `flow_distance` - how far a river's gradual surface can ease
+    /// down from a step (see `raw_column_with`).
+    water_flow: u8,
     /// Per-block-id light transmission, as `Tables::transmission` - so the
     /// sky fill dims through water exactly the way `light.rs` does.
     transmission: Vec<[u8; 3]>,
@@ -345,6 +355,7 @@ impl TerrainGenerator {
                 .iter()
                 .map(|def| def.transparency == Transparency::No)
                 .collect(),
+            water_flow: reg.def(reg.id("water")).flow_distance.clamp(1, 7) as u8,
             transmission: reg
                 .defs
                 .iter()
@@ -519,11 +530,21 @@ impl TerrainGenerator {
                     continue;
                 }
                 let incision = lerp(a.4, b.4, t);
+                let falls = a.1 - b.1 >= WATERFALL_DROP;
                 best = Some((
                     d,
                     RiverSample {
                         distance: d,
-                        water: if a.1 - b.1 >= WATERFALL_DROP {
+                        // Per *grid step*, not per block of straight-line
+                        // distance: the fluid sim measures distance in
+                        // sideways steps, which a diagonal river takes more
+                        // of to cover the same ground.
+                        slope: if falls || len2 <= 0.0 {
+                            0.0
+                        } else {
+                            (a.1 - b.1) / (sx.abs() + sz.abs())
+                        },
+                        water: if falls {
                             if t < 1.0 && natural >= a.1.floor() { a.1 } else { b.1 }
                         } else {
                             lerp(a.1, b.1, t)
@@ -586,6 +607,7 @@ impl TerrainGenerator {
                 in_river: old.water.is_some_and(|w| w > SEA_LEVEL),
                 river_bank: false,
                 near_river: false,
+                top_level: FLUID_SOURCE,
             };
         }
         if blend.old.is_empty() {
@@ -601,6 +623,7 @@ impl TerrainGenerator {
         let natural = self.natural_height(wx, wz);
         let mut h = natural;
         let mut river_water = None;
+        let mut top_level = FLUID_SOURCE;
         let (mut river_bank, mut near_river) = (false, false);
 
         if let Some(r) = self.river_sample(wx, wz, natural) {
@@ -622,6 +645,20 @@ impl TerrainGenerator {
                     h = lerp(h.max(water), natural, dry);
                 } else {
                     river_water = Some(water as i32);
+                    // A gradual surface instead of a 1-block step every so
+                    // often: just downstream of where the surface drops a
+                    // block, a layer of flowing water one block up thins out
+                    // with distance from the step, a level per block - the
+                    // same thing the fluid sim settles to downstream of a
+                    // higher source, so it leaves it alone.
+                    if r.slope > 0.0 {
+                        let to_step = (1.0 - (r.water - water)) / r.slope;
+                        let level = to_step.ceil().max(1.0);
+                        if level <= self.water_flow as f64 {
+                            river_water = Some(water as i32 + 1);
+                            top_level = level as u8;
+                        }
+                    }
                 }
             } else {
                 // The valley: terrain within reach is pulled down toward the
@@ -642,7 +679,7 @@ impl TerrainGenerator {
         let height = ((h + offset).floor() as i32).clamp(2, WORLD_HEIGHT - 8);
         // Blending can lift a channel's bed to its own water level; the
         // levee rule then treats it as the dry bank it now is.
-        let river_water = river_water.filter(|&w| w > height);
+        let river_water = river_water.filter(|&w| w > height + (top_level != FLUID_SOURCE) as i32);
         let sea = (height < SEA_LEVEL).then_some(SEA_LEVEL);
         ColumnProfile {
             height,
@@ -650,6 +687,7 @@ impl TerrainGenerator {
             in_river: river_water.is_some(),
             river_bank,
             near_river,
+            top_level: if river_water.is_some() && river_water >= sea { top_level } else { FLUID_SOURCE },
         }
     }
 
@@ -791,6 +829,9 @@ impl TerrainGenerator {
                     for y in (h + 1)..=top {
                         blocks[base + y as usize] =
                             if y == top && biome.freezes_water() { ids.ice } else { ids.water };
+                    }
+                    if !biome.freezes_water() {
+                        fluid[base + top as usize] = col.top_level;
                     }
                     // A waterfall: beside a river standing higher than this
                     // column's water, its face pours down into it - falling
@@ -1845,5 +1886,48 @@ mod tests {
             }
             assert_eq!(chunk.blocks[base + fall_top as usize + 1], AIR);
         }
+    }
+
+    /// Rivers ease from one level down to the next with flowing water - the
+    /// fluid sim's own levels - instead of a hard 1-block step. A cap's level
+    /// should mostly be exactly what the sim would give it (one more than
+    /// its best neighbour at the same height), so the sim leaves it alone;
+    /// diagonal stretches don't always match, which the sim corrects only if
+    /// something nearby triggers it.
+    #[test]
+    fn river_surfaces_ease_down_in_flowing_levels_between_steps() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let rank = |c: &ColumnProfile| if c.top_level == FLUID_SOURCE { 0 } else { c.top_level };
+        let (mut exact, mut capped) = (0, 0);
+        let mut checked_blocks = false;
+        for (x0, z0) in river_windows(&gen) {
+            let p = profiles(&gen, x0, z0, WINDOW);
+            for z in 1..WINDOW - 1 {
+                for x in 1..WINDOW - 1 {
+                    let c = p[(x + WINDOW * z) as usize];
+                    let (Some(top), false) = (c.water_top, c.top_level == FLUID_SOURCE) else { continue };
+                    capped += 1;
+                    let best = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .map(|(dx, dz)| p[(x + dx + WINDOW * (z + dz)) as usize])
+                        .filter(|n| n.water_top == Some(top))
+                        .map(|n| rank(&n) + 1)
+                        .min();
+                    exact += (best == Some(c.top_level)) as i32;
+                    if !checked_blocks {
+                        let (wx, wz) = (x0 + x, z0 + z);
+                        let chunk = gen.generate(wx.div_euclid(CHUNK_SIZE), wz.div_euclid(CHUNK_SIZE));
+                        let i = block_index(wx.rem_euclid(CHUNK_SIZE) as usize, top as usize, wz.rem_euclid(CHUNK_SIZE) as usize);
+                        assert_eq!(chunk.blocks[i], gen.ids.water);
+                        assert_eq!(chunk.fluid[i], c.top_level, "the generated top cell should carry the flowing level");
+                        assert_eq!((chunk.blocks[i - 1], chunk.fluid[i - 1]), (gen.ids.water, FLUID_SOURCE));
+                        checked_blocks = true;
+                    }
+                }
+            }
+        }
+        assert!(capped >= 100, "only {capped} river columns ease down");
+        assert!(exact * 4 >= capped * 3, "only {exact} of {capped} flowing levels match the fluid sim");
     }
 }
