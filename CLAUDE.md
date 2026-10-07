@@ -1997,3 +1997,45 @@ etc.) instead of inventing a new approach:
   (`smoothstep(steep * 2)`).
   `cliffed_coasts_have_rock_faces_platforms_and_sea_stacks` goes red for
   deep soil on faces or sand on platforms.
+- **"Rivers flow to ponds and stop" was two different dead ends, found by
+  classifying every river mouth rather than guessing from the report.** A
+  throwaway survey of all mouths over 300x300 cells (seed 7) found:
+  - 76 real ocean mouths.
+  - 15 "sea" mouths with no deep water anywhere near: coastal hollows
+    where the continent field was a hair under the ocean threshold.
+  - 46 that weren't water at all: *pits*, cells with nothing lower around
+    them. Almost all were less than a block deep, on flat plains far
+    inland where the seaward tilt is too weak.
+  Fixes:
+  - **`Landscape::is_sea` means open ocean.** `OPEN_SEA_MARGIN` puts it a
+    quarter of the way into a beach's blend. A river crossing shallower
+    water on its way out is invisible, since its surface can't drop below
+    sea level.
+  - **Pits spill** (`drainage::Network::spill`). Flood outward from the pit
+    lowest-rim-first (a min-heap on the highest point water must rise
+    over) until reaching a cell whose *steepest-descent* chain ends at the
+    sea or at a pit strictly lower than this one. The cells on that path
+    flow along it. A cell can sit on several pits' paths along its chain
+    (its own terminal, the pit that one spills into, and so on); it
+    follows the lowest one's.
+  - **Why it can't loop:** each accepted outlet leads to strictly lower
+    pits. The natural `down` / `terminal` stay separate from the effective
+    `flow`, so a spill search never needs another pit's spill, and there's
+    no recursion that could deadlock a `OnceLock`.
+  - **`terminal` is capped at `MAX_CHAIN`** and returns `DRAINS_AWAY`. The
+    test `Valley` descends forever outside its ridges, and the uncapped walk
+    OOM-killed the test process, the same way the uncapped accumulation
+    walk once did.
+  `every_river_flows_on_until_it_reaches_the_open_sea` follows every river
+  cell over 200x200 cells on two seeds. `a_river_spills_out_of_a_hollow_
+  and_carries_on_to_the_sea` covers a synthetic hollow. Both go red with
+  spill paths ignored. Re-surveyed: 0 pit mouths on both seeds. Cold
+  generation on river-heavy seeds went from ~3 to ~5.5 ms per chunk (the
+  first spill searches; memoized after).
+  Ponds were deliberately left as standalone depressions rather than wired
+  to streams: the drainage network doesn't target them, and a river may
+  pass through one.
+  River size is also capped by *length* (`Network::length`, the longest
+  upstream path, computed in the same walk as accumulation): `size =
+  min(by_flow, by_length)`, so a short river stays a stream however much
+  land drains into it.

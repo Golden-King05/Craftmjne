@@ -133,6 +133,13 @@ const MAX_ACCUM_FOR_FULL_SIZE: f32 = 2000.0;
 /// Half-width (blocks) of the wet channel for the smallest and largest
 /// rivers - a 2-block stream up to a ~16-block-wide lowland river.
 const RIVER_HALF_WIDTH: (f64, f64) = (1.0, 8.0);
+/// How far past `OCEAN_THRESHOLD` the continent field has to be before
+/// drainage counts a place as the sea a river can end in - see `is_sea`.
+const OPEN_SEA_MARGIN: f32 = 0.015;
+/// River lengths, in drainage cells from the furthest source, over which a
+/// river's size can grow: one this short is a stream however much land
+/// drains into it, and only one this long can reach full width.
+const RIVER_LENGTH_FOR_SIZE: (f32, f32) = (4.0, 50.0);
 /// Depth (blocks, at the centerline) of the wet channel below the water
 /// surface for the smallest and largest rivers.
 const RIVER_DEPTH: (f64, f64) = (1.0, 5.0);
@@ -564,8 +571,12 @@ impl TerrainGenerator {
         let point = |cell: crate::drainage::Cell| {
             let (x, z) = net.node_pos(cell);
             let accumulation = net.accumulation(self, cell);
-            let size = ((accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln())
-                .clamp(0.0, 1.0) as f64;
+            let by_flow = (accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln();
+            // The longer a river has run, the bigger it can be: a short one
+            // stays a stream even where a lot of land drains into it.
+            let (short, long) = RIVER_LENGTH_FOR_SIZE;
+            let by_length = (net.length(self, cell) / short).ln() / (long / short).ln();
+            let size = by_flow.min(by_length).clamp(0.0, 1.0) as f64;
             (
                 (x, z),
                 net.water_level(self, cell, RIVER_THRESHOLD) as f64,
@@ -1135,9 +1146,15 @@ impl crate::drainage::Landscape for TerrainGenerator {
     /// plains that happens to flood. Rivers flow *through* inland lakes
     /// (their surface simply meets the lake's at sea level) and keep going;
     /// they only end where they actually reach the sea.
+    /// Open ocean, not just any water: well past the threshold (a quarter
+    /// of the way into a beach's blend), so a hollow near the coast that
+    /// happens to dip below sea level is a pond a river passes, not a sea
+    /// it ends in. A river crossing shallow coastal water on its way out
+    /// is invisible anyway - its surface can't go below sea level.
     fn is_sea(&self, x: f64, z: f64) -> bool {
         let (wx, wz) = (x.floor() as i32, z.floor() as i32);
-        self.continent_value(wx, wz) < OCEAN_THRESHOLD && self.natural_height(wx, wz) < SEA_LEVEL as f64
+        self.continent_value(wx, wz) < OCEAN_THRESHOLD - OPEN_SEA_MARGIN
+            && self.natural_height(wx, wz) < SEA_LEVEL as f64
     }
 
     fn incision(&self, x: f64, z: f64) -> f64 {
@@ -2098,5 +2115,36 @@ mod tests {
             }
         }
         assert!(stacks > 0, "no sea stacks anywhere");
+    }
+
+    /// Every river keeps flowing until it reaches the open sea - none dead-
+    /// ends in a hollow or a coastal pond, and none goes round in a loop.
+    #[test]
+    fn every_river_flows_on_until_it_reaches_the_open_sea() {
+        use crate::drainage::Landscape;
+        let reg = BlockRegistry::with_defaults();
+        for seed in [7u32, 11] {
+            let gen = TerrainGenerator::new(seed, &reg);
+            let net = &gen.drainage;
+            let mut rivers = 0;
+            for i in (-100..100).step_by(2) {
+                for j in (-100..100).step_by(2) {
+                    if net.accumulation(&gen, (i, j)) <= RIVER_THRESHOLD {
+                        continue;
+                    }
+                    rivers += 1;
+                    let mut c = (i, j);
+                    let mut steps = 0;
+                    while let Some(next) = net.downstream(&gen, c) {
+                        c = next;
+                        steps += 1;
+                        assert!(steps < 20_000, "seed {seed}: flow from {:?} loops", (i, j));
+                    }
+                    let (x, z) = net.node_pos(c);
+                    assert!(gen.is_sea(x, z), "seed {seed}: the river through {:?} ends at {c:?}, not the sea", (i, j));
+                }
+            }
+            assert!(rivers > 300, "seed {seed}: only {rivers} river cells sampled");
+        }
     }
 }

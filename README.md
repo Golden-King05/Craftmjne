@@ -251,13 +251,17 @@ own noise stream:
   (`drainage.rs`, a 16-block grid that covers the whole world and is
   computed lazily as you explore), and wherever enough of it gathers a river
   forms with its own water surface. Rivers start in the uplands *above* sea
-  level, pass through any lakes on the way, and only end at the ocean,
+  level and only ever end at the open ocean. A hollow that would trap the
+  water fills and spills over its lowest rim, with the river cutting
+  through, and the small ponds dotting the plains are just ponds: a river
+  may pass through one but never stops there. Rivers flow on,
   easing down a block at a time with flowing water (the fluid sim's own
   levels, so the surface slopes in eighths of a block rather than stepping
   a whole one). Their
-  size depends on how much land drains into them: a short coastal stream is
-  a couple of blocks wide, and a big river can run for over a kilometre and
-  grow to 16 blocks across. How far a river has cut below its banks varies
+  size depends on how much land drains into them *and* how far they've
+  run: a short stream stays a couple of blocks wide, and only a river that
+  has come a long way (over a kilometre, for some) grows to 16 blocks
+  across. How far a river has cut below its banks varies
   along its length. Some run flush with the ground beside them; others sit
   a few blocks down in a narrower valley, the start of a canyon.
 - **Waterfalls.** Where a river drops 3 or more blocks between two points

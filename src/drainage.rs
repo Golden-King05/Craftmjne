@@ -17,8 +17,21 @@
 //! and memoized per node in `Tile`s, so each is computed once no matter how
 //! many chunks ask. Every value is a pure function of the terrain, so the
 //! order chunks generate in never changes the answer.
+//!
+//! **Water never just stops in a hollow.** Steepest descent on any real
+//! surface finds pits - low spots with nothing lower around them - and on
+//! flat plains the sea-ward tilt is too weak to rule them out. A real
+//! depression fills up and overflows at the lowest point of its rim, so
+//! here every pit has a *spill path* (`breach`): flooding outward from the
+//! pit, lowest rim first, until reaching a cell that drains somewhere
+//! strictly lower than the pit itself. The cells along that path flow along
+//! it instead of by steepest descent (`downstream`), and the river carries
+//! on. Each spill leads to strictly lower ground than the pit it left, so
+//! following spills can never come back round - and like everything else
+//! here, a spill path is a pure function of the terrain.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::noise::hash2;
@@ -57,11 +70,40 @@ pub trait Landscape: Sync {
 #[derive(Default)]
 struct Node {
     route: OnceLock<f32>,
-    /// Index into `NEIGHBOURS`, or `PIT` if nothing around is lower.
+    /// Steepest descent: an index into `NEIGHBOURS`, or `PIT` if nothing
+    /// around is lower (or this is the sea).
     down: OnceLock<u8>,
+    /// Where water actually goes - `down`, unless this cell lies on a pit's
+    /// spill path (see `downstream`).
+    flow: OnceLock<u8>,
+    /// Where following `down` alone ends up: the sea, or a pit.
+    terminal: OnceLock<Cell>,
     accumulation: OnceLock<f32>,
+    /// The longest flow path upstream of this cell, in cells, including it.
+    length: OnceLock<f32>,
     water: OnceLock<f32>,
 }
+
+/// A pit's way out: the cells from the pit to its outlet, each mapped to
+/// the next one along.
+struct Spill {
+    next: HashMap<Cell, Cell>,
+    outlet: Cell,
+}
+
+/// How many cells a pit's flood may cover looking for its way out before
+/// giving up and staying a true sink - an inland basin with no outlet in
+/// reach. Real pits on this terrain are shallow and small; this bound is
+/// only what keeps a pathological one from running away.
+const MAX_SPILL_SEARCH: usize = 4096;
+/// How far `terminal` follows steepest descent before deciding the water
+/// simply drains away - a continent is under a thousand cells across, so a
+/// chain still going after this many is heading downhill indefinitely,
+/// which only a synthetic landscape can do, and is as good as reaching the
+/// sea.
+const MAX_CHAIN: usize = 8192;
+/// The terminal of a chain cut off at `MAX_CHAIN`.
+const DRAINS_AWAY: Cell = (i32::MIN, i32::MIN);
 
 const PIT: u8 = u8::MAX;
 
@@ -92,11 +134,20 @@ pub type Cell = (i32, i32);
 pub struct Network {
     seed: u32,
     tiles: Mutex<HashMap<Cell, Arc<Tile>>>,
+    /// Each pit's spill path, or `None` for a true sink. Pits are rare, so
+    /// these live in one map rather than on every node.
+    spills: Mutex<HashMap<Cell, Option<Arc<Spill>>>>,
+}
+
+/// An `f32` as a key that sorts in numeric order, negatives included.
+fn ordered(v: f32) -> u32 {
+    let bits = v.to_bits();
+    if bits >> 31 == 1 { !bits } else { bits | 1 << 31 }
 }
 
 impl Network {
     pub fn new(seed: u32) -> Self {
-        Self { seed, tiles: Mutex::new(HashMap::new()) }
+        Self { seed, tiles: Mutex::new(HashMap::new()), spills: Mutex::new(HashMap::new()) }
     }
 
     fn with_node<R>(&self, cell: Cell, f: impl FnOnce(&Node) -> R) -> R {
@@ -123,9 +174,131 @@ impl Network {
         self.with_node(cell, |n| *n.route.get_or_init(|| land.routing_height(x, z) as f32))
     }
 
-    /// Where water at `cell` flows next, or `None` if it stops here (a
-    /// pit, or the sea).
+    /// Where water at `cell` flows next, or `None` if it stops here: the
+    /// sea, or a true sink with no way out in reach. Steepest descent,
+    /// except along a pit's spill path - see this module's doc comment.
+    ///
+    /// A cell can lie on the spill paths of several pits in the chain its
+    /// water passes through (its own terminal pit, the pit *that* spills
+    /// into, and so on, each strictly lower than the last). It follows the
+    /// lowest one's: that's where the water was going anyway.
     pub fn downstream(&self, land: &impl Landscape, cell: Cell) -> Option<Cell> {
+        let code = self.with_node(cell, |n| n.flow.get().copied()).unwrap_or_else(|| {
+            let natural = self.natural_down_code(land, cell);
+            let mut code = natural;
+            let mut pit = self.terminal(land, cell);
+            for _ in 0..64 {
+                if self.ends_at_sea(land, pit) {
+                    break;
+                }
+                let Some(spill) = self.spill(land, pit) else { break };
+                if let Some(&next) = spill.next.get(&cell) {
+                    let delta = (next.0 - cell.0, next.1 - cell.1);
+                    code = NEIGHBOURS.iter().position(|&d| d == delta).unwrap() as u8;
+                }
+                pit = self.terminal(land, spill.outlet);
+            }
+            self.with_node(cell, |n| *n.flow.get_or_init(|| code))
+        });
+        (code != PIT).then(|| {
+            let (dx, dz) = NEIGHBOURS[code as usize];
+            (cell.0 + dx, cell.1 + dz)
+        })
+    }
+
+    fn ends_at_sea(&self, land: &impl Landscape, cell: Cell) -> bool {
+        if cell == DRAINS_AWAY {
+            return true;
+        }
+        let pos = self.node_pos(cell);
+        land.is_sea(pos.0, pos.1)
+    }
+
+    /// Steepest descent only - where water would go with no spill paths.
+    fn natural_downstream(&self, land: &impl Landscape, cell: Cell) -> Option<Cell> {
+        let code = self.natural_down_code(land, cell);
+        (code != PIT).then(|| {
+            let (dx, dz) = NEIGHBOURS[code as usize];
+            (cell.0 + dx, cell.1 + dz)
+        })
+    }
+
+    /// Where following steepest descent from `cell` ends: a sea cell, or a
+    /// pit. Memoized along the whole path walked.
+    fn terminal(&self, land: &impl Landscape, cell: Cell) -> Cell {
+        let mut path = Vec::new();
+        let mut c = cell;
+        let end = loop {
+            if let Some(t) = self.with_node(c, |n| n.terminal.get().copied()) {
+                break t;
+            }
+            path.push(c);
+            if path.len() > MAX_CHAIN {
+                break DRAINS_AWAY;
+            }
+            match self.natural_downstream(land, c) {
+                Some(next) => c = next,
+                None => break c,
+            }
+        };
+        for c in path {
+            self.with_node(c, |n| {
+                let _ = n.terminal.set(end);
+            });
+        }
+        end
+    }
+
+    /// `pit`'s way out, or `None` if it's a true sink. Floods outward from
+    /// the pit in order of how high water would have to rise to get there
+    /// (the lowest rim first, as a filling depression overflows), until it
+    /// reaches a cell whose steepest descent ends at the sea or at a pit
+    /// strictly lower than this one.
+    fn spill(&self, land: &impl Landscape, pit: Cell) -> Option<Arc<Spill>> {
+        if let Some(known) = self.spills.lock().unwrap().get(&pit) {
+            return known.clone();
+        }
+        let floor = self.route(land, pit);
+        let mut heap = BinaryHeap::new();
+        let mut parent: HashMap<Cell, Cell> = HashMap::new();
+        parent.insert(pit, pit);
+        heap.push(Reverse((ordered(floor), pit)));
+        let mut found = None;
+        let mut popped = 0;
+        while let Some(Reverse((level, c))) = heap.pop() {
+            popped += 1;
+            if popped > MAX_SPILL_SEARCH {
+                break;
+            }
+            if c != pit {
+                let end = self.terminal(land, c);
+                if end != pit && (self.ends_at_sea(land, end) || self.route(land, end) < floor) {
+                    found = Some(c);
+                    break;
+                }
+            }
+            for (dx, dz) in NEIGHBOURS {
+                let n = (c.0 + dx, c.1 + dz);
+                if let std::collections::hash_map::Entry::Vacant(e) = parent.entry(n) {
+                    e.insert(c);
+                    heap.push(Reverse((level.max(ordered(self.route(land, n))), n)));
+                }
+            }
+        }
+        let spill = found.map(|outlet| {
+            let mut next = HashMap::new();
+            let mut c = outlet;
+            while c != pit {
+                let p = parent[&c];
+                next.insert(p, c);
+                c = p;
+            }
+            Arc::new(Spill { next, outlet })
+        });
+        self.spills.lock().unwrap().entry(pit).or_insert(spill).clone()
+    }
+
+    fn natural_down_code(&self, land: &impl Landscape, cell: Cell) -> u8 {
         let code = self.with_node(cell, |n| n.down.get().copied());
         let code = code.unwrap_or_else(|| {
             let pos = self.node_pos(cell);
@@ -148,10 +321,7 @@ impl Network {
             };
             self.with_node(cell, |n| *n.down.get_or_init(|| code))
         });
-        (code != PIT).then(|| {
-            let (dx, dz) = NEIGHBOURS[code as usize];
-            (cell.0 + dx, cell.1 + dz)
-        })
+        code
     }
 
     /// The neighbours whose water flows into `cell`.
@@ -191,6 +361,7 @@ impl Network {
                     // properly if anything asks for them directly.
                     self.with_node(cell, |n| {
                         let _ = n.accumulation.set(MAX_ACCUMULATION);
+                        let _ = n.length.set(f32::INFINITY);
                     });
                     break;
                 }
@@ -202,12 +373,22 @@ impl Network {
                 }
             } else {
                 let total = 1.0 + donors.iter().map(|&d| self.accumulation_known(d)).sum::<f32>();
+                let longest = 1.0 + donors.iter().map(|&d| self.with_node(d, |n| *n.length.get().unwrap())).fold(0.0, f32::max);
                 self.with_node(c, |n| {
                     let _ = n.accumulation.set(total.min(MAX_ACCUMULATION));
+                    let _ = n.length.set(longest);
                 });
             }
         }
         self.accumulation_known(cell)
+    }
+
+    /// The longest flow path upstream of `cell` and through it, in cells -
+    /// how far its water has come from the most distant source. Infinite
+    /// for a catchment at the `MAX_ACCUMULATION` cap.
+    pub fn length(&self, land: &impl Landscape, cell: Cell) -> f32 {
+        self.accumulation(land, cell);
+        self.with_node(cell, |n| n.length.get().copied()).unwrap_or(f32::INFINITY)
     }
 
     fn accumulation_known(&self, cell: Cell) -> f32 {
@@ -411,5 +592,52 @@ mod tests {
         let (land, net) = valley(10.0, |_| 3.0);
         let path = channel(&net, &land, (0, 60));
         assert!(path.iter().all(|&c| net.water_level(&land, c, 0.0) >= 26.0));
+    }
+
+    /// The valley with a hollow in its floor halfway down - a dip deep
+    /// enough that steepest descent alone gets stuck in it.
+    struct HollowValley(Valley);
+
+    impl Landscape for HollowValley {
+        fn routing_height(&self, x: f64, z: f64) -> f64 {
+            self.ground_height(x, z)
+        }
+        fn ground_height(&self, x: f64, z: f64) -> f64 {
+            let dip = 8.0 * (-((z - 800.0) / 60.0).powi(2) - (x / 60.0).powi(2)).exp();
+            self.0.ground_height(x, z) - dip
+        }
+        fn is_sea(&self, x: f64, z: f64) -> bool {
+            self.0.is_sea(x, z)
+        }
+        fn incision(&self, x: f64, z: f64) -> f64 {
+            self.0.incision(x, z)
+        }
+        fn base_level(&self) -> f64 {
+            self.0.base_level()
+        }
+    }
+
+    /// A river that runs into a hollow fills it and carries on over its
+    /// lowest rim, rather than ending there.
+    #[test]
+    fn a_river_spills_out_of_a_hollow_and_carries_on_to_the_sea() {
+        let land = HollowValley(Valley { base: 60.0, incision: |_| 0.0 });
+        let net = Network::new(1);
+        // Test setup: steepest descent alone really does get stuck.
+        let mut c = (0, 90);
+        while let Some(next) = net.natural_downstream(&land, c) {
+            c = next;
+        }
+        let (_, stuck_z) = net.node_pos(c);
+        assert!(!land.is_sea(0.0, stuck_z), "the hollow should trap plain steepest descent");
+
+        let mut path = vec![(0, 90)];
+        while let Some(next) = net.downstream(&land, *path.last().unwrap()) {
+            assert!(path.len() < 10_000, "flow went round in a loop");
+            path.push(next);
+        }
+        let (_, z) = net.node_pos(*path.last().unwrap());
+        assert!(land.is_sea(0.0, z), "the river stopped at {:?} instead of reaching the sea", path.last());
+        assert!(path.contains(&c), "it should pass through the hollow it filled, not around it");
     }
 }
