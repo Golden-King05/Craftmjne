@@ -23,10 +23,9 @@ use bevy::prelude::{Resource, Vec3};
 
 use crate::biome::Biome;
 use crate::config::SEA_LEVEL;
-use crate::noise::SimplexNoise;
 use crate::save::{GameMode, SaveStore};
 use crate::state::ActiveWorld;
-use crate::terrain::{locate_biome, Feature, TerrainGenerator};
+use crate::terrain::{Feature, TerrainGenerator};
 use crate::text_color::colorize;
 use crate::texture_report::TextureReport;
 
@@ -177,7 +176,7 @@ fn locate_result_message(ctx: &CommandContext, label: &str, found: (i32, i32), o
 
 /// `/locate`'s handler: dispatches on the qualifier, then (for `biome`/
 /// `feature`) parses the second argument and runs the matching search -
-/// `biome::locate_biome`/`TerrainGenerator::locate_feature` are the actual
+/// `TerrainGenerator::locate_biome`/`locate_feature` are the actual
 /// searches; this just validates input and formats the result.
 fn locate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
     const USAGE: &str = "Usage: /locate <biome|feature|structure> <name>";
@@ -198,7 +197,7 @@ fn locate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
                 let valid: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
                 return CommandOutcome::Usage(format!("Unknown biome {name:?}. Try: {}", valid.join(", ")));
             };
-            match locate_biome(ctx.biome_noise, biome, origin.0, origin.1) {
+            match ctx.world_gen.locate_biome(biome, origin.0, origin.1) {
                 Some(found) => CommandOutcome::Ok(locate_result_message(
                     ctx,
                     &format!("{} biome", capitalize(biome.name())),
@@ -240,10 +239,6 @@ pub struct CommandContext<'a> {
     /// The active world's generator - the one source of truth `/locate`
     /// searches against, same as worldgen itself uses.
     pub world_gen: &'a TerrainGenerator,
-    /// The active world's biome-*region* noise (`biome::region_noise_for_
-    /// seed`) - a `/locate biome` search only ever needs this, not the
-    /// rest of the generator.
-    pub biome_noise: &'a SimplexNoise,
     /// Where to search outward from - the player's current position.
     pub player_pos: Vec3,
 }
@@ -547,9 +542,6 @@ mod tests {
     fn test_world_gen() -> TerrainGenerator {
         TerrainGenerator::new(1, &crate::blocks::BlockRegistry::with_defaults())
     }
-    fn test_biome_noise() -> SimplexNoise {
-        crate::biome::region_noise_for_seed(1)
-    }
 
     /// Runs `line` against the real default registry, building a
     /// `CommandContext` from the individual pieces each test already has -
@@ -562,12 +554,11 @@ mod tests {
         store: &SaveStore,
         report: &TextureReport,
         world_gen: &TerrainGenerator,
-        biome_noise: &SimplexNoise,
         player_pos: Vec3,
     ) -> CommandOutcome {
         let registry = CommandRegistry::with_defaults();
         let mut ctx =
-            CommandContext { mode, active, store, texture_report: report, world_gen, biome_noise, player_pos };
+            CommandContext { mode, active, store, texture_report: report, world_gen, player_pos };
         registry.execute(line, &mut ctx)
     }
 
@@ -584,7 +575,7 @@ mod tests {
             let store = temp_store();
             let mut active = active_world(&store);
             let mut mode = GameMode::Survival;
-            let outcome = run(&format!("mode {arg}"), &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+            let outcome = run(&format!("mode {arg}"), &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
             assert!(matches!(outcome, CommandOutcome::Ok(_)));
             assert_eq!(mode, expected, "arg {arg}");
             assert_eq!(active.meta.mode, expected, "arg {arg}");
@@ -596,7 +587,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        run("mode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        run("mode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert_eq!(mode, GameMode::Creative);
         assert_eq!(store.load_meta(&active.slug).unwrap().mode, GameMode::Creative);
     }
@@ -606,7 +597,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        run("gamemode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        run("gamemode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert_eq!(mode, GameMode::Creative);
     }
 
@@ -617,12 +608,12 @@ mod tests {
         assert!(!active.meta.cheats);
         let mut mode = GameMode::Survival;
 
-        run("mode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        run("mode creative", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert!(active.meta.cheats);
         assert!(store.load_meta(&active.slug).unwrap().cheats);
 
         // Switching back to survival doesn't un-set it.
-        run("mode survival", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        run("mode survival", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert!(active.meta.cheats);
     }
 
@@ -631,7 +622,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("mode not-a-mode", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        let outcome = run("mode not-a-mode", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert!(matches!(outcome, CommandOutcome::Usage(_)));
         assert_eq!(mode, GameMode::Survival); // unchanged
         assert!(active.meta.cheats); // but the attempt still counts
@@ -642,7 +633,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("teleport 0 0 0", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        let outcome = run("teleport 0 0 0", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert!(matches!(outcome, CommandOutcome::Unknown(_)));
         assert!(!active.meta.cheats);
     }
@@ -659,7 +650,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("texture-report", &mut mode, &mut active, &store, &report, &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        let outcome = run("texture-report", &mut mode, &mut active, &store, &report, &test_world_gen(), Vec3::ZERO);
         let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok") };
 
         assert!(message.contains("1 working"));
@@ -682,7 +673,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        let outcome = run("texture-report", &mut mode, &mut active, &store, &report, &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        let outcome = run("texture-report", &mut mode, &mut active, &store, &report, &test_world_gen(), Vec3::ZERO);
         let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok") };
 
         assert_eq!(message.lines().count(), 1, "no broken/missing means no detail lines: {message:?}");
@@ -693,7 +684,7 @@ mod tests {
         let store = temp_store();
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
-        run("texture-report", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), &test_biome_noise(), Vec3::ZERO);
+        run("texture-report", &mut mode, &mut active, &store, &no_report(), &test_world_gen(), Vec3::ZERO);
         assert!(active.meta.cheats);
     }
 
@@ -725,14 +716,12 @@ mod tests {
             let mut active = active_world(&store);
             let mut mode = GameMode::Survival;
             let world_gen = test_world_gen();
-            let biome_noise = test_biome_noise();
-            let mut ctx = CommandContext {
+                let mut ctx = CommandContext {
                 mode: &mut mode,
                 active: &mut active,
                 store: &store,
                 texture_report: &no_report(),
                 world_gen: &world_gen,
-                biome_noise: &biome_noise,
                 player_pos: Vec3::ZERO,
             };
             let outcome = registry.execute(&suggestion.text, &mut ctx);
@@ -763,14 +752,12 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let mut ctx = CommandContext {
             mode: &mut mode,
             active: &mut active,
             store: &store,
             texture_report: &no_report(),
             world_gen: &world_gen,
-            biome_noise: &biome_noise,
             player_pos: Vec3::ZERO,
         };
         let outcome = registry.execute("heal", &mut ctx);
@@ -784,12 +771,31 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let outcome =
-            run("locate biome snow", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+            run("locate biome snow", &mut mode, &mut active, &store, &no_report(), &world_gen, Vec3::ZERO);
         let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok, got a usage/unknown result") };
         assert!(message.contains("Snow biome"), "{message:?}");
         assert!(message.contains("blocks away"), "{message:?}");
+    }
+
+    #[test]
+    fn locate_biome_mountain_finds_a_high_column_on_a_range() {
+        // The altitude-zone biome, not a region one - the search has to go
+        // through the generator's full `biome_at`, not region noise alone.
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let outcome =
+            run("locate biome mountain", &mut mode, &mut active, &store, &no_report(), &world_gen, Vec3::ZERO);
+        let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok, got a usage/unknown result") };
+        assert!(message.contains("Mountain biome"), "{message:?}");
+        // The reported coordinate really is a Mountain-biome column.
+        let coords: Vec<i32> = message
+            .split(|c: char| !(c.is_ascii_digit() || c == '-'))
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        assert_eq!(world_gen.biome_at(coords[0], coords[2]), Biome::Mountain, "{message:?}");
     }
 
     #[test]
@@ -798,7 +804,6 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let outcome = run(
             "locate feature mountain",
             &mut mode,
@@ -806,7 +811,6 @@ mod tests {
             &store,
             &no_report(),
             &world_gen,
-            &biome_noise,
             Vec3::ZERO,
         );
         let CommandOutcome::Ok(message) = outcome else { panic!("expected Ok, got a usage/unknown result") };
@@ -820,7 +824,6 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let outcome = run(
             "locate structure anything",
             &mut mode,
@@ -828,7 +831,6 @@ mod tests {
             &store,
             &no_report(),
             &world_gen,
-            &biome_noise,
             Vec3::ZERO,
         );
         let CommandOutcome::Usage(message) = outcome else { panic!("expected a Usage result") };
@@ -841,9 +843,8 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let outcome =
-            run("locate bogus snow", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+            run("locate bogus snow", &mut mode, &mut active, &store, &no_report(), &world_gen, Vec3::ZERO);
         assert!(matches!(outcome, CommandOutcome::Usage(_)));
     }
 
@@ -853,7 +854,6 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let outcome = run(
             "locate biome desert",
             &mut mode,
@@ -861,7 +861,6 @@ mod tests {
             &store,
             &no_report(),
             &world_gen,
-            &biome_noise,
             Vec3::ZERO,
         );
         let CommandOutcome::Usage(message) = outcome else { panic!("expected a Usage result") };
@@ -874,9 +873,8 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
         let outcome =
-            run("locate biome", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+            run("locate biome", &mut mode, &mut active, &store, &no_report(), &world_gen, Vec3::ZERO);
         assert!(matches!(outcome, CommandOutcome::Usage(_)));
     }
 
@@ -886,8 +884,7 @@ mod tests {
         let mut active = active_world(&store);
         let mut mode = GameMode::Survival;
         let world_gen = test_world_gen();
-        let biome_noise = test_biome_noise();
-        run("locate biome desert", &mut mode, &mut active, &store, &no_report(), &world_gen, &biome_noise, Vec3::ZERO);
+        run("locate biome desert", &mut mode, &mut active, &store, &no_report(), &world_gen, Vec3::ZERO);
         assert!(active.meta.cheats);
     }
 }

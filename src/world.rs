@@ -45,16 +45,6 @@ pub struct WorldGen(pub Arc<TerrainGenerator>);
 #[derive(Resource, Clone)]
 pub struct BiomeNoise(pub Arc<crate::noise::SimplexNoise>);
 
-/// This world's biome *region* noise source (`biome::biome_at`'s input) -
-/// a wholly separate stream from `BiomeNoise`'s grass-tint noise, built
-/// the same way (`biome::region_noise_for_seed`) `terrain.rs`'s
-/// `TerrainGenerator` builds its own copy of, so both agree on the exact
-/// same classification for a given seed and column without needing to
-/// literally share one object. Read by `freeze_exposed_water` to decide
-/// whether a newly-air-exposed water source should freeze.
-#[derive(Resource, Clone)]
-pub struct BiomeMap(pub Arc<crate::noise::SimplexNoise>);
-
 /// Non-render atlas data (pixel buffer + name->tile map), built at startup.
 #[derive(Resource)]
 pub struct Atlas(pub AtlasData);
@@ -742,7 +732,6 @@ fn enter_world(
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
     commands.insert_resource(BiomeNoise(Arc::new(crate::biome::noise_for_seed(active.meta.seed))));
-    commands.insert_resource(BiomeMap(Arc::new(crate::biome::region_noise_for_seed(active.meta.seed))));
     commands.insert_resource(active.meta.mode);
 
     for e in &tasks {
@@ -846,7 +835,7 @@ fn freeze_exposed_water(
     mut params: ParamSet<(EventReader<BlockSetEvent>, EventWriter<BlockSetEvent>)>,
     mut map: ResMut<ChunkMap>,
     registry: Res<BlockRegistry>,
-    biome_map: Res<BiomeMap>,
+    world_gen: Res<WorldGen>,
 ) {
     let water = registry.id("water");
     let ice = registry.id("ice");
@@ -856,7 +845,7 @@ fn freeze_exposed_water(
         candidates.push(e.pos - IVec3::Y);
     }
     for pos in candidates {
-        if let Some(prev) = try_freeze_cell(&mut map, pos, water, ice, &biome_map.0) {
+        if let Some(prev) = try_freeze_cell(&mut map, pos, water, ice, |x, z| world_gen.0.biome_at(x, z)) {
             params.p1().write(BlockSetEvent { pos, id: ice, prev, axis: crate::blocks::AXIS_Y });
         }
     }
@@ -874,7 +863,7 @@ fn try_freeze_cell(
     pos: IVec3,
     water: BlockId,
     ice: BlockId,
-    biome_noise: &crate::noise::SimplexNoise,
+    biome_at: impl Fn(i32, i32) -> biome::Biome,
 ) -> Option<BlockId> {
     if map.get_block(pos) != water || map.get_fluid_level(pos) != FLUID_SOURCE {
         return None; // not a still water source at all
@@ -882,7 +871,7 @@ fn try_freeze_cell(
     if map.get_block(pos + IVec3::Y) != AIR {
         return None; // not exposed to air
     }
-    if !biome::biome_at(biome_noise, pos.x, pos.z).freezes_water() {
+    if !biome_at(pos.x, pos.z).freezes_water() {
         return None;
     }
     map.set_block(pos, ice)
@@ -1449,7 +1438,7 @@ mod tests {
         for i in -40..40 {
             for j in -40..40 {
                 let (x, z) = (i * 97, j * 131);
-                if biome::biome_at(noise, x, z) == want {
+                if biome::region_biome_at(noise, x, z) == want {
                     return IVec3::new(x, 10, z);
                 }
             }
@@ -1466,7 +1455,7 @@ mod tests {
         // Nothing placed above `pos` in a fresh chunk, so it's already
         // exposed to air.
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, Some(water));
         assert_eq!(map.get_block(pos), ice);
@@ -1479,7 +1468,7 @@ mod tests {
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);
@@ -1492,7 +1481,7 @@ mod tests {
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, 3); // flowing, not a source
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);
@@ -1506,7 +1495,7 @@ mod tests {
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
         map.set_block(pos + IVec3::Y, stone); // covered, not exposed to air
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, &noise);
+        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);

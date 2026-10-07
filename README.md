@@ -216,6 +216,36 @@ survives a save and reload. `mesher::rotated_tile` does the actual face
 remap; it's a no-op for any block whose `rotation` is `"none"`, so adding a
 second rotating block someday needs zero mesher changes.
 
+## World generation
+
+`src/terrain.rs` builds every column from a few independent layers, each its
+own noise stream:
+
+- **Continents and coasts.** A very low-frequency continent field splits
+  land from sea into several separate landmasses. A second field decides
+  each stretch of coast's *style*: gentle coasts fade into the sea over a
+  long beach, steep ones hold the land high right up to a cliff with deep
+  water at its foot.
+- **Mountain ranges.** A range mask (`mountainness`) decides where ranges
+  are; inside one, ridged noise lifts the terrain into ridgelines that reach
+  well above the snow line. Heights are eased toward the build ceiling
+  rather than clamped, so summits stay pointed instead of flattening.
+- **Biomes, layered by altitude.** Every column has a *region* biome
+  (`plains` or `snow`). On a mountain range, `biome::ALTITUDE_ZONES` replaces
+  it by height: the foot of a range keeps its region biome, and from height
+  44 up it becomes the desolate `mountain` biome (bare rock and scree, snow
+  caps from 50). Adding a band between them later (spruce on the lower
+  slopes) is one more table entry.
+- **Rivers.** Water is routed downhill over each 512x512-block region by a
+  real flow simulation, and wherever enough of it gathers a river forms
+  with its own water surface: rivers start in the uplands *above* sea level
+  and step down toward the sea, with short rapids where the surface drops a
+  block. How far a river has cut below its banks varies along its length -
+  some run flush with the ground beside them, others sit a few blocks down
+  in a narrower valley, the start of a canyon. Rivers can't cross from one
+  region into the next, so each fades out before reaching its region's
+  edge.
+
 ## Chat and commands
 
 Press `T` to open a one-line chat box, or `/` to open it with `/` already
@@ -242,9 +272,11 @@ mainly as a place to type `/`-prefixed commands.
   names are yellow/red, in matching colors.
 - `/locate <biome|feature|structure> <name>` — reports the nearest match
   (coordinates + distance) to wherever you're standing. `biome` searches
-  for `plains`/`snow`; `feature` searches for `river`/`ocean`/`mountain`
-  against the generator's real terrain (the same height/biome/river-carve
-  checks worldgen itself uses, not a second guess at what they mean);
+  for `plains`/`snow`/`mountain` (the last being a range's desolate upper
+  slopes - see "World generation"); `feature` searches for
+  `river`/`ocean`/`mountain` against the generator's real terrain (the
+  same checks worldgen itself uses, not a second guess at what they mean -
+  `feature mountain` finds the range itself, `biome mountain` its peaks);
   `structure` is reserved for when this game actually generates
   structures to find, and currently just says so.
 

@@ -1467,12 +1467,12 @@ etc.) instead of inventing a new approach:
   noise value a hard classification thresholds, not step at the
   classification's own edge.** `Biome::drier` pushes terrain up (so fewer
   columns dip below `SEA_LEVEL` and form a lake) - if that boost snapped
-  on/off exactly where `biome_at` flips from `Plains` to `Snow`, the biome
+  on/off exactly where `region_biome_at` flips from `Plains` to `Snow`, the biome
   edge would read as a real elevation cliff, which is far more visually
   jarring than the existing hard edge in which *texture* a column's
   surface uses (already accepted at `SNOW_LINE`). `biome::drier_strength`
   ramps `0.0..=1.0` across a blend window centered on the same
-  `SNOW_THRESHOLD` `biome_at` itself uses (not a second, potentially-
+  `SNOW_THRESHOLD` `region_biome_at` itself uses (not a second, potentially-
   disagreeing threshold), so terrain is already rising as a column
   approaches Snow biome and the elevation change is smooth even though the
   surface-block change right at the edge still isn't.
@@ -1563,9 +1563,9 @@ etc.) instead of inventing a new approach:
   cheap enough - 64x64 - to flood/sort every time it's needed) as the
   honest middle ground the `AskUserQuestion` answer itself named ("world-
   scale heightmap up front (**or per-region**)"). Each river's drainage
-  basin is confined to one region and its own `sample_carve`'s bilinear
-  lookup deliberately fades any carve to exactly zero at the region's own
-  padded edge (a 1-cell halo forced to zero) - not because that's
+  basin is confined to one region and `RegionHydrology::sample`
+  deliberately fades every river to nothing over `RIVER_EDGE_FADE` blocks
+  inside the region's edge - not because that's
   hydrologically correct, but because it turns an inherent limitation
   (a river's catchment stopping at an arbitrary line) into something that
   reads as a minor tributary petering out rather than a visible cliff at a
@@ -1723,17 +1723,106 @@ etc.) instead of inventing a new approach:
   fixed, for the same reason the bounded-region river search itself is
   accepted as-is: a `/locate` command promises "get me close to a real
   one," not "the provably single closest coordinate in the universe."
-- **Reusing `TerrainGenerator::effective_height`/`river_carve` for
-  `/locate feature` is what keeps "what counts as a river/mountain" from
-  ever disagreeing with what the generator itself actually placed.**
-  `Feature::Mountain` reuses the exact `effective_height(..) >= SNOW_LINE`
-  comparison `generate()` already uses to decide snow-capped terrain
-  (not a second, hand-picked altitude), and `Feature::River` reuses
-  `river_carve` directly (not a re-derived approximation from the
-  difference between `surface_height` and `effective_height`, which would
-  also pick up the unrelated `Biome::drier` height boost and misclassify
-  columns). Both methods had to go from private to `pub` for this (`/locate`
-  lives in a different module) - a small, deliberate widening of
-  `TerrainGenerator`'s surface, not a parallel definition of either
-  concept.
-
+- **Reusing the generator's own definitions for `/locate feature` is what
+  keeps "what counts as a river/mountain" from ever disagreeing with what
+  the generator actually placed.** `Feature::River` is `column_profile(..)
+  .in_river` - the exact wet channel `generate` floods - and
+  `Feature::Mountain` is `mountainness >= MOUNTAIN_RANGE_THRESHOLD`, the same
+  mask the range was raised by and the `Mountain` biome is gated on. (Both
+  were first written as altitude/carve-depth approximations; the river/
+  mountain rework below replaced them with these rather than keeping two
+  definitions of each concept.)
+- **"Can the game already do X?" gets answered by measuring, not by reading
+  the code that's supposed to do it.** Asked to confirm rivers could sit
+  flush or dug-in and mountains could be their own thing, a throwaway probe
+  over three seeds found ~96% of river columns at or below sea level with
+  banks *under* the water on average (rivers only formed in lowlands that
+  were already flooded; upland reaches were dry trenches), and columns
+  inside the mountain mask mostly 26-31 tall, almost never reaching the
+  snow line. Neither was visible from the code - the carve formula and the
+  mountain mask both looked reasonable in isolation. Reporting those
+  numbers was the honest answer to "confirm," and they set the targets the
+  rework was then tuned against.
+- **Water that can stand above sea level isn't held in by anything except
+  the generator's own care, so containment has to be an explicit rule with
+  its own invariant test.** Sea water is safe by construction - only
+  columns whose ground is *below* `SEA_LEVEL` fill. A river's surface sits
+  wherever its valley is, so a dry column beside the channel can easily be
+  lower than the water. `TerrainGenerator::column_profile`'s **levee rule**
+  raises any dry near-river column to at least every 4-neighbour's water
+  surface, computed from those neighbours' *raw* (pre-levee) profiles so
+  it's still a pure per-column function with no cascade.
+  `river_water_never_stands_beside_open_air_on_dry_land` checks every wet
+  column's neighbours across four real river windows, and turning the levee
+  rule off makes it fail immediately. The one deliberate exception is water
+  meeting water at different heights *within* a river - a 1-block rapid
+  where the surface steps down. Voxel water can't slope, so a river that
+  descends has to step somewhere; the step is static until something
+  nearby triggers the fluid sim.
+- **A river's surface is a pull-style value propagated downstream, and it
+  needs the same "only ever improve" cap as `recompute_cell`'s fluid
+  levels.** Each river cell's candidate surface is `bank height - incision`.
+  Incision varies along a river (`river_incision`), so a deeply incised
+  stretch followed by a flush one would have its surface jump *up* to the
+  flush stretch's banks - water climbing uphill. `river_water_levels` walks
+  cells in the same highest-first order `flow_field` already uses and caps
+  each cell at the lowest surface of anything draining into it, so a
+  river's surface can only stay level or step down. Pure functions over a
+  plain height slice, so `a_rivers_surface_never_rises_downstream_even_
+  where_its_banks_get_lower` drives them with a hand-built valley that is
+  incised upstream and flush downstream - exactly the case the cap exists
+  for.
+- **Rivers became segments with real width instead of a blurred grid, and
+  that's what made "flush vs dug in" expressible at all.** The old carve
+  field bilinearly interpolated an 8-block grid, so a river's cross-section
+  was whatever interpolation happened to produce - one fixed soft V. Each
+  river cell is now a `RiverSegment` to the cell it drains into, carrying
+  water level, half-width, depth and incision at both ends.
+  `RegionHydrology::sample` finds the nearest segment and interpolates
+  along it, so a column knows its distance from the centerline and can be
+  shaped deliberately: a rounded wet channel, then banks at `water +
+  incision` (a vertical wall `incision` blocks tall at the water's edge, or
+  none when flush), then terrain easing back to natural over
+  `VALLEY_WIDTH`. Narrower for incised rivers, the start of a canyon.
+- **A bug can hide behind an unrelated feature, and only shows when that
+  feature is switched off.** While break-testing the cliff code (setting
+  coast steepness to zero), the *mountain* tests went red: only 59 of 4,493
+  range columns reached the snow line. The soft ceiling (`soft_ceiling`,
+  which eases tall terrain toward the build limit instead of clamping it
+  flat) was being applied twice, once in `land_relief` and again in
+  `base_height`, compressing every peak below the snow line. The steep-
+  coast uplift happened to stack enough extra height on ~30% of land to
+  hide it. The break test was aimed at cliffs and caught a mountain bug -
+  worth remembering that "switch one feature off" also checks which
+  *other* tests secretly depended on it.
+- **A test can pass with its feature removed because a different feature
+  produces a lookalike - exclude the confounder rather than loosen the
+  test.** `coasts_come_both_as_cliffs_and_as_beaches` stayed green with
+  coast steepness forced to zero, because a mountain range running into
+  the sea is also a tall shore. It now skips columns with any
+  `mountainness`, after which disabling cliffs fails it (0 of 247 shoreline
+  columns). Same lesson as the `big heal` chat test: break the thing a test
+  claims to guard and confirm it goes red.
+- **Altitude-layered biomes need the column's height, so the "real" biome
+  moved onto the generator, and the region-only classifier was renamed so
+  it can't be mistaken for it.** A mountain's base keeps its region biome,
+  and `ALTITUDE_ZONES` (a declarative table, lowest band first - adding
+  spruce on the lower slopes is one entry) takes over above each band's
+  `min_height`. That makes a column's biome depend on its generated height,
+  which only `TerrainGenerator` knows. `biome::biome_at` became
+  `biome::region_biome_at` (it still can't return `Mountain`, which is
+  tested). `TerrainGenerator::biome_at` is the full answer, and every
+  consumer that cared about a column's actual biome switched to it:
+  `generate`, `world.rs`'s freeze rule (`try_freeze_cell` now takes a
+  `biome_at` closure, so its tests can still feed region noise), and
+  `/locate biome`. The `world::BiomeMap` resource, which existed only to
+  hand region noise to the freeze rule and `/locate`, was deleted rather
+  than kept around as a second, incomplete way to ask "what biome is this?"
+- **"Mountain generation separate, but in line with the mountain biome"
+  means one mask drives both.** `mountainness` is the range mask:
+  `land_relief` lifts terrain by it, `zoned_biome` only applies altitude
+  zones where it's at least `MOUNTAIN_RANGE_THRESHOLD`, and `/locate feature
+  mountain` searches for it. A tall column that *isn't* on a range (a
+  steep coast's raised headland) therefore keeps its region biome, and the
+  `Mountain` biome can never appear somewhere the terrain wasn't actually
+  built as a mountain.

@@ -246,7 +246,6 @@ fn chat_text_input(
     texture_report: Res<TextureReport>,
     registry: Res<CommandRegistry>,
     world_gen: Res<crate::world::WorldGen>,
-    biome_map: Res<crate::world::BiomeMap>,
     players: Query<&crate::player::Player>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
@@ -285,7 +284,6 @@ fn chat_text_input(
                             store: &store,
                             texture_report: &texture_report,
                             world_gen: &world_gen.0,
-                            biome_noise: &biome_map.0,
                             player_pos,
                         };
                         let outcome = registry.execute(rest, &mut ctx);
@@ -623,7 +621,7 @@ mod tests {
         };
         assert_eq!(texts("/locate "), vec!["locate biome", "locate feature", "locate structure"]);
         assert_eq!(texts("/locate bio"), vec!["locate biome"]);
-        assert_eq!(texts("/locate biome "), vec!["locate biome plains", "locate biome snow"]);
+        assert_eq!(texts("/locate biome "), vec!["locate biome mountain", "locate biome plains", "locate biome snow"]);
         assert_eq!(texts("/locate biome pl"), vec!["locate biome plains"]);
         assert_eq!(texts("/locate feature oc"), vec!["locate feature ocean"]);
         // `structure` has no second argument yet.
