@@ -264,6 +264,13 @@ own noise stream:
   across. How far a river has cut below its banks varies
   along its length. Some run flush with the ground beside them; others sit
   a few blocks down in a narrower valley, the start of a canyon.
+- **Marshes and salt seas.** Where a river runs into a depression that
+  overflows, its low ground becomes a marsh: flat mud dotted with shallow
+  pools, with the river winding through and on. Rarely, a big depression
+  keeps its water instead, as real inland seas with no outlet do. That
+  makes a salt sea: a lake on a salt bed ringed by salt flats, where the
+  rivers feeding it end. `/locate feature marsh` and `/locate feature
+  salt_sea` find them.
 - **Waterfalls.** Where a river drops 3 or more blocks between two points
   of the network, it holds its level for as long as the ground can contain
   it, then falls. Inland, that's a waterfall down a step in the valley. At

@@ -2039,3 +2039,43 @@ etc.) instead of inventing a new approach:
   upstream path, computed in the same walk as accumulation): `size =
   min(by_flow, by_length)`, so a short river stays a stream however much
   land drains into it.
+- **Marshes and salt seas reuse the spill search's own byproduct: a
+  depression's footprint.** The user's framing was "have a solution for
+  when this happens instead of mangling the terrain." `drainage::Basin`
+  (what `spill` became) keeps every cell its flood covered before reaching
+  the outlet: exactly the lake the depression would hold filled to its
+  rim. `TerrainGenerator::wetland` turns a *river-fed* basin into:
+  - a **marsh** if it overflows. Ground at or below a low level (40th
+    percentile of the footprint's own ground) becomes flat mud, with
+    pools where a noise field says so. The river keeps its channel
+    through it.
+  - a **salt sea** if it keeps its water. A lake to just under the rim's
+    lowest point, on a salt bed, with salt flats on the shore, where
+    rivers end.
+  Things to keep in mind:
+  - **Whether a basin keeps its water must not depend on how much flows
+    into it** (`Landscape::keeps_its_water` sees only the pit's position
+    and the footprint's size). Spilling changes which cells flow where, so
+    keying it on accumulation would make the decision depend on itself.
+    "Is a river feeding it" is checked afterwards, only to decide whether
+    to *render* anything.
+  - **A footprint is whole 16-block cells,** and the first salt sea came
+    out with a ruler-straight shore along the cell grid (caught by an
+    ASCII map). `wetland_near` interpolates membership between the four
+    surrounding cell centres and wobbles the 0.5 threshold with noise.
+  - **Containment reuses the levee rule** through a new `near_wetland`
+    flag, deliberately separate from `near_river` (same two jobs, levee
+    and no caves, but a different reason).
+    `wetland_water_never_stands_beside_open_air` goes red without it.
+  - **A rarity test has to fail when the rarity knob is broken, not just
+    pass when it's set.** The first version asserted salt seas were at
+    most 20% of all wetlands and stayed green with `SALT_SEA_CHANCE = 1.0`,
+    because most basins are too small to qualify anyway, so size alone
+    kept it rare. It now compares among basins big enough to be one.
+  - **Memoize what every column asks.** Each column checks the basins of
+    its 9 nearest cells, and `is_sea` (continent noise + natural height)
+    was being re-evaluated on each. `Node::sea` brought generation back
+    from 6-9 ms to 3-6 ms per chunk.
+  Measured over 6x6 km on three seeds: 53-91 river-fed wetlands, 3-7 of
+  them salt seas (each a few thousand blocks²); marsh is ~0.5% of the
+  area.

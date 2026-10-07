@@ -31,7 +31,7 @@
 //! here, a spill path is a pure function of the terrain.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::noise::hash2;
@@ -62,6 +62,14 @@ pub trait Landscape: Sync {
     fn incision(&self, x: f64, z: f64) -> f64;
     /// The lowest a river's surface can ever be (sea level).
     fn base_level(&self) -> f64;
+    /// Whether the depression around the pit at `(x, z)`, covering `cells`
+    /// drainage cells when filled to its rim, keeps its water instead of
+    /// overflowing - a salt sea, where rivers end. Decided from the basin
+    /// alone, never from how much flows into it, since whether it spills
+    /// changes where water flows.
+    fn keeps_its_water(&self, _x: f64, _z: f64, _cells: usize) -> bool {
+        false
+    }
 }
 
 /// One node's memoized values. Each is computed at most once (`OnceLock`)
@@ -78,18 +86,35 @@ struct Node {
     flow: OnceLock<u8>,
     /// Where following `down` alone ends up: the sea, or a pit.
     terminal: OnceLock<Cell>,
+    /// `Landscape::is_sea` at this node - asked constantly (every column
+    /// checks the basins around it) and not cheap to evaluate.
+    sea: OnceLock<bool>,
     accumulation: OnceLock<f32>,
     /// The longest flow path upstream of this cell, in cells, including it.
     length: OnceLock<f32>,
     water: OnceLock<f32>,
 }
 
-/// A pit's way out: the cells from the pit to its outlet, each mapped to
-/// the next one along.
-struct Spill {
+/// The depression around a pit: the cells water would cover filling it to
+/// its rim (`footprint`, the pit included), and - unless it keeps its
+/// water - its way out: the cells from the pit to its `outlet`, each mapped
+/// to the next one along.
+pub struct Basin {
+    pub footprint: HashSet<Cell>,
     next: HashMap<Cell, Cell>,
-    outlet: Cell,
+    outlet: Option<Cell>,
 }
+
+impl Basin {
+    /// No way out: a salt sea, or a true sink with no outlet in reach.
+    pub fn keeps_its_water(&self) -> bool {
+        self.outlet.is_none()
+    }
+}
+
+/// A true sink's footprint is everything its failed search covered, far too
+/// much to call a lake; only its innermost (lowest-filling) cells count.
+const SINK_FOOTPRINT: usize = 48;
 
 /// How many cells a pit's flood may cover looking for its way out before
 /// giving up and staying a true sink - an inland basin with no outlet in
@@ -136,7 +161,7 @@ pub struct Network {
     tiles: Mutex<HashMap<Cell, Arc<Tile>>>,
     /// Each pit's spill path, or `None` for a true sink. Pits are rare, so
     /// these live in one map rather than on every node.
-    spills: Mutex<HashMap<Cell, Option<Arc<Spill>>>>,
+    spills: Mutex<HashMap<Cell, Arc<Basin>>>,
 }
 
 /// An `f32` as a key that sorts in numeric order, negatives included.
@@ -191,12 +216,13 @@ impl Network {
                 if self.ends_at_sea(land, pit) {
                     break;
                 }
-                let Some(spill) = self.spill(land, pit) else { break };
+                let spill = self.basin(land, pit);
+                let Some(outlet) = spill.outlet else { break };
                 if let Some(&next) = spill.next.get(&cell) {
                     let delta = (next.0 - cell.0, next.1 - cell.1);
                     code = NEIGHBOURS.iter().position(|&d| d == delta).unwrap() as u8;
                 }
-                pit = self.terminal(land, spill.outlet);
+                pit = self.terminal(land, outlet);
             }
             self.with_node(cell, |n| *n.flow.get_or_init(|| code))
         });
@@ -210,8 +236,11 @@ impl Network {
         if cell == DRAINS_AWAY {
             return true;
         }
-        let pos = self.node_pos(cell);
-        land.is_sea(pos.0, pos.1)
+        self.with_node(cell, |n| n.sea.get().copied()).unwrap_or_else(|| {
+            let pos = self.node_pos(cell);
+            let sea = land.is_sea(pos.0, pos.1);
+            self.with_node(cell, |n| *n.sea.get_or_init(|| sea))
+        })
     }
 
     /// Steepest descent only - where water would go with no spill paths.
@@ -249,12 +278,27 @@ impl Network {
         end
     }
 
-    /// `pit`'s way out, or `None` if it's a true sink. Floods outward from
-    /// the pit in order of how high water would have to rise to get there
-    /// (the lowest rim first, as a filling depression overflows), until it
-    /// reaches a cell whose steepest descent ends at the sea or at a pit
-    /// strictly lower than this one.
-    fn spill(&self, land: &impl Landscape, pit: Cell) -> Option<Arc<Spill>> {
+    /// The depression whose water collects at `cell`, if `cell` is in one -
+    /// the pit its water runs to, and that pit's basin. `None` for anywhere
+    /// that drains to the sea, or that lies outside the basin it drains to
+    /// (on the slopes above the rim).
+    pub fn basin_of(&self, land: &impl Landscape, cell: Cell) -> Option<(Cell, Arc<Basin>)> {
+        let pit = self.terminal(land, cell);
+        if self.ends_at_sea(land, pit) {
+            return None;
+        }
+        let basin = self.basin(land, pit);
+        basin.footprint.contains(&cell).then_some((pit, basin))
+    }
+
+    /// The depression around `pit`. Floods outward from the pit in order of
+    /// how high water would have to rise to get there (the lowest rim
+    /// first, as a filling depression overflows), until it reaches a cell
+    /// whose steepest descent ends at the sea or at a pit strictly lower
+    /// than this one: the outlet. Everything flooded before that is the
+    /// footprint. The landscape then decides whether it overflows there or
+    /// keeps its water (`Landscape::keeps_its_water`).
+    pub fn basin(&self, land: &impl Landscape, pit: Cell) -> Arc<Basin> {
         if let Some(known) = self.spills.lock().unwrap().get(&pit) {
             return known.clone();
         }
@@ -265,6 +309,7 @@ impl Network {
         heap.push(Reverse((ordered(floor), pit)));
         let mut found = None;
         let mut popped = 0;
+        let mut footprint = Vec::new();
         while let Some(Reverse((level, c))) = heap.pop() {
             popped += 1;
             if popped > MAX_SPILL_SEARCH {
@@ -277,6 +322,7 @@ impl Network {
                     break;
                 }
             }
+            footprint.push(c);
             for (dx, dz) in NEIGHBOURS {
                 let n = (c.0 + dx, c.1 + dz);
                 if let std::collections::hash_map::Entry::Vacant(e) = parent.entry(n) {
@@ -285,24 +331,28 @@ impl Network {
                 }
             }
         }
-        let spill = found.map(|outlet| {
-            let mut next = HashMap::new();
+        let pos = self.node_pos(pit);
+        let outlet = found.filter(|_| !land.keeps_its_water(pos.0, pos.1, footprint.len()));
+        if found.is_none() {
+            footprint.truncate(SINK_FOOTPRINT);
+        }
+        let mut next = HashMap::new();
+        if let Some(outlet) = outlet {
             let mut c = outlet;
             while c != pit {
                 let p = parent[&c];
                 next.insert(p, c);
                 c = p;
             }
-            Arc::new(Spill { next, outlet })
-        });
-        self.spills.lock().unwrap().entry(pit).or_insert(spill).clone()
+        }
+        let basin = Arc::new(Basin { footprint: footprint.into_iter().collect(), next, outlet });
+        self.spills.lock().unwrap().entry(pit).or_insert(basin).clone()
     }
 
     fn natural_down_code(&self, land: &impl Landscape, cell: Cell) -> u8 {
         let code = self.with_node(cell, |n| n.down.get().copied());
         let code = code.unwrap_or_else(|| {
-            let pos = self.node_pos(cell);
-            let code = if land.is_sea(pos.0, pos.1) {
+            let code = if self.ends_at_sea(land, cell) {
                 PIT
             } else {
                 let here = self.route(land, cell);

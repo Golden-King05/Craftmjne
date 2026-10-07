@@ -31,6 +31,7 @@ use crate::light::{sky_falling_into, LightCell, MAX_LIGHT};
 use crate::noise::{hash2, hash3, SimplexNoise};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Altitude at or above which any column - in any biome - gets a snow cap.
 /// The `Mountain` biome's own surface (bare stone) sits *below* this on a
@@ -136,6 +137,11 @@ const RIVER_HALF_WIDTH: (f64, f64) = (1.0, 8.0);
 /// How far past `OCEAN_THRESHOLD` the continent field has to be before
 /// drainage counts a place as the sea a river can end in - see `is_sea`.
 const OPEN_SEA_MARGIN: f32 = 0.015;
+/// A depression has to cover at least this many drainage cells filled to
+/// its rim to become a salt sea, and then only this often - most overflow
+/// and become marshes instead.
+const SALT_SEA_MIN_CELLS: usize = 8;
+const SALT_SEA_CHANCE: f32 = 0.2;
 /// River lengths, in drainage cells from the furthest source, over which a
 /// river's size can grow: one this short is a stream however much land
 /// drains into it, and only one this long can reach full width.
@@ -250,10 +256,44 @@ pub struct ColumnProfile {
     /// Within reach of a river's channel or valley at all - caves are kept
     /// out of these, so a river never drains into one.
     pub near_river: bool,
+    /// Within reach of a marsh or salt sea (its footprint or the cells
+    /// around it): held in by the levee rule like a river's banks, and
+    /// kept clear of caves.
+    pub near_wetland: bool,
+    /// What the ground is made of here, where that's decided by a wetland.
+    pub surface: Surface,
     /// The fluid level of the topmost water block: `FLUID_SOURCE`, or a
     /// flowing level where a river's surface is easing down from one block
     /// to the next (see `raw_column_with`).
     pub top_level: u8,
+}
+
+/// Ground a wetland lays down (see `TerrainGenerator::wetland`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Surface {
+    /// Whatever the biome and altitude would put there.
+    #[default]
+    Normal,
+    /// A marsh: waterlogged mud, pooled with shallow water.
+    Mud,
+    /// A salt sea's bed and the crusted flats around its shore.
+    Salt,
+}
+
+/// What a river-fed depression becomes: a marsh if it overflows, a salt
+/// sea if it keeps its water (`drainage::Landscape::keeps_its_water`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WetlandKind {
+    Marsh,
+    SaltSea,
+}
+
+/// One depression's wetland: which kind, and the height its water stands
+/// at. Computed once per basin (`TerrainGenerator::wetland`).
+pub struct Wetland {
+    pub kind: WetlandKind,
+    pub level: f64,
+    basin: Arc<crate::drainage::Basin>,
 }
 
 /// A freshly generated chunk's block ids plus its fluid levels. Every
@@ -336,6 +376,8 @@ struct TerrainIds {
     snow: BlockId,
     coal: BlockId,
     iron: BlockId,
+    mud: BlockId,
+    salt: BlockId,
 }
 
 pub struct TerrainGenerator {
@@ -373,6 +415,8 @@ pub struct TerrainGenerator {
     /// piece of terrain generation that isn't purely a function of its own
     /// chunk coordinate - see this module's own doc comment.
     drainage: crate::drainage::Network,
+    /// Each pit's wetland (or `None` if no river reaches it), computed once.
+    wetlands: Mutex<HashMap<crate::drainage::Cell, Option<Arc<Wetland>>>>,
 }
 
 impl TerrainGenerator {
@@ -404,6 +448,8 @@ impl TerrainGenerator {
                 snow: reg.id("snow"),
                 coal: reg.id("coal_ore"),
                 iron: reg.id("iron_ore"),
+                mud: reg.id("mud"),
+                salt: reg.id("salt"),
             },
             terrain: SimplexNoise::new(seed),
             mountain: SimplexNoise::new(seed ^ 0x9e3779b9),
@@ -415,6 +461,7 @@ impl TerrainGenerator {
             cave_b: SimplexNoise::new(seed ^ 0xc2b2ae35),
             biome: biome::region_noise_for_seed(seed),
             drainage: crate::drainage::Network::new(seed),
+            wetlands: Mutex::new(HashMap::new()),
         }
     }
 
@@ -673,6 +720,79 @@ impl TerrainGenerator {
         (offset, dry)
     }
 
+    /// The wetland a river-fed depression around `pit` becomes, if a river
+    /// reaches it at all - a marsh where it overflows and the river carries
+    /// on, a salt sea where it keeps its water and the river ends.
+    fn wetland(&self, pit: crate::drainage::Cell, basin: Arc<crate::drainage::Basin>) -> Option<Arc<Wetland>> {
+        if let Some(known) = self.wetlands.lock().unwrap().get(&pit) {
+            return known.clone();
+        }
+        let net = &self.drainage;
+        let wetland = (net.accumulation(self, pit) > RIVER_THRESHOLD).then(|| {
+            let ground = |c: crate::drainage::Cell| {
+                let (x, z) = net.node_pos(c);
+                self.natural_height(x as i32, z as i32)
+            };
+            let mut inside: Vec<f64> = basin.footprint.iter().map(|&c| ground(c)).collect();
+            inside.sort_by(f64::total_cmp);
+            let rim = basin
+                .footprint
+                .iter()
+                .flat_map(|&(x, z)| [(x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)])
+                .filter(|c| !basin.footprint.contains(c))
+                .map(ground)
+                .fold(f64::INFINITY, f64::min);
+            let (kind, level) = if basin.keeps_its_water() {
+                // Filled to just under the lowest point of its rim - but
+                // always deep enough to be a sea, not a puddle; the levee
+                // rule holds back whatever the rim can't.
+                (WetlandKind::SaltSea, (rim - 1.0).max(inside[0] + 3.0))
+            } else {
+                // Only the lowest ground is waterlogged.
+                (WetlandKind::Marsh, inside[inside.len() * 2 / 5] + 0.5)
+            };
+            Arc::new(Wetland { kind, level: level.max(SEA_LEVEL as f64).floor(), basin })
+        });
+        self.wetlands.lock().unwrap().entry(pit).or_insert(wetland).clone()
+    }
+
+    /// The wetland at or right beside column `(wx, wz)`, and whether the
+    /// column is inside it (rather than in the ring around it, which only
+    /// has to hold its water in).
+    ///
+    /// A footprint is a set of whole drainage cells, and taken literally
+    /// that gives a lake with dead-straight shores along the cell grid.
+    /// Membership is interpolated between the four cell centres around the
+    /// column instead, and the threshold wobbled by noise, so a shore curves
+    /// the way a real one does.
+    fn wetland_near(&self, wx: i32, wz: i32) -> Option<(Arc<Wetland>, bool)> {
+        use crate::drainage::CELL;
+        let net = &self.drainage;
+        let home = (wx.div_euclid(CELL), wz.div_euclid(CELL));
+        let mut near: Option<(crate::drainage::Cell, Arc<Wetland>)> = None;
+        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+            let cell = (home.0 + dx, home.1 + dz);
+            let Some((pit, basin)) = net.basin_of(self, cell) else { continue };
+            if let Some(wetland) = self.wetland(pit, basin) {
+                near = Some((pit, wetland));
+                break;
+            }
+        }
+        let (pit, wetland) = near?;
+        let member = |c: crate::drainage::Cell| {
+            (wetland.basin.footprint.contains(&c) && net.basin_of(self, c).is_some_and(|(p, _)| p == pit)) as i32 as f64
+        };
+        let (fx, fz) = ((wx as f64 + 0.5) / CELL as f64 - 0.5, (wz as f64 + 0.5) / CELL as f64 - 0.5);
+        let (cx, cz) = (fx.floor() as i32, fz.floor() as i32);
+        let (tx, tz) = (fx - cx as f64, fz - cz as f64);
+        let inside = lerp(
+            lerp(member((cx, cz)), member((cx + 1, cz)), tx),
+            lerp(member((cx, cz + 1)), member((cx + 1, cz + 1)), tx),
+            tz,
+        ) + self.coast.fbm2(wx as f64 * 0.06 + 71.3, wz as f64 * 0.06 - 12.9, 2) * 0.3;
+        Some((wetland, inside > 0.5))
+    }
+
     /// One column's profile *before* the levee rule in `column_profile` -
     /// what the river and sea alone make of it, blended into any old chunks
     /// around it. A column inside an old chunk is that chunk's own column.
@@ -684,6 +804,8 @@ impl TerrainGenerator {
                 in_river: old.water.is_some_and(|w| w > SEA_LEVEL),
                 river_bank: false,
                 near_river: false,
+                near_wetland: false,
+                surface: Surface::Normal,
                 top_level: FLUID_SOURCE,
             };
         }
@@ -753,18 +875,51 @@ impl TerrainGenerator {
             }
         }
 
+        // A marsh or salt sea, where a river reaches a depression. Not
+        // beside an old chunk, which knows nothing about it.
+        let (mut surface, mut pond, mut near_wetland) = (Surface::Normal, None, false);
+        if let (Some((wetland, inside)), true) = (self.wetland_near(wx, wz), dry <= 0.0) {
+            near_wetland = true;
+            let level = wetland.level;
+            match wetland.kind {
+                WetlandKind::SaltSea if inside && natural < level => {
+                    // The sea itself: its bed follows the ground down, at
+                    // least a block under the surface. Rivers end here.
+                    h = natural.min(level - 1.0);
+                    river_water = None;
+                    pond = Some(level as i32);
+                    surface = Surface::Salt;
+                }
+                // The flats around its shore, crusted with salt.
+                WetlandKind::SaltSea if inside && natural < level + 2.5 => surface = Surface::Salt,
+                WetlandKind::Marsh if inside && river_water.is_none() && natural <= level + 1.5 => {
+                    // Flat, waterlogged ground at the water's height, with
+                    // shallow pools in its lowest patches.
+                    let pools = self.terrain.fbm2(wx as f64 * 0.15, wz as f64 * 0.15, 2) > 0.1;
+                    h = if pools { level - 1.0 } else { level };
+                    pond = pools.then_some(level as i32);
+                    surface = Surface::Mud;
+                }
+                _ => {}
+            }
+        }
+
         let height = ((h + offset).floor() as i32).clamp(2, WORLD_HEIGHT - 8);
         // Blending can lift a channel's bed to its own water level; the
         // levee rule then treats it as the dry bank it now is.
         let river_water = river_water.filter(|&w| w > height + (top_level != FLUID_SOURCE) as i32);
+        let pond = pond.filter(|&w| w > height);
         let sea = (height < SEA_LEVEL).then_some(SEA_LEVEL);
+        let water_top = river_water.max(pond).max(sea);
         ColumnProfile {
             height,
-            water_top: river_water.max(sea),
+            water_top,
             in_river: river_water.is_some(),
             river_bank,
             near_river,
-            top_level: if river_water.is_some() && river_water >= sea { top_level } else { FLUID_SOURCE },
+            near_wetland,
+            surface,
+            top_level: if river_water.is_some() && river_water == water_top { top_level } else { FLUID_SOURCE },
         }
     }
 
@@ -786,7 +941,7 @@ impl TerrainGenerator {
     fn column_profile_in(&self, wx: i32, wz: i32, blend: &Blend) -> ColumnProfile {
         const SIDES: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
         let mut col = self.raw_column_in(wx, wz, blend);
-        if col.water_top.is_none() && col.near_river {
+        if col.water_top.is_none() && (col.near_river || col.near_wetland) {
             for (dx, dz) in SIDES {
                 if let Some(top) = self.raw_column_in(wx + dx, wz + dz, blend).water_top {
                     col.height = col.height.max(top);
@@ -880,7 +1035,11 @@ impl TerrainGenerator {
                 // bed; the Mountain biome is bare rock up to the snow line;
                 // the Snow biome is snow (over beaches too); then beaches
                 // and river banks, the altitude snow cap, and grass.
-                let top_id = if coast == CoastPart::Platform {
+                let top_id = if col.surface == Surface::Mud {
+                    ids.mud
+                } else if col.surface == Surface::Salt {
+                    ids.salt
+                } else if coast == CoastPart::Platform {
                     ids.stone
                 } else if underwater {
                     ids.sand
@@ -900,7 +1059,11 @@ impl TerrainGenerator {
                 } else {
                     ids.grass
                 };
-                let fill_id = if rock || coast == CoastPart::Stack {
+                let fill_id = if col.surface == Surface::Mud {
+                    ids.mud
+                } else if col.surface == Surface::Salt {
+                    ids.sand
+                } else if rock || coast == CoastPart::Stack {
                     ids.stone
                 } else if underwater || beach {
                     ids.sand
@@ -934,11 +1097,12 @@ impl TerrainGenerator {
                 // convert it to anyway if a later change exposed a
                 // still-liquid top layer to air.
                 if let Some(top) = col.water_top {
+                    // Salt water doesn't freeze.
+                    let freezes = biome.freezes_water() && col.surface != Surface::Salt;
                     for y in (h + 1)..=top {
-                        blocks[base + y as usize] =
-                            if y == top && biome.freezes_water() { ids.ice } else { ids.water };
+                        blocks[base + y as usize] = if y == top && freezes { ids.ice } else { ids.water };
                     }
-                    if !biome.freezes_water() {
+                    if !freezes {
                         fluid[base + top as usize] = col.top_level;
                     }
                     // A waterfall: beside a river standing higher than this
@@ -964,7 +1128,7 @@ impl TerrainGenerator {
                         }
                     }
                     // Gravel patches on sea and river beds.
-                    if hash2(wx, wz, seed ^ 0x1234) < 0.3 {
+                    if col.surface == Surface::Normal && hash2(wx, wz, seed ^ 0x1234) < 0.3 {
                         blocks[base + h as usize] = ids.gravel;
                     }
                 } else if biome == Biome::Mountain && hash2(wx, wz, seed ^ 0x4d7e) < 0.15 {
@@ -986,7 +1150,7 @@ impl TerrainGenerator {
                 // Carve "spaghetti" caves on dry land columns - kept away
                 // from water, and from river valleys, so a cave never opens
                 // under a sea floor or beside a river and drains it.
-                if !underwater && !col.near_river && h > SEA_LEVEL + 1 {
+                if !underwater && !col.near_river && !col.near_wetland && h > SEA_LEVEL + 1 {
                     for y in 4..(h - 2) {
                         let a = self
                             .cave_a
@@ -1164,6 +1328,12 @@ impl crate::drainage::Landscape for TerrainGenerator {
     fn base_level(&self) -> f64 {
         SEA_LEVEL as f64
     }
+
+    /// A salt sea: rare, and only a depression big enough to make a real
+    /// inland sea rather than a pond.
+    fn keeps_its_water(&self, x: f64, z: f64, cells: usize) -> bool {
+        cells >= SALT_SEA_MIN_CELLS && hash2(x.floor() as i32, z.floor() as i32, self.seed ^ 0x5a17) < SALT_SEA_CHANCE
+    }
 }
 
 /// A landscape feature `/locate feature <name>` can search for - see
@@ -1177,10 +1347,12 @@ pub enum Feature {
     River,
     Ocean,
     Mountain,
+    Marsh,
+    SaltSea,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [Feature::River, Feature::Ocean, Feature::Mountain];
+    pub const ALL: [Feature; 5] = [Feature::River, Feature::Ocean, Feature::Mountain, Feature::Marsh, Feature::SaltSea];
 
     /// The lowercase name a player types to refer to this feature in chat
     /// commands - the inverse of `Feature::parse`.
@@ -1189,6 +1361,8 @@ impl Feature {
             Feature::River => "river",
             Feature::Ocean => "ocean",
             Feature::Mountain => "mountain",
+            Feature::Marsh => "marsh",
+            Feature::SaltSea => "salt_sea",
         }
     }
 
@@ -1213,6 +1387,11 @@ impl Feature {
             // particular column falls in. `/locate biome mountain` is the
             // one that finds the desolate peaks.
             Feature::Mountain => gen.mountainness(wx, wz) >= biome::MOUNTAIN_RANGE_THRESHOLD,
+            Feature::Marsh => gen.column_profile(wx, wz).surface == Surface::Mud,
+            Feature::SaltSea => {
+                let col = gen.column_profile(wx, wz);
+                col.surface == Surface::Salt && col.water_top.is_some()
+            }
         }
     }
 }
@@ -2119,6 +2298,8 @@ mod tests {
 
     /// Every river keeps flowing until it reaches the open sea - none dead-
     /// ends in a hollow or a coastal pond, and none goes round in a loop.
+    /// The one other place a river may end is a salt sea, which keeps its
+    /// water by design.
     #[test]
     fn every_river_flows_on_until_it_reaches_the_open_sea() {
         use crate::drainage::Landscape;
@@ -2141,10 +2322,99 @@ mod tests {
                         assert!(steps < 20_000, "seed {seed}: flow from {:?} loops", (i, j));
                     }
                     let (x, z) = net.node_pos(c);
-                    assert!(gen.is_sea(x, z), "seed {seed}: the river through {:?} ends at {c:?}, not the sea", (i, j));
+                    let salt_sea = net.basin_of(&gen, c).is_some_and(|(_, b)| b.keeps_its_water());
+                    assert!(
+                        gen.is_sea(x, z) || salt_sea,
+                        "seed {seed}: the river through {:?} ends at {c:?}, not the sea",
+                        (i, j)
+                    );
                 }
             }
             assert!(rivers > 300, "seed {seed}: only {rivers} river cells sampled");
         }
+    }
+
+    /// The first column (scanning rows outward from the origin, every few
+    /// blocks) with `surface`, wet or dry as asked.
+    fn find_surface(gen: &TerrainGenerator, surface: Surface, wet: bool) -> (i32, i32) {
+        for r in (0..3000).step_by(8) {
+            for z in [-r, r] {
+                for x in (-3000..3000).step_by(4) {
+                    let c = gen.column_profile(x, z);
+                    if c.surface == surface && c.water_top.is_some() == wet {
+                        return (x, z);
+                    }
+                }
+            }
+        }
+        panic!("no {surface:?} column found");
+    }
+
+    /// Where a river runs into a depression it becomes a marsh - mud and
+    /// shallow pools - unless the depression keeps its water, which makes a
+    /// far rarer salt sea: a lake on a salt bed, ringed by salt flats.
+    #[test]
+    fn river_fed_depressions_become_marshes_and_rare_salt_seas() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let block_at = |x: i32, y: i32, z: i32| {
+            let chunk = gen.generate(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+            chunk.blocks[block_index(x.rem_euclid(CHUNK_SIZE) as usize, y as usize, z.rem_euclid(CHUNK_SIZE) as usize)]
+        };
+
+        let (x, z) = find_surface(&gen, Surface::Mud, false);
+        let h = gen.effective_height(x, z);
+        assert_eq!(block_at(x, h, z), gen.ids.mud, "marsh ground is mud");
+
+        let (x, z) = find_surface(&gen, Surface::Salt, true);
+        let col = gen.column_profile(x, z);
+        assert_eq!(block_at(x, col.height, z), gen.ids.salt, "a salt sea's bed is salt");
+        assert_eq!(block_at(x, col.water_top.unwrap(), z), gen.ids.water);
+
+        // Rare even among depressions big enough to be one: most of those
+        // still overflow into marshes.
+        let big: Vec<WetlandKind> = gen
+            .wetlands
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .filter(|w| w.basin.footprint.len() >= SALT_SEA_MIN_CELLS)
+            .map(|w| w.kind)
+            .collect();
+        let salt = big.iter().filter(|&&k| k == WetlandKind::SaltSea).count();
+        assert!(salt >= 1 && salt * 2 <= big.len(), "{salt} salt seas among {} big wetlands", big.len());
+    }
+
+    /// A wetland's water stands above sea level, so like a river it's held
+    /// in only by the generator's care: every wet marsh or salt-sea column's
+    /// neighbours are water too, or ground at least as high as its surface.
+    #[test]
+    fn wetland_water_never_stands_beside_open_air() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let mut checked = 0;
+        for (surface, size) in [(Surface::Mud, 96), (Surface::Salt, 160)] {
+            let (x, z) = find_surface(&gen, surface, true);
+            let (x0, z0) = (x - size / 2, z - size / 2);
+            let p = profiles(&gen, x0, z0, size);
+            for z in 1..size - 1 {
+                for x in 1..size - 1 {
+                    let col = p[(x + size * z) as usize];
+                    let (Some(top), true) = (col.water_top, col.surface != Surface::Normal) else { continue };
+                    checked += 1;
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let n = p[(x + dx + size * (z + dz)) as usize];
+                        assert!(
+                            n.water_top.is_some() || n.height >= top,
+                            "{surface:?} water at ({}, {top}, {}) beside open air",
+                            x0 + x,
+                            z0 + z
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "only {checked} wetland water columns checked");
     }
 }
