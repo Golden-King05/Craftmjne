@@ -34,6 +34,9 @@ use crate::texture_report::TextureReport;
 
 const MAX_GEN_TASKS: usize = 12;
 const MAX_MESH_TASKS: usize = 8;
+/// How long `collect_gen_tasks` may spend taking in finished chunks in one
+/// frame.
+const COLLECT_TIME_BUDGET: std::time::Duration = std::time::Duration::from_micros(2500);
 const AUTOSAVE_INTERVAL: f32 = 30.0;
 
 #[derive(Resource, Clone)]
@@ -109,6 +112,10 @@ pub struct Chunk {
     /// so `write_save` leaves it out of the saved fluid state - otherwise
     /// every ocean cell would be saved twice.
     pub base_fluid: Option<Vec<u64>>,
+    /// Whether anything has changed a block or a fluid here since it was
+    /// generated or loaded. An untouched chunk's only fluid is what its
+    /// snapshot restores, so `write_save` skips it without scanning.
+    pub touched: bool,
     pub version: u32,
     pub dirty: bool,
     pub meshing: bool,
@@ -271,6 +278,7 @@ impl ChunkMap {
         }
         blocks[idx] = id;
         forget_base_fluid(&mut chunk.base_fluid, idx);
+        chunk.touched = true;
         chunk.version += 1;
         chunk.dirty = true;
 
@@ -297,6 +305,7 @@ impl ChunkMap {
         if let Some(levels) = chunk.fluid_level.as_mut() {
             if levels[idx] != level {
                 forget_base_fluid(&mut chunk.base_fluid, idx);
+                chunk.touched = true;
             }
             levels[idx] = level;
         }
@@ -358,6 +367,7 @@ impl ChunkMap {
         let idx = block_index(lx as usize, pos.y as usize, lz as usize);
         if blocks[idx] != id || levels[idx] != level {
             forget_base_fluid(&mut chunk.base_fluid, idx);
+            chunk.touched = true;
         }
         blocks[idx] = id;
         levels[idx] = level;
@@ -820,6 +830,7 @@ fn enter_world(
     commands.insert_resource(OriginalFluids(original_fluids));
 
     commands.insert_resource(AutosaveTimer::default());
+    commands.insert_resource(FluidSaveCache::default());
     commands.insert_resource(FluidQueue::default());
     // Light is never loaded from the save (it's re-derived from the blocks),
     // so this only has to drop whatever the previous world left queued.
@@ -912,7 +923,9 @@ fn try_freeze_cell(
 }
 
 /// Serializes the current `EditLog` + exact fluid state + player pose and
-/// writes it to disk. Shared by `exit_world` and the periodic autosave.
+/// writes it to disk. Shared by `exit_world` and the periodic autosave -
+/// the autosave writes on a background thread (`background`), so the
+/// periodic save doesn't stall a frame on JSON and disk (see `persist`).
 ///
 /// Fluid can't reuse `EditLog`'s sparse-diff-of-player-touches approach:
 /// flowing/falling cells are the simulation's own writes, never routed
@@ -925,6 +938,10 @@ fn try_freeze_cell(
 /// this session (those couldn't have changed, so there's nothing to
 /// rescan; using the fresh scan there instead would just be "no fluid
 /// data", silently forgetting them).
+///
+/// A chunk's fluid list is cached against its `version` (`FluidSaveCache`)
+/// - rescanning every loaded chunk on every autosave cost a stall that
+/// grew with every chunk visited in a session.
 #[allow(clippy::too_many_arguments)]
 fn write_save(
     store: &SaveStore,
@@ -936,6 +953,8 @@ fn write_save(
     original_fluids: &OriginalFluids,
     player: Option<&Player>,
     clock: &DayNightClock,
+    cache: &mut FluidSaveCache,
+    background: bool,
 ) {
     let edits = log
         .0
@@ -952,6 +971,16 @@ fn write_save(
     let mut fluids = Vec::new();
     for (coord, chunk) in &map.chunks {
         let (Some(blocks), Some(levels)) = (&chunk.blocks, &chunk.fluid_level) else { continue };
+        if !chunk.touched {
+            continue;
+        }
+        if let Some((version, cells)) = cache.0.get(coord) {
+            if *version == chunk.version {
+                fluids.extend(cells.iter().cloned());
+                continue;
+            }
+        }
+        let start = fluids.len();
         for z in 0..CS {
             for x in 0..CS {
                 for y in 0..H {
@@ -973,6 +1002,7 @@ fn write_save(
                 }
             }
         }
+        cache.0.insert(*coord, (chunk.version, fluids[start..].to_vec()));
     }
     for (coord, saved) in &original_fluids.0 {
         if !map.chunks.contains_key(coord) {
@@ -988,10 +1018,39 @@ fn write_save(
         pitch: p.pitch,
         fly: p.fly,
     });
-    let _ = store.save_data(
-        &active.slug,
-        &WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count },
-    );
+    let data = WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count };
+    persist(store.clone(), active.slug.clone(), data, background);
+}
+
+/// Each chunk's saved fluid cells, as of the chunk `version` they were
+/// scanned at - see `write_save`.
+#[derive(Resource, Default)]
+struct FluidSaveCache(HashMap<IVec2, (u32, Vec<FluidCell>)>);
+
+/// Writes a world's data, on a background thread if `background`. Writes
+/// are numbered in the order their data was taken and serialized behind
+/// one lock, and a write older than the last one to land is dropped - so a
+/// slow autosave still in flight can never land after, and overwrite, the
+/// newer save made on leaving the world.
+fn persist(store: SaveStore, slug: String, data: WorldData, background: bool) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    static LAST_WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let write = move || {
+        let mut last = LAST_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seq < *last {
+            return;
+        }
+        if let Err(e) = store.save_data(&slug, &data) {
+            warn!("couldn't save world {slug}: {e}");
+        }
+        *last = seq;
+    };
+    if background {
+        bevy::tasks::IoTaskPool::get().spawn(async move { write() }).detach();
+    } else {
+        write();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1007,6 +1066,7 @@ fn autosave(
     original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
     clock: Res<DayNightClock>,
+    mut cache: ResMut<FluidSaveCache>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < AUTOSAVE_INTERVAL {
@@ -1023,6 +1083,8 @@ fn autosave(
         &original_fluids,
         players.single().ok(),
         &clock,
+        &mut cache,
+        true,
     );
 }
 
@@ -1047,6 +1109,7 @@ fn exit_world(
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
     clock: Res<DayNightClock>,
+    mut cache: ResMut<FluidSaveCache>,
 ) {
     write_save(
         &store,
@@ -1058,7 +1121,10 @@ fn exit_world(
         &original_fluids,
         players.single().ok(),
         &clock,
+        &mut cache,
+        false,
     );
+    cache.0.clear();
 
     for e in &tasks {
         commands.entity(e).despawn();
@@ -1181,7 +1247,15 @@ fn collect_gen_tasks(
     mut lights: ResMut<LightQueue>,
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
+    // Taking in a finished chunk (applying its edits, seeding its light)
+    // runs on the main thread; several landing together used to cost a
+    // visible hitch, so past this much time in a frame the rest wait for
+    // the next one.
+    let start = std::time::Instant::now();
     for (entity, mut gen_task) in &mut tasks {
+        if start.elapsed() >= COLLECT_TIME_BUDGET {
+            break;
+        }
         let Some(generated) = block_on(future::poll_once(&mut gen_task.task)) else {
             continue;
         };
@@ -1304,6 +1378,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<PendingEdits>()
             .init_resource::<PendingFluids>()
             .init_resource::<OriginalFluids>()
+            .init_resource::<FluidSaveCache>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
             // `LightPlugin` owns the light systems, but `collect_gen_tasks`

@@ -821,3 +821,32 @@ fn a_mined_hole_lights_up_even_while_chunks_are_still_loading() {
     assert!(!app.world().resource::<LightQueue>().is_empty(), "test setup: background work should remain");
     assert_eq!(app.world().resource::<ChunkMap>().get_light(top).sky, [MAX_LIGHT; 3]);
 }
+
+/// Streaming a world in while moving must not build a light backlog. A
+/// chunk landing used to queue every cell whose light wasn't full sky (all
+/// water) and every border cell, whether or not anything could change
+/// them; the queue grew to ~870k cells while flying at render distance 8,
+/// lighting lagged far behind the terrain, and growing the queue itself
+/// stalled frames.
+#[test]
+fn streaming_while_moving_keeps_the_light_backlog_small() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    app.world_mut().resource_mut::<WorldSettings>().render_distance = 6;
+    let mut most = 0;
+    for frame in 0..600 {
+        {
+            let mut players = app.world_mut().query::<&mut Player>();
+            let mut player = players.single_mut(app.world_mut()).unwrap();
+            player.pos = Vec3::new(frame as f32 * 0.4, 50.0, 0.0);
+            player.spawned = true;
+            player.fly = true;
+        }
+        app.update();
+        most = most.max(app.world().resource::<LightQueue>().len());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let generated = app.world().resource::<ChunkMap>().stats().0;
+    assert!(generated > 150, "test setup: only {generated} chunks streamed in");
+    assert!(most < 40_000, "the light backlog reached {most} cells");
+}

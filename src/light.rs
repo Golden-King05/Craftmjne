@@ -366,13 +366,23 @@ impl LightQueue {
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty() && self.urgent.is_empty()
     }
+
+    /// Cells waiting, edits and background work together.
+    pub fn len(&self) -> usize {
+        self.queue.len() + self.urgent.len()
+    }
 }
 
-/// How many cells to relax per frame. Each one costs ~7 chunk lookups, so
-/// this is the knob trading light-settling latency against frame time;
-/// placing a single torch touches roughly a thousand cells, well inside one
-/// frame's worth.
+/// How many cells to relax per frame at most. Each one costs ~7 chunk
+/// lookups; placing a single torch touches roughly a thousand cells, well
+/// inside one frame's worth.
 const LIGHT_BUDGET_PER_FRAME: usize = 8192;
+/// How long background light work (chunks streaming in) may take in one
+/// frame. A count alone let streaming spend ~8ms of a 16ms frame on light
+/// whenever a few chunks landed together - a visible hitch while moving.
+/// Edits (`urgent`) aren't held to this: they're small, and the player is
+/// looking right at them.
+const LIGHT_TIME_BUDGET: std::time::Duration = std::time::Duration::from_micros(2500);
 /// Flush pending remeshes after this many frames even if the queue still
 /// hasn't drained.
 const LIGHT_FLUSH_MAX_FRAMES: u32 = 6;
@@ -396,11 +406,14 @@ fn process_light_updates(
 ) {
     let lights = &mut *lights;
     let had_urgent = !lights.urgent.is_empty();
-    for _ in 0..LIGHT_BUDGET_PER_FRAME {
+    let start = std::time::Instant::now();
+    for i in 0..LIGHT_BUDGET_PER_FRAME {
         // Whatever an edit's update queues goes back on the urgent queue,
         // so the edit settles completely before background work resumes.
         if let Some(pos) = lights.urgent.pop_front() {
             recompute_light_cell(&mut map, &tables.0, pos, &mut lights.urgent, &mut lights.touched);
+        } else if i % 64 == 0 && start.elapsed() >= LIGHT_TIME_BUDGET {
+            break;
         } else if let Some(pos) = lights.queue.pop_front() {
             recompute_light_cell(&mut map, &tables.0, pos, &mut lights.queue, &mut lights.touched);
         } else {
@@ -445,16 +458,68 @@ pub fn seed_new_chunk(map: &ChunkMap, tables: &Tables, coord: IVec2, lights: &mu
     let (Some(blocks), Some(light)) = (&chunk.blocks, &chunk.light) else { return };
 
     let origin = IVec3::new(coord.x * CHUNK_SIZE, 0, coord.y * CHUNK_SIZE);
+    // The four chunks across this one's seams, looked up once: the seam
+    // checks below touch ~4000 cells, and a map lookup per cell made seeding
+    // a chunk cost up to a few milliseconds of a frame.
+    let side = |dx: i32, dz: i32| {
+        let c = map.chunks.get(&(coord + IVec2::new(dx, dz)))?;
+        Some((c.blocks.as_deref()?, c.light.as_deref()?))
+    };
+    let sides = [side(-1, 0), side(1, 0), side(0, -1), side(0, 1)];
+    // A cell one step outside this chunk (exactly one of x/z out of range).
+    let outside = |x: i32, y: usize, z: i32| -> (crate::blocks::BlockId, LightCell) {
+        let (s, lx, lz) = if x < 0 {
+            (0, CS - 1, z as usize)
+        } else if x >= CS as i32 {
+            (1, 0, z as usize)
+        } else if z < 0 {
+            (2, x as usize, CS - 1)
+        } else {
+            (3, x as usize, 0)
+        };
+        sides[s].map_or((crate::blocks::AIR, LightCell::DARK), |(b, l)| {
+            let i = block_index(lx, y, lz);
+            (b[i], l[i])
+        })
+    };
     for z in 0..CS {
         for x in 0..CS {
-            let on_border = x == 0 || z == 0 || x == CS - 1 || z == CS - 1;
             for y in 0..H {
                 let idx = block_index(x, y, z);
                 let id = blocks[idx] as usize;
                 let emits = tables.light[id] != [0; 3];
-                let full_sky = light[idx].sky == [MAX_LIGHT; 3];
-                if !emits && (tables.opaque[id] || (!on_border && full_sky)) {
+                if !emits && tables.opaque[id] {
                     continue;
+                }
+                // The generator's sky fill is already exactly what light
+                // arriving from above gives this cell, and what's below can
+                // only be dimmer. So it can only be wrong if a sideways
+                // neighbour is brighter - nothing else could offer more.
+                // Skipping every cell where none is (full-sky air, and the
+                // open sea's water alike) is what keeps a chunk landing from
+                // queueing thousands of cells that can't change: queueing
+                // every underwater cell let the backlog grow to ~870k cells
+                // while moving, with lighting lagging far behind.
+                //
+                // A border cell's neighbour across the seam is read from the
+                // world: an already-loaded chunk there may well be brighter.
+                // (The other direction - this chunk brightening that one -
+                // is the seam pass below.) Queueing every border cell
+                // regardless used to account for most of a chunk's seeding.
+                if !emits {
+                    let own = light[idx].sky;
+                    let brighter = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                        let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                        let n = if (0..CS as i32).contains(&nx) && (0..CS as i32).contains(&nz) {
+                            light[block_index(nx as usize, y, nz as usize)]
+                        } else {
+                            outside(nx, y, nz).1
+                        };
+                        (0..3).any(|c| n.sky[c] > own[c] || n.block[c] > LEVEL_STEP)
+                    });
+                    if !brighter {
+                        continue;
+                    }
                 }
                 lights.push(origin + IVec3::new(x as i32, y as i32, z as i32));
             }
@@ -476,20 +541,20 @@ pub fn seed_new_chunk(map: &ChunkMap, tables: &Tables, coord: IVec2, lights: &mu
     // drains and never terminates.
     for i in 0..CS as i32 {
         for y in 0..H as i32 {
-            for (inside, outside) in [
+            for (inside, out) in [
                 (IVec3::new(0, y, i), IVec3::new(-1, y, i)),
                 (IVec3::new(CHUNK_SIZE - 1, y, i), IVec3::new(CHUNK_SIZE, y, i)),
                 (IVec3::new(i, y, 0), IVec3::new(i, y, -1)),
                 (IVec3::new(i, y, CHUNK_SIZE - 1), IVec3::new(i, y, CHUNK_SIZE)),
             ] {
-                let (id, light) = map.get_block_and_light(origin + outside);
+                let (id, there) = outside(out.x, y as usize, out.z);
                 if tables.opaque[id as usize] {
                     continue;
                 }
-                let offer =
-                    offered(map.get_light(origin + inside), false, tables.transmission[id as usize]);
-                if (0..3).any(|c| light.block[c] < offer.block[c] || light.sky[c] < offer.sky[c]) {
-                    lights.push(origin + outside);
+                let here = light[block_index(inside.x as usize, y as usize, inside.z as usize)];
+                let offer = offered(here, false, tables.transmission[id as usize]);
+                if (0..3).any(|c| there.block[c] < offer.block[c] || there.sky[c] < offer.sky[c]) {
+                    lights.push(origin + out);
                 }
             }
         }

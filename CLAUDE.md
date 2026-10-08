@@ -2079,3 +2079,46 @@ etc.) instead of inventing a new approach:
   Measured over 6x6 km on three seeds: 53-91 river-fed wetlands, 3-7 of
   them salt seas (each a few thousand blocks²); marsh is ~0.5% of the
   area.
+- **"The game got jittery" was measured, not guessed: a throwaway headless
+  benchmark (the real `WorldPlugin` + `LightPlugin` at render distance 8,
+  a player flying ~18 blocks/s, `app.update()` timed per frame) plus
+  temporary per-system timers (a drop-guard `Span` writing into a static
+  map, removed afterwards).** Before: p90 5.2 ms, p99 8.5 ms of main-thread
+  time, worst frames 20-30 ms. After: p90 2.4 ms, p99 5.3 ms, nothing over
+  16 ms. What it found, in order of size:
+  - **The light queue was growing to ~870,000 cells while moving and never
+    caught up.** `seed_new_chunk` queued every chunk-border cell, and,
+    since the undersea-seam fix made water cells no longer "full sky",
+    every underwater cell too. Each time the `VecDeque` outgrew its buffer
+    it was copied in one frame, which was the spike that ignored the time
+    budget. Lighting also lagged far behind the terrain. Now a cell is
+    queued only if a sideways neighbour is brighter. The fill already
+    gives exactly what arrives from above, and below can only be dimmer.
+    Neighbours across a seam are read from the loaded world, so a border
+    cell next to an already-lit chunk still gets queued. The backlog now
+    peaks under 10k. `streaming_while_moving_keeps_the_light_backlog_small`
+    goes red with the skip removed.
+  - **Count budgets aren't time budgets.** `process_light_updates` processed
+    up to 8,192 cells per frame whatever that cost (up to ~8 ms).
+    Background work now also stops at `LIGHT_TIME_BUDGET` (2.5 ms). Edits
+    (`urgent`) aren't held to it. `collect_gen_tasks` likewise stops taking
+    in finished chunks after `COLLECT_TIME_BUDGET`.
+  - **The seam pass did two `HashMap` lookups per cell, about 4,000 cells
+    per chunk landing.** The four neighbour chunks are now fetched once
+    and indexed directly.
+  - **Autosave scanned every chunk ever loaded** (24 ms with 1,100 loaded,
+    growing all session) and wrote JSON on the main thread. Now:
+    - `Chunk::touched` lets it skip chunks nothing has changed, whose only
+      fluid is what their snapshot restores.
+    - `FluidSaveCache` reuses a touched chunk's list until its `version`
+      changes.
+    - `persist` writes on the `IoTaskPool` for autosaves, synchronously on
+      exit. Writes are sequence-numbered and serialized behind one lock,
+      so an older in-flight autosave can never land after, and overwrite,
+      a newer save.
+    - `SaveStore::save_data` now writes a temp file and renames it into
+      place, so a cut-off background write can't truncate the save.
+  The benchmark can't see GPU mesh uploads, since it has no renderer. It
+  measured ~1.7 meshes per chunk entering view, so re-meshing isn't
+  running away, but upload cost on the user's machine is unmeasured from
+  here.
