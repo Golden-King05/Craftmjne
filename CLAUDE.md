@@ -2160,3 +2160,20 @@ etc.) instead of inventing a new approach:
     When a test that guards one rule starts failing because of a *newer*
     rule, narrow it to what it was guarding, then prove it still catches
     the original bug.
+- **A periodic check against GitHub's REST API eats the unauthenticated
+  rate limit (60 requests/hour per IP), and a 403 from it looks like an
+  outage.** The launcher re-checked the dev build every 60 s by listing all
+  releases through `api.github.com`, exactly the hourly allowance on its
+  own, so the Versions list and dev check both failed with a raw
+  `NetworkError: ... status: 403` (reported as a screenshot). The dev
+  release's tag and file names are fixed by `dev-build.yml`, so
+  `remote::fetch_dev_build` now reads `dev-manifest.json` and installs the
+  archive from `github.com/<owner>/<repo>/releases/download/dev/<file>`,
+  plain downloads that don't count against the API limit. A 404 there means
+  "no dev build yet". `selfupdate.rs` already did the same via
+  `raw.githubusercontent.com`. Only the Versions list still uses the API,
+  once per launch or Refresh, and `remote::explain_github_error` turns a
+  403/429 into "GitHub is limiting requests, wait then Refresh". Verified
+  with a throwaway live test that ran the real fetch + install against the
+  published dev release. Anything new that polls GitHub should use a
+  download URL like this, not the API.
