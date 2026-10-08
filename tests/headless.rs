@@ -14,8 +14,10 @@ use craftmjne::config::{WorldSettings, CHUNK_SIZE};
 use craftmjne::light::{LightPlugin, LightQueue, LEVEL_STEP, MAX_LIGHT};
 use craftmjne::player::Player;
 use craftmjne::render::{ChunkMaterial, ChunkMaterials};
-use craftmjne::save::{GameMode, SaveStore};
+use craftmjne::save::{FluidCell, GameMode, SaveStore};
 use craftmjne::sky::DayNightClock;
+use craftmjne::snapshot::ChunkStore;
+use craftmjne::terrain::TerrainGenerator;
 use craftmjne::state::{ActiveWorld, AppState};
 use craftmjne::world::{BlockSetEvent, ChunkMap, WorldPlugin};
 
@@ -599,4 +601,252 @@ fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
         [0; 3],
         "removing the only light source must leave nothing behind"
     );
+}
+
+/// Chunks a world has generated are saved, and loaded back instead of
+/// regenerated - so a chunk keeps whatever terrain it was first made with.
+/// Stands in for "the generator changed" by replacing spawn's snapshot with
+/// one made by a different seed's generator, then checking a reload shows
+/// exactly that terrain rather than what seed 7 would generate.
+#[test]
+fn a_reload_shows_saved_chunk_snapshots_not_freshly_generated_terrain() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let origin = IVec2::ZERO;
+    assert!(run_until(
+        &mut app,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    let slug = app.world().resource::<ActiveWorld>().slug.clone();
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    let chunks = app.world().resource::<SaveStore>().chunks_dir(&slug);
+    assert!(chunks.join("c.0.0.bin").is_file(), "generated chunks should be saved");
+    let registry = app.world().resource::<BlockRegistry>();
+    let other_gen = TerrainGenerator::new(99, registry);
+    std::fs::remove_file(chunks.join("c.0.0.bin")).unwrap();
+    let replaced = ChunkStore::new(Some(chunks.clone()), registry).load_or_generate(&other_gen, 0, 0).blocks;
+    assert!(replaced != TerrainGenerator::new(7, registry).generate(0, 0).blocks);
+
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(
+        &mut app2,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    let loaded = app2.world().resource::<ChunkMap>().chunks[&origin].blocks.clone().unwrap();
+    assert!(loaded == replaced);
+}
+
+/// A world saved before chunk snapshots existed has its fluid saved over
+/// the *old* terrain - every ocean and river cell. Once that terrain is
+/// generated anew, putting the old water back would leave seas hanging over
+/// the new land, so fluid only goes back onto a chunk restored from its
+/// snapshot.
+#[test]
+fn fluid_saved_over_since_regenerated_terrain_is_not_put_back() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let origin = IVec2::ZERO;
+    assert!(run_until(
+        &mut app,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    let slug = app.world().resource::<ActiveWorld>().slug.clone();
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    // Turn it into a pre-snapshot world: no chunks saved, and fluid saved
+    // where only the old terrain had water - here, high in the air.
+    let store = app.world().resource::<SaveStore>();
+    std::fs::remove_dir_all(store.chunks_dir(&slug)).unwrap();
+    let mut data = store.load_data(&slug);
+    let floating = IVec3::new(4, 60, 4);
+    data.fluids.push(FluidCell { x: floating.x, y: floating.y, z: floating.z, block: "water".into(), level: 3 });
+    store.save_data(&slug, &data).unwrap();
+
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(
+        &mut app2,
+        |app| app.world().resource::<ChunkMap>().chunks.get(&origin).is_some_and(|c| c.blocks.is_some()),
+        2000,
+    ));
+    assert_eq!(app2.world().resource::<ChunkMap>().get_block(floating), 0);
+}
+
+/// Sunlight under the sea has to be what the light propagation itself would
+/// settle to, everywhere - not only in the cells it happened to revisit.
+/// The generator's straight-down sky fill used to pass full sunlight
+/// through water, propagation dimmed it, and propagation only revisits a
+/// chunk's border cells: every chunk edge showed as a dark line across the
+/// sea floor. Checks every water cell of a settled ocean chunk is a fixed
+/// point of `recompute_light_cell`.
+#[test]
+fn sunlight_under_the_sea_has_no_seams_at_chunk_borders() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+
+    // Somewhere properly at sea, found from the generator rather than
+    // hardcoded, so terrain tuning can't quietly move it onto land.
+    let gen = TerrainGenerator::new(7, app.world().resource::<BlockRegistry>());
+    let sea = (0..4000)
+        .step_by(16)
+        .flat_map(|r| [(r, 0), (-r, 0), (0, r), (0, -r)])
+        .map(|(x, z)| IVec2::new(x / CHUNK_SIZE, z / CHUNK_SIZE))
+        .find(|c| {
+            (0..CHUNK_SIZE).all(|i| {
+                let col = gen.column_profile(c.x * CHUNK_SIZE + i, c.y * CHUNK_SIZE + i);
+                col.water_top.is_some() && col.height < 20
+            })
+        })
+        .expect("no open sea found");
+    {
+        let mut players = app.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app.world_mut()).unwrap();
+        player.pos = Vec3::new((sea.x * CHUNK_SIZE + 8) as f32, 40.0, (sea.y * CHUNK_SIZE + 8) as f32);
+        player.spawned = true;
+        player.fly = true;
+    }
+    assert!(run_until(
+        &mut app,
+        |app| {
+            let map = app.world().resource::<ChunkMap>();
+            (-1..=1).all(|dz| {
+                (-1..=1).all(|dx| map.chunks.get(&(sea + IVec2::new(dx, dz))).is_some_and(|c| c.meshed))
+            }) && app.world().resource::<LightQueue>().is_empty()
+        },
+        4000,
+    ));
+
+    let tables = app.world().resource::<craftmjne::blocks::BlockTables>().0.clone();
+    let water = app.world().resource::<BlockRegistry>().id("water");
+
+    // In open sea, what the generator fills in straight down is already the
+    // final answer - nothing sideways can beat it. If it isn't, the
+    // propagation has to fix every cell by cascading in from the chunk's
+    // borders, and until it gets there the borders show as lines.
+    let generated = gen.generate(sea.x, sea.y);
+    {
+        let map = app.world().resource::<ChunkMap>();
+        let settled = map.chunks[&sea].light.as_ref().unwrap();
+        let blocks = map.chunks[&sea].blocks.as_ref().unwrap();
+        let mismatched = (0..blocks.len())
+            .filter(|&i| blocks[i] == water && generated.light[i].sky != settled[i].sky)
+            .count();
+        assert_eq!(mismatched, 0, "the generator's sky fill disagrees with settled light under the sea");
+    }
+
+    let mut wrong = Vec::new();
+    app.world_mut().resource_scope(|_, mut map: Mut<ChunkMap>| {
+        let (mut queue, mut touched) = (Default::default(), Default::default());
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                for y in 0..40 {
+                    let pos = IVec3::new(sea.x * CHUNK_SIZE + x, y, sea.y * CHUNK_SIZE + z);
+                    if map.get_block(pos) != water {
+                        continue;
+                    }
+                    let before = map.get_light(pos);
+                    craftmjne::light::recompute_light_cell(&mut map, &tables, pos, &mut queue, &mut touched);
+                    if map.get_light(pos) != before {
+                        wrong.push((pos, before.sky, map.get_light(pos).sky));
+                    }
+                }
+            }
+        }
+    });
+    assert!(wrong.is_empty(), "{} water cells not settled, e.g. {:?}", wrong.len(), &wrong[..wrong.len().min(3)]);
+}
+
+/// Mining straight down opens a shaft to the sky: sunlight has to follow
+/// the hole all the way down as each block is broken.
+#[test]
+fn digging_a_shaft_lets_sunlight_down_it() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    run_until_lit(&mut app);
+
+    let top = open_air_above_ground(&app) - IVec3::Y;
+    for depth in 0..4 {
+        let pos = top - IVec3::Y * depth;
+        let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(pos, 0).expect("chunk loaded");
+        app.world_mut().send_event(BlockSetEvent { pos, id: 0, prev, axis: AXIS_Y });
+        app.update();
+    }
+    run_until_lit(&mut app);
+    let map = app.world().resource::<ChunkMap>();
+    for depth in 0..4 {
+        let pos = top - IVec3::Y * depth;
+        assert_eq!(map.get_light(pos).sky, [MAX_LIGHT; 3], "shaft cell {depth} deep isn't sunlit");
+    }
+}
+
+/// Mining while the world around is still loading: the hole's light can't
+/// wait behind every streaming chunk's light seeding. Digs as soon as the
+/// spawn chunk exists, with lots of background light work still queued,
+/// and gives the edit only a few frames.
+#[test]
+fn a_mined_hole_lights_up_even_while_chunks_are_still_loading() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(
+        &mut app,
+        |app| {
+            let map = app.world().resource::<ChunkMap>();
+            map.chunks.get(&IVec2::ZERO).is_some_and(|c| c.blocks.is_some()) && map.stats().0 >= 12
+        },
+        2000,
+    ));
+    // Pile on background work, like a dozen chunks landing at once would.
+    {
+        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().0.clone();
+        app.world_mut().resource_scope(|world, mut lights: Mut<LightQueue>| {
+            let map = world.resource::<ChunkMap>();
+            for coord in map.chunks.keys().copied().collect::<Vec<_>>() {
+                for _ in 0..10 {
+                    craftmjne::light::seed_new_chunk(map, &tables, coord, &mut lights);
+                }
+            }
+        });
+    }
+    let top = open_air_above_ground(&app) - IVec3::Y;
+    let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(top, 0).unwrap();
+    app.world_mut().send_event(BlockSetEvent { pos: top, id: 0, prev, axis: AXIS_Y });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(!app.world().resource::<LightQueue>().is_empty(), "test setup: background work should remain");
+    assert_eq!(app.world().resource::<ChunkMap>().get_light(top).sky, [MAX_LIGHT; 3]);
+}
+
+/// Streaming a world in while moving must not build a light backlog. A
+/// chunk landing used to queue every cell whose light wasn't full sky (all
+/// water) and every border cell, whether or not anything could change
+/// them; the queue grew to ~870k cells while flying at render distance 8,
+/// lighting lagged far behind the terrain, and growing the queue itself
+/// stalled frames.
+#[test]
+fn streaming_while_moving_keeps_the_light_backlog_small() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    app.world_mut().resource_mut::<WorldSettings>().render_distance = 6;
+    let mut most = 0;
+    for frame in 0..600 {
+        {
+            let mut players = app.world_mut().query::<&mut Player>();
+            let mut player = players.single_mut(app.world_mut()).unwrap();
+            player.pos = Vec3::new(frame as f32 * 0.4, 50.0, 0.0);
+            player.spawned = true;
+            player.fly = true;
+        }
+        app.update();
+        most = most.max(app.world().resource::<LightQueue>().len());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let generated = app.world().resource::<ChunkMap>().stats().0;
+    assert!(generated > 150, "test setup: only {generated} chunks streamed in");
+    assert!(most < 40_000, "the light backlog reached {most} cells");
 }

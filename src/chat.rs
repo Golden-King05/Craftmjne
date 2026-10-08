@@ -621,7 +621,18 @@ mod tests {
         };
         assert_eq!(texts("/locate "), vec!["locate biome", "locate feature", "locate structure"]);
         assert_eq!(texts("/locate bio"), vec!["locate biome"]);
-        assert_eq!(texts("/locate biome "), vec!["locate biome mountain", "locate biome plains", "locate biome snow"]);
+        assert_eq!(
+            texts("/locate biome "),
+            vec![
+                "locate biome cold_sea",
+                "locate biome icebergs",
+                "locate biome mountain",
+                "locate biome plains",
+                "locate biome snow",
+                "locate biome temperate_sea",
+                "locate biome warm_sea",
+            ]
+        );
         assert_eq!(texts("/locate biome pl"), vec!["locate biome plains"]);
         assert_eq!(texts("/locate feature oc"), vec!["locate feature ocean"]);
         // `structure` has no second argument yet.

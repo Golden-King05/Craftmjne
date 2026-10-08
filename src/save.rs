@@ -255,7 +255,7 @@ fn slugify(name: &str) -> String {
 /// Injected as a `Resource` (real per-user dir in production, a throwaway
 /// temp dir in tests and smoke mode) so nothing in the engine hardcodes
 /// where saves live — see `main.rs` and `tests/headless.rs`.
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct SaveStore {
     root: PathBuf,
 }
@@ -285,6 +285,12 @@ impl SaveStore {
 
     fn data_path(&self, slug: &str) -> PathBuf {
         self.saves_dir().join(slug).join("data.json")
+    }
+
+    /// Where `slug`'s chunk snapshots live (see `snapshot.rs`) - one file
+    /// per chunk the world has ever generated.
+    pub fn chunks_dir(&self, slug: &str) -> PathBuf {
+        self.saves_dir().join(slug).join("chunks")
     }
 
     /// Whether `slug` has ever been saved to before - i.e. whether the next
@@ -400,9 +406,16 @@ impl SaveStore {
             .unwrap_or_default()
     }
 
+    /// Written to a temporary file and renamed into place, so a save cut
+    /// off part-way (a crash, or the game closing mid-autosave, which runs
+    /// on a background thread) leaves the previous save intact rather than
+    /// a truncated one.
     pub fn save_data(&self, slug: &str, data: &WorldData) -> io::Result<()> {
         fs::create_dir_all(self.saves_dir().join(slug))?;
-        fs::write(self.data_path(slug), serde_json::to_string(data).map_err(io::Error::other)?)
+        let path = self.data_path(slug);
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string(data).map_err(io::Error::other)?)?;
+        fs::rename(&temp, &path)
     }
 
     pub fn load_graphics_settings(&self) -> GraphicsSettings {

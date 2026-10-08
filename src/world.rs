@@ -28,22 +28,32 @@ use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
 use crate::sky::{DayNightClock, NEW_WORLD_START_TIME};
 use crate::state::{ActiveWorld, AppState};
+use crate::snapshot::ChunkStore;
 use crate::terrain::{GeneratedChunk, TerrainGenerator};
 use crate::texture_report::TextureReport;
 
 const MAX_GEN_TASKS: usize = 12;
 const MAX_MESH_TASKS: usize = 8;
+/// How long `collect_gen_tasks` may spend taking in finished chunks in one
+/// frame.
+const COLLECT_TIME_BUDGET: std::time::Duration = std::time::Duration::from_micros(2500);
 const AUTOSAVE_INTERVAL: f32 = 30.0;
 
 #[derive(Resource, Clone)]
 pub struct WorldGen(pub Arc<TerrainGenerator>);
 
-/// This world's biome noise source (`biome::grass_tint`'s input), seeded
-/// once alongside `WorldGen` and shared read-only with every mesh task -
+/// The current world's chunk snapshots - see `snapshot.rs`. Chunk
+/// generation goes through this, so a chunk generated once loads the same
+/// forever after, whatever the generator becomes.
+#[derive(Resource)]
+pub struct ChunkSnapshots(pub Arc<ChunkStore>);
+
+/// This world's climate maps (`biome::grass_tint`'s input), seeded once
+/// alongside `WorldGen` and shared read-only with every mesh task -
 /// same lifecycle as `Tables`, and for the same reason: expensive-ish to
 /// build (permutation tables), cheap to share via `Arc` once built.
 #[derive(Resource, Clone)]
-pub struct BiomeNoise(pub Arc<crate::noise::SimplexNoise>);
+pub struct WorldClimate(pub Arc<crate::biome::ClimateMaps>);
 
 /// Non-render atlas data (pixel buffer + name->tile map), built at startup.
 #[derive(Resource)]
@@ -68,6 +78,15 @@ pub struct BlockSetEvent {
 #[derive(Event)]
 pub struct ChunkMeshedEvent(pub IVec2);
 
+/// Once a cell's block or fluid level changes, its fluid is no longer what
+/// the snapshot restores (even if it's the same again - an edit may have
+/// emptied it first), so it has to be saved like any other fluid.
+fn forget_base_fluid(base_fluid: &mut Option<Vec<u64>>, idx: usize) {
+    if let Some(bits) = base_fluid {
+        bits[idx / 64] &= !(1 << (idx % 64));
+    }
+}
+
 #[derive(Default)]
 pub struct Chunk {
     pub blocks: Option<Vec<BlockId>>,
@@ -87,6 +106,16 @@ pub struct Chunk {
     /// spread, light is a pure function of the block grid, so loading a world
     /// recomputes it exactly rather than risking a different answer.
     pub light: Option<Vec<LightCell>>,
+    /// One bit per cell (`block_index`), set where the chunk was generated
+    /// with fluid and that fluid hasn't changed since - block or level. Such
+    /// a cell is exactly what the chunk's snapshot (`snapshot.rs`) restores,
+    /// so `write_save` leaves it out of the saved fluid state - otherwise
+    /// every ocean cell would be saved twice.
+    pub base_fluid: Option<Vec<u64>>,
+    /// Whether anything has changed a block or a fluid here since it was
+    /// generated or loaded. An untouched chunk's only fluid is what its
+    /// snapshot restores, so `write_save` skips it without scanning.
+    pub touched: bool,
     pub version: u32,
     pub dirty: bool,
     pub meshing: bool,
@@ -248,6 +277,8 @@ impl ChunkMap {
             return None;
         }
         blocks[idx] = id;
+        forget_base_fluid(&mut chunk.base_fluid, idx);
+        chunk.touched = true;
         chunk.version += 1;
         chunk.dirty = true;
 
@@ -270,7 +301,12 @@ impl ChunkMap {
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         );
-        if let Some(levels) = self.chunks.get_mut(&coord).and_then(|c| c.fluid_level.as_mut()) {
+        let Some(chunk) = self.chunks.get_mut(&coord) else { return };
+        if let Some(levels) = chunk.fluid_level.as_mut() {
+            if levels[idx] != level {
+                forget_base_fluid(&mut chunk.base_fluid, idx);
+                chunk.touched = true;
+            }
             levels[idx] = level;
         }
     }
@@ -329,6 +365,10 @@ impl ChunkMap {
             return false;
         };
         let idx = block_index(lx as usize, pos.y as usize, lz as usize);
+        if blocks[idx] != id || levels[idx] != level {
+            forget_base_fluid(&mut chunk.base_fluid, idx);
+            chunk.touched = true;
+        }
         blocks[idx] = id;
         levels[idx] = level;
         chunk.version += 1;
@@ -731,7 +771,11 @@ fn enter_world(
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
-    commands.insert_resource(BiomeNoise(Arc::new(crate::biome::noise_for_seed(active.meta.seed))));
+    commands.insert_resource(ChunkSnapshots(Arc::new(ChunkStore::new(
+        Some(store.chunks_dir(&active.slug)),
+        &registry,
+    ))));
+    commands.insert_resource(WorldClimate(Arc::new(crate::biome::ClimateMaps::for_seed(active.meta.seed))));
     commands.insert_resource(active.meta.mode);
 
     for e in &tasks {
@@ -786,6 +830,7 @@ fn enter_world(
     commands.insert_resource(OriginalFluids(original_fluids));
 
     commands.insert_resource(AutosaveTimer::default());
+    commands.insert_resource(FluidSaveCache::default());
     commands.insert_resource(FluidQueue::default());
     // Light is never loaded from the save (it's re-derived from the blocks),
     // so this only has to drop whatever the previous world left queued.
@@ -878,18 +923,25 @@ fn try_freeze_cell(
 }
 
 /// Serializes the current `EditLog` + exact fluid state + player pose and
-/// writes it to disk. Shared by `exit_world` and the periodic autosave.
+/// writes it to disk. Shared by `exit_world` and the periodic autosave -
+/// the autosave writes on a background thread (`background`), so the
+/// periodic save doesn't stall a frame on JSON and disk (see `persist`).
 ///
 /// Fluid can't reuse `EditLog`'s sparse-diff-of-player-touches approach:
 /// flowing/falling cells are the simulation's own writes, never routed
 /// through `BlockSetEvent` (see `set_fluid_cell`'s doc comment), so nothing
 /// incrementally tracks them the way `record_edits` tracks block edits.
 /// Instead this scans every *currently loaded* chunk fresh, every time -
-/// an exact snapshot, not a diff against terrain - and only falls back to
+/// every fluid cell except sources the chunk was generated with, which its
+/// snapshot (`snapshot.rs`) already restores - and only falls back to
 /// `OriginalFluids`' untouched data for chunks the player didn't revisit
 /// this session (those couldn't have changed, so there's nothing to
 /// rescan; using the fresh scan there instead would just be "no fluid
 /// data", silently forgetting them).
+///
+/// A chunk's fluid list is cached against its `version` (`FluidSaveCache`)
+/// - rescanning every loaded chunk on every autosave cost a stall that
+/// grew with every chunk visited in a session.
 #[allow(clippy::too_many_arguments)]
 fn write_save(
     store: &SaveStore,
@@ -901,6 +953,8 @@ fn write_save(
     original_fluids: &OriginalFluids,
     player: Option<&Player>,
     clock: &DayNightClock,
+    cache: &mut FluidSaveCache,
+    background: bool,
 ) {
     let edits = log
         .0
@@ -917,6 +971,16 @@ fn write_save(
     let mut fluids = Vec::new();
     for (coord, chunk) in &map.chunks {
         let (Some(blocks), Some(levels)) = (&chunk.blocks, &chunk.fluid_level) else { continue };
+        if !chunk.touched {
+            continue;
+        }
+        if let Some((version, cells)) = cache.0.get(coord) {
+            if *version == chunk.version {
+                fluids.extend(cells.iter().cloned());
+                continue;
+            }
+        }
+        let start = fluids.len();
         for z in 0..CS {
             for x in 0..CS {
                 for y in 0..H {
@@ -924,6 +988,9 @@ fn write_save(
                     let id = blocks[idx];
                     if !tables.fluid[id as usize] {
                         continue;
+                    }
+                    if chunk.base_fluid.as_ref().is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1) {
+                        continue; // as generated: restored from the snapshot
                     }
                     fluids.push(FluidCell {
                         x: coord.x * CHUNK_SIZE + x as i32,
@@ -935,6 +1002,7 @@ fn write_save(
                 }
             }
         }
+        cache.0.insert(*coord, (chunk.version, fluids[start..].to_vec()));
     }
     for (coord, saved) in &original_fluids.0 {
         if !map.chunks.contains_key(coord) {
@@ -950,10 +1018,39 @@ fn write_save(
         pitch: p.pitch,
         fly: p.fly,
     });
-    let _ = store.save_data(
-        &active.slug,
-        &WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count },
-    );
+    let data = WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count };
+    persist(store.clone(), active.slug.clone(), data, background);
+}
+
+/// Each chunk's saved fluid cells, as of the chunk `version` they were
+/// scanned at - see `write_save`.
+#[derive(Resource, Default)]
+struct FluidSaveCache(HashMap<IVec2, (u32, Vec<FluidCell>)>);
+
+/// Writes a world's data, on a background thread if `background`. Writes
+/// are numbered in the order their data was taken and serialized behind
+/// one lock, and a write older than the last one to land is dropped - so a
+/// slow autosave still in flight can never land after, and overwrite, the
+/// newer save made on leaving the world.
+fn persist(store: SaveStore, slug: String, data: WorldData, background: bool) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    static LAST_WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let write = move || {
+        let mut last = LAST_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seq < *last {
+            return;
+        }
+        if let Err(e) = store.save_data(&slug, &data) {
+            warn!("couldn't save world {slug}: {e}");
+        }
+        *last = seq;
+    };
+    if background {
+        bevy::tasks::IoTaskPool::get().spawn(async move { write() }).detach();
+    } else {
+        write();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -969,6 +1066,7 @@ fn autosave(
     original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
     clock: Res<DayNightClock>,
+    mut cache: ResMut<FluidSaveCache>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < AUTOSAVE_INTERVAL {
@@ -985,6 +1083,8 @@ fn autosave(
         &original_fluids,
         players.single().ok(),
         &clock,
+        &mut cache,
+        true,
     );
 }
 
@@ -1009,6 +1109,7 @@ fn exit_world(
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
     clock: Res<DayNightClock>,
+    mut cache: ResMut<FluidSaveCache>,
 ) {
     write_save(
         &store,
@@ -1020,7 +1121,10 @@ fn exit_world(
         &original_fluids,
         players.single().ok(),
         &clock,
+        &mut cache,
+        false,
     );
+    cache.0.clear();
 
     for e in &tasks {
         commands.entity(e).despawn();
@@ -1042,7 +1146,8 @@ fn stream_chunks(
     settings: Res<WorldSettings>,
     tables: Res<BlockTables>,
     gen: Res<WorldGen>,
-    biome_noise: Res<BiomeNoise>,
+    snapshots: Res<ChunkSnapshots>,
+    climate: Res<WorldClimate>,
     players: Query<&Player>,
 ) {
     let Ok(player) = players.single() else { return };
@@ -1091,7 +1196,8 @@ fn stream_chunks(
         map.chunks.insert(coord, Chunk::default());
         map.gen_in_flight += 1;
         let gen = gen.0.clone();
-        let task = pool.spawn(async move { gen.generate(coord.x, coord.y) });
+        let snapshots = snapshots.0.clone();
+        let task = pool.spawn(async move { snapshots.load_or_generate(&gen, coord.x, coord.y) });
         commands.spawn(GenTask { coord, task });
     }
 
@@ -1107,9 +1213,9 @@ fn stream_chunks(
         let version = chunk.version;
         map.mesh_in_flight += 1;
         let tables = tables.0.clone();
-        let biome_noise = biome_noise.0.clone();
+        let climate = climate.0.clone();
         let chunk_origin = (coord.x * CHUNK_SIZE, coord.y * CHUNK_SIZE);
-        let task = pool.spawn(async move { mesh_chunk(&padded, &tables, &biome_noise, chunk_origin) });
+        let task = pool.spawn(async move { mesh_chunk(&padded, &tables, &climate, chunk_origin) });
         commands.spawn(MeshTask { coord, version, task });
     }
 
@@ -1141,7 +1247,15 @@ fn collect_gen_tasks(
     mut lights: ResMut<LightQueue>,
     mut tasks: Query<(Entity, &mut GenTask)>,
 ) {
+    // Taking in a finished chunk (applying its edits, seeding its light)
+    // runs on the main thread; several landing together used to cost a
+    // visible hitch, so past this much time in a frame the rest wait for
+    // the next one.
+    let start = std::time::Instant::now();
     for (entity, mut gen_task) in &mut tasks {
+        if start.elapsed() >= COLLECT_TIME_BUDGET {
+            break;
+        }
         let Some(generated) = block_on(future::poll_once(&mut gen_task.task)) else {
             continue;
         };
@@ -1152,6 +1266,13 @@ fn collect_gen_tasks(
             continue; // world was exited/switched while this chunk was generating
         }
         let chunk = map.chunks.get_mut(&gen_task.coord).unwrap();
+        let mut base_fluid = vec![0u64; generated.blocks.len().div_ceil(64)];
+        for (i, &id) in generated.blocks.iter().enumerate() {
+            if tables.0.fluid[id as usize] {
+                base_fluid[i / 64] |= 1 << (i % 64);
+            }
+        }
+        chunk.base_fluid = Some(base_fluid);
         chunk.blocks = Some(generated.blocks);
         chunk.fluid_level = Some(generated.fluid);
         chunk.axis = Some(generated.axis);
@@ -1168,7 +1289,13 @@ fn collect_gen_tasks(
         // fluid cell (not just sources a player placed - flowing/falling
         // cells the simulation spread into are just as real here), so a
         // reload never needs to re-derive anything, only place it back.
-        if let Some(fluids) = pending_fluids.0.remove(&gen_task.coord) {
+        //
+        // Only onto a chunk restored from its snapshot, though: fluid saved
+        // over terrain that has since been generated anew (a world from
+        // before snapshots existed, played on a changed generator) would
+        // put the old terrain's seas and rivers back over the new land.
+        let fluids = pending_fluids.0.remove(&gen_task.coord).filter(|_| generated.restored);
+        if let Some(fluids) = fluids {
             for (pos, id, level) in fluids {
                 map.set_block(pos, id);
                 map.set_fluid_level_raw(pos, level);
@@ -1251,6 +1378,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<PendingEdits>()
             .init_resource::<PendingFluids>()
             .init_resource::<OriginalFluids>()
+            .init_resource::<FluidSaveCache>()
             .init_resource::<AutosaveTimer>()
             .init_resource::<FluidQueue>()
             // `LightPlugin` owns the light systems, but `collect_gen_tasks`
@@ -1430,14 +1558,14 @@ mod tests {
     }
 
     /// Finds a real `(x, z)` column that classifies as `want` for this
-    /// noise - same scanning grid `biome.rs`'s own `region_noise_area_
-    /// fractions_land_in_a_reasonable_range` test already confirmed turns
+    /// climate - same scanning grid `biome.rs`'s own `snow_covers_a_real_
+    /// but_minority_share_of_land` test already confirmed turns
     /// up a real mix of both biomes, so this doesn't have to hand-pick
     /// coordinates that happen to work for one specific seed.
-    fn find_biome_column(noise: &crate::noise::SimplexNoise, want: biome::Biome) -> IVec3 {
+    fn find_biome_column(noise: &biome::ClimateMaps, want: biome::Biome) -> IVec3 {
         for i in -40..40 {
             for j in -40..40 {
-                let (x, z) = (i * 97, j * 131);
+                let (x, z) = (i * 197, j * 231);
                 if biome::region_biome_at(noise, x, z) == want {
                     return IVec3::new(x, 10, z);
                 }
@@ -1448,7 +1576,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_converts_an_exposed_source_to_ice_in_a_freezing_biome() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
@@ -1463,7 +1591,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_leaves_plains_water_as_water() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Plains);
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
@@ -1476,7 +1604,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_leaves_flowing_water_alone_even_in_a_freezing_biome() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, 3); // flowing, not a source
@@ -1489,7 +1617,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_leaves_covered_water_alone_even_in_a_freezing_biome() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);

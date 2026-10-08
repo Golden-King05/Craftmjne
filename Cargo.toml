@@ -40,6 +40,9 @@ serde_json = "1"
 # OS clipboard for Ctrl+C/Ctrl+V in chat (chat.rs) - "image-data" (pulls in
 # `image`'s own clipboard-image support) is off, we only ever get/set text.
 arboard = { version = "3", default-features = false }
+# Compresses saved chunk snapshots (snapshot.rs). Already in the lockfile via
+# the launcher's self_update, so this adds nothing to the download.
+flate2 = "1"
 
 # For reattaching to the launching terminal's console on Windows (main.rs) -
 # needed once windows_subsystem = "windows" hides the console a release
