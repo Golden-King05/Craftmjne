@@ -336,7 +336,7 @@ fn vertex_light(padded: &PaddedChunk, tables: &Tables, cells: [usize; 4]) -> ([f
 pub fn mesh_chunk(
     padded: &PaddedChunk,
     tables: &Tables,
-    biome_noise: &crate::noise::SimplexNoise,
+    climate: &crate::biome::ClimateMaps,
     chunk_origin: (i32, i32),
 ) -> ChunkMeshData {
     debug_assert_eq!(padded.blocks.len(), PAD_XZ * PAD_XZ * PAD_Y);
@@ -463,7 +463,7 @@ pub fn mesh_chunk(
                     // set, independent of which physical tile a rotated
                     // instance happens to be showing there.
                     let tint = if tables.tinted[id as usize * 6 + f] {
-                        crate::biome::grass_tint(biome_noise, chunk_origin.0 + x, chunk_origin.1 + z)
+                        crate::biome::grass_tint(climate, chunk_origin.0 + x, chunk_origin.1 + z)
                     } else {
                         [1.0, 1.0, 1.0]
                     };
@@ -564,7 +564,7 @@ pub fn mesh_chunk(
                     if tables.has_overlay[id as usize * 6 + f] {
                         let overlay_tile = tables.overlay_tile[id as usize * 6 + f] as usize;
                         let overlay_tint =
-                            crate::biome::grass_tint(biome_noise, chunk_origin.0 + x, chunk_origin.1 + z);
+                            crate::biome::grass_tint(climate, chunk_origin.0 + x, chunk_origin.1 + z);
                         push_quad(overlay_tile, overlay_tint, bias - OVERLAY_DECAL_BIAS);
                     }
                 }
@@ -593,8 +593,8 @@ mod tests {
     /// all (every existing test predates this feature, and none of them
     /// place grass) - the seed is arbitrary since nothing here asserts on
     /// its output.
-    fn no_tint() -> crate::noise::SimplexNoise {
-        crate::noise::SimplexNoise::new(0)
+    fn no_tint() -> crate::biome::ClimateMaps {
+        crate::biome::ClimateMaps::for_seed(0)
     }
 
     /// Uniform full sky light everywhere, so tests that aren't about
@@ -938,7 +938,7 @@ mod tests {
         // [1,1,1] (max channel 0.70), so any real column's tint is
         // provably distinguishable from the untinted no-op regardless of
         // which seed/column this happens to land on.
-        let noise = crate::biome::noise_for_seed(42);
+        let noise = crate::biome::ClimateMaps::for_seed(42);
         let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
 
         assert_ne!(horizontal_face_tint(&mesh, 31.0), [1.0, 1.0, 1.0]); // top
@@ -950,7 +950,7 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = reg.id("grass");
-        let noise = crate::biome::noise_for_seed(42);
+        let noise = crate::biome::ClimateMaps::for_seed(42);
         let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
 
         // Every side face (4 of them on an isolated block) should now come
@@ -977,7 +977,7 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = reg.id("grass");
-        let noise = crate::biome::noise_for_seed(42);
+        let noise = crate::biome::ClimateMaps::for_seed(42);
         let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
 
         // The +x (east) face of an isolated block (only air neighbours, so
@@ -1009,7 +1009,7 @@ mod tests {
         let (reg, tables) = tables();
         let mut padded = lit_padded();
         padded.blocks[padded_index(8, 30, 8)] = reg.id("stone");
-        let noise = crate::biome::noise_for_seed(42);
+        let noise = crate::biome::ClimateMaps::for_seed(42);
         let mesh = mesh_chunk(&padded, &tables, &noise, (0, 0));
         assert!(mesh.solid.tint.iter().all(|&t| t == [1.0, 1.0, 1.0]));
     }

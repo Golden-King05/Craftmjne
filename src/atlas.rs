@@ -445,6 +445,36 @@ pub fn default_painters() -> Painters {
 
     p.register("sand", |t, rng| t.noisy_fill(rng, [219.0, 207.0, 160.0], 18.0));
 
+    // Waterlogged earth: darker and browner than dirt, with wet, almost
+    // black patches and the odd glint of standing water.
+    p.register("mud", |t, rng| {
+        t.noisy_fill(rng, [88.0, 66.0, 48.0], 12.0);
+        for _ in 0..7 {
+            let (x, y) = ((rng() * 14.0) as i32, (rng() * 15.0) as i32);
+            let c = [58.0 + rng() * 10.0, 44.0 + rng() * 8.0, 34.0 + rng() * 6.0];
+            t.px(x, y, c);
+            t.px(x + 1, y, c);
+            t.px(x + 2, y, c);
+        }
+        for _ in 0..3 {
+            let (x, y) = ((rng() * 16.0) as i32, (rng() * 16.0) as i32);
+            t.px(x, y, [104.0, 98.0, 92.0]);
+        }
+    });
+
+    // A dried salt crust: off-white, with faint grey cracks where it has
+    // split into plates.
+    p.register("salt", |t, rng| {
+        t.noisy_fill(rng, [232.0, 228.0, 220.0], 8.0);
+        for _ in 0..4 {
+            let (mut x, mut y) = ((rng() * 16.0) as i32, (rng() * 16.0) as i32);
+            for _ in 0..6 {
+                t.px(x, y, [196.0, 192.0, 186.0]);
+                if rng() < 0.5 { x += 1 } else { y += 1 }
+            }
+        }
+    });
+
     p.register("gravel", |t, rng| {
         t.noisy_fill(rng, [130.0, 124.0, 120.0], 20.0);
         for _ in 0..18 {
@@ -560,6 +590,22 @@ pub fn default_painters() -> Painters {
         }
     });
 
+    // Pale and cold, like glass, but solid rather than see-through in the
+    // middle (real transparency comes from `transmission`, not alpha
+    // holes) - a few short crack strokes at odd angles read as distinct
+    // from glass's clean long diagonal streaks.
+    p.register("ice", |t, rng| {
+        t.noisy_fill(rng, [176.0, 214.0, 230.0], 14.0);
+        for _ in 0..3 {
+            let x0 = (rng() * 12.0) as i32;
+            let y0 = (rng() * 12.0) as i32;
+            let len = 3 + (rng() * 3.0) as i32;
+            for i in 0..len {
+                t.px((x0 + i).min(15), (y0 + i).min(15), [210.0, 232.0, 240.0]);
+            }
+        }
+    });
+
     // A wall-torch look on every face: a dark backing, a wooden stick up the
     // middle, and a bright flame at the top. The block is a plain solid cube
     // for now (see `blocks/torch.json`) - it's the lighting that makes it a
@@ -634,7 +680,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 19);
+        assert_eq!(a.indices.len(), 22);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

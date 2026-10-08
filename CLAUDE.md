@@ -1422,3 +1422,758 @@ etc.) instead of inventing a new approach:
     them; this only ever needs to run for the handful of tiles an actual
     tinted block uses, so a small targeted post-process pass over the
     already-built pixel buffer was the smaller, more surgical change.
+- **Once the overlay/brightness fix above actually shipped, the follow-up
+  report ("works! but colorings off, its too light needs to look like a
+  health green") was pure art direction, not a mechanism bug - and worth
+  telling apart from one.** The mask this multiplies against is itself
+  bright (stretched toward white by `normalize_tint_mask_tile`), so a
+  correspondingly pale/desaturated tint color reads as washed-out pastel
+  once combined with it - `biome.rs`'s `DRY`/`LUSH`/`COOL` moved to
+  noticeably darker, more saturated values (`LUSH` in particular: `[0.42,
+  0.70, 0.32]` -> `[0.20, 0.62, 0.18]`, a real "health bar green" rather
+  than a mid-tone one). This is a color you can't get right from a remote
+  session with no display - said so plainly and treated the change as a
+  best-effort first pass to react to, not a final answer. **Changing the
+  darker constants moved `the_gradient_is_continuous_at_its_midpoint`'s
+  `assert_eq!` from "happened to round exactly" to "off by one f32 ULP"**
+  (`lerp3(DRY, LUSH, 1.0)` came out `[0.20000002, 0.62, 0.18]` against a
+  `LUSH` of `[0.2, 0.62, 0.18]`) - `a + (b - a) * 1.0` was never guaranteed
+  bit-identical to `b` in floating point, the old constants just happened
+  to round away the error and the new ones don't. Fixed by switching to an
+  epsilon comparison (`1e-6`, matching this file's other float-tolerance
+  tests) rather than picking constants to dodge the rounding - a test
+  asserting a *design invariant* (the two branches must agree at the
+  boundary) shouldn't constrain which numbers are allowed to be chosen for
+  unrelated (art-direction) reasons. Verified the epsilon is still tight
+  enough to catch a real discontinuity, not just loosened until anything
+  passes, the same way every other regression test in this file is
+  checked: broke `lerp3` (`+ 0.1` on its output) and confirmed the test
+  still goes red before restoring it.
+- **The first real biome (`Biome::Snow`) is a trait-method enum, not a
+  hardcoded name check anywhere it matters - the user's own framing for
+  the request ("save this water freezing feature as a biome trait so
+  whenever we institute another cold feature, we can have it do this as
+  well").** `Biome::freezes_water`/`Biome::drier` are the two behaviors
+  `Snow` needs today; a future cold biome (tundra, glacier, ...) gets both
+  just by returning `true` from the same two methods, with zero changes to
+  either `terrain.rs`'s generator or `world.rs`'s runtime freeze rule -
+  neither ever checks `== Biome::Snow` directly. `biome.rs`'s existing
+  grass-tint noise and the new biome-*region* noise are deliberately
+  separate streams (`REGION_SEED_OFFSET`, a much larger `REGION_SCALE`) -
+  a snow-biome column has no grass to tint at all, and conflating the two
+  would mean a change tuned for one cosmetic gradient silently reshaping
+  the other's regions.
+- **A biome-driven height change needs to blend on the same continuous
+  noise value a hard classification thresholds, not step at the
+  classification's own edge.** `Biome::drier` pushes terrain up (so fewer
+  columns dip below `SEA_LEVEL` and form a lake) - if that boost snapped
+  on/off exactly where `region_biome_at` flips from `Plains` to `Snow`, the biome
+  edge would read as a real elevation cliff, which is far more visually
+  jarring than the existing hard edge in which *texture* a column's
+  surface uses (already accepted at `SNOW_LINE`). `biome::drier_strength`
+  ramps `0.0..=1.0` across a blend window centered on the same
+  `SNOW_THRESHOLD` `region_biome_at` itself uses (not a second, potentially-
+  disagreeing threshold), so terrain is already rising as a column
+  approaches Snow biome and the elevation change is smooth even though the
+  surface-block change right at the edge still isn't.
+- **A trait property tested by sampling a wide grid, not by trusting the
+  formula - same discipline the grass-tint noise already established.**
+  `SNOW_THRESHOLD` was picked by writing `region_noise_area_fractions_
+  land_in_a_reasonable_range` first (sample a grid across several seeds,
+  assert the measured Snow fraction lands in a sane 5-35% range) and only
+  then choosing a threshold value that passed it, rather than guessing a
+  number against `fbm2`'s own "roughly -1..=1" bound and hoping the area
+  it carves out is reasonable.
+- **Freezing an exposed lake surface only ever needs to look one layer
+  deep, which is what makes it safe to check directly off `BlockSetEvent`
+  instead of a ticked, budgeted queue like `FluidQueue`.** Converting the
+  top water source to ice means whatever's beneath it no longer has air
+  contact at all - there's structurally nothing left to cascade into, so
+  one check per relevant event (the changed position itself, and the cell
+  below it) is the whole rule, unlike fluid spread's genuine multi-step
+  relaxation. It's also why this is written to go through the same
+  `set_block` + a written `BlockSetEvent` a player action would use,
+  *not* `set_fluid_cell`'s player-edit-bypassing sibling: freezing is a
+  one-shot, irreversible transition (water never thaws back in this
+  feature), not a continuously re-derived value the way fluid spread is,
+  so it doesn't share fluid's reason to dodge `EditLog` - `record_edits`
+  picks the written event up for free, which is what makes a frozen cell
+  survive a reload with zero extra persistence code, the same way a
+  player breaking a block does. See `world.rs`'s other simulation-pattern
+  notes for the general version of this "does this write need to dodge
+  the player-edit path" question - the answer here is no, for a different
+  reason than fluid's own "no" would have been.
+- **A system can't take both `EventReader<T>` and `EventWriter<T>` for the
+  *same* event type as separate parameters - Bevy panics at schedule
+  build time (`B0002`, `ResMut<Events<T>>` conflicting with a previous
+  `Res<Events<T>>` access) - and only the real headless integration tests
+  (`tests/headless.rs`, which build an actual `App`/schedule) caught it;
+  every isolated unit test calling the pure `try_freeze_cell` function
+  directly passed the whole time, since they never go through Bevy's
+  schedule at all.** `freeze_exposed_water` needs to both read
+  `BlockSetEvent` (what changed) and write one (the resulting ice
+  placement) in the same system, so it takes `ParamSet<(EventReader
+  <BlockSetEvent>, EventWriter<BlockSetEvent>)>` instead - Bevy's
+  mutually-exclusive-access wrapper built for exactly this "same
+  resource, two conflicting kinds of access, never needed at the same
+  instant" case. General lesson: a pure-function unit test proves the
+  *logic* is right; it says nothing about whether the system wrapping
+  that logic can even be scheduled, which is exactly the gap `tests/
+  headless.rs` exists to cover for this whole codebase.
+- **A test that searches for a column matching a condition has to use the
+  same effective value the code under test actually acts on, or it can
+  pass for the wrong reason.** The first version of `snow_biome_columns_
+  generate_snow_at_low_altitude_not_grass` searched for a column below
+  `SNOW_LINE` using `TerrainGenerator::surface_height` directly - but
+  `generate()` applies `Biome::drier`'s height boost *after* that call, so
+  the column the search found could easily have been boosted back above
+  `SNOW_LINE` by the time terrain actually placed a block there, making
+  the test pass on the pre-existing altitude-cap path even with the new
+  biome-driven override deliberately disabled (caught by breaking the
+  override and finding the test stayed green - the same "does a new test
+  actually turn red" discipline as everywhere else in this file). Fixed by
+  extracting the real formula into `TerrainGenerator::effective_height`
+  (used by both `generate()` and the test) instead of letting the test
+  re-derive its own copy that could quietly drift from the real one.
+- **"So land doesn't just become one giant undivided landmass" plus "rivers
+  that run high down to sea level, real flow simulation" is two genuinely
+  different features wearing one request - oceans need large-scale
+  *connectivity*, rivers need genuine per-tile *flow accumulation*, and
+  they don't share a mechanism.** Oceans turned out to need no architecture
+  change at all: `terrain.rs`'s `continent`/`CONTINENT_SCALE` is just one
+  more very-low-frequency noise stream blended into height (mirrors the
+  existing `mountain` mask's own low-freq-decides-the-shape pattern),
+  blended toward a real `DEEP_OCEAN_FLOOR` via `surface_height`'s
+  `ocean_t` - still a pure per-column function, zero cross-chunk
+  dependency. Rivers are the opposite: a river's shape is fundamentally
+  non-local (it has to know what's uphill of it, arbitrarily far away), so
+  before writing any code the real fork was surfaced to the user via
+  `AskUserQuestion` - a cheap noise-band approximation (zero architecture
+  change) vs. genuine flow accumulation (needs a precomputed/cached
+  heightmap, a real change to "chunks generate independently"). The user
+  picked real simulation, so `terrain.rs`'s own "no cross-chunk
+  dependencies" invariant (this file's very first line about the module)
+  got its first deliberate, documented exception.
+- **"A global flow simulation can't work in an unbounded world" turned out
+  to be wrong - it just has to be *lazy and memoized* instead of computed
+  up front.** Rivers were first built over bounded 512-block regions
+  (`RegionHydrology`, now deleted), each fading out before its region's
+  edge, on the reasoning that a catchment could extend arbitrarily far
+  upstream. The user then asked for rivers "not bound by that box."
+  `drainage.rs`'s `Network` covers the whole world. It's a 16-block cell
+  grid where each cell's downstream neighbour is a *local* fact (steepest
+  descent over its 8 neighbours). Accumulation and water level are walked
+  upstream on demand, memoized per node in `OnceLock`s inside lazily
+  created 32x32-cell tiles. Three things make it terminate and stay
+  deterministic:
+  - **Routing over a surface with no pits.** Steepest descent on raw noise
+    strands water in local dips, so rivers came out short and many ended in
+    inland lakes. The cure was routing over a separate `routing_height`:
+    ground smoothed over a 40-block ring, plus a signed
+    `SEAWARD_TILT * (continent - OCEAN_THRESHOLD)` that makes the whole
+    continent lean toward its ocean. Rivers only end at real ocean
+    (`Landscape::is_sea`); a below-sea-level inland basin is something a
+    river flows *through*, not into.
+  - **Measuring flow at the unjittered cell center.** Node positions are
+    jittered for drawing, but sampling the routing height at the jittered
+    point manufactured fake pits between cells.
+  - **A hard catchment cap.** An unbounded upstream walk OOM-killed the
+    test process (SIGKILL) on an infinite synthetic slope.
+    `MAX_ACCUMULATION` aborts any walk that has explored more than that
+    many cells and memoizes the cap. It stays order-independent because
+    whether a walk hits the cap depends only on the true catchment size,
+    never on which chunk asked first.
+  River *length* was limited by geography rather than by the algorithm
+  until `CONTINENT_SCALE` was cut 3x. Before that, land sat a median 160
+  blocks from the coast, so no river could ever be long. Measured after
+  the change: median ~300 blocks, p90 ~700, longest ~1100.
+- **A shared memo behind a `Mutex` is still the right concurrency shape for
+  chunk generation.** `Network::tiles` (`Mutex<HashMap<Cell, Arc<Tile>>>`)
+  is touched from every async gen task, but the lock is held only to find
+  or create a tile. Each node's values live in `OnceLock`s, so two tasks
+  racing on the same node at worst both compute the same deterministic
+  answer. Measured at ~2ms per chunk cold in release, no different from
+  before.
+- **Give the flow algorithm a synthetic world it can be tested against.**
+  `drainage::Landscape` is a trait (routing height, ground, sea, incision,
+  base level), and `TerrainGenerator` is just one implementation. The
+  drainage tests use a hand-built `Valley` closed by ridges, so it has a
+  finite catchment and doesn't trip the cap. With that valley they can
+  assert water reaches the sea along the valley floor, accumulation grows
+  downstream, results don't depend on query order, and a surface never
+  rises downstream. None of that can be hand-predicted on noise terrain.
+  Break-tested: removing the downstream cap on water level turns the
+  "never rises" test red.
+- **When splicing a big file with a script, anchor on something unique.** A
+  Python `rfind("#[cfg(test)]")` meant to find the test module instead
+  matched a later `#[cfg(test)]` *attribute* and silently deleted the
+  whole `mod tests` in `terrain.rs`. Caught only because the test count
+  dropped. Restored it with `git show HEAD:src/terrain.rs`. Anchor on
+  `"#[cfg(test)]\nmod tests"` instead, and check the test count after any
+  scripted edit.
+- **Hand-picked constants for a brand new noise-driven system are exactly
+  the case this file's "measure, don't assume" rule exists for, and a
+  first guess was wrong in a way that was only visible by measuring, not
+  by reasoning about the formula.** (Describes the old per-region version;
+  the lesson stands.) `MAX_ACCUM_FOR_FULL_CARVE` was first
+  guessed at `700` (near `FLOW_GRID`'s full `64*64` cell count, reasoning
+  "a river could in principle drain the whole region") - real fbm terrain
+  never gets close: a throwaway test dumping the actual accumulated-flow
+  grid for several seeds showed real maximums landing around `25-70`, not
+  in the hundreds, because `mountain`/`terrain`'s own local relief (not
+  just the broad regional slope) constantly redirects steepest-descent
+  paths before they can all converge into one channel. Left at `700`, the
+  real rivers this produced were carving only 1-3 blocks deep everywhere -
+  technically "a river" by the `> 0` test that first caught it, but nowhere
+  near strong enough to read as a real feature. Recalibrated to `55`
+  (near the measured ceiling) so a genuinely well-fed real channel reaches
+  full depth. Similarly, `OCEAN_THRESHOLD` was first set assuming "land
+  should stay the clear majority, like before oceans existed" - but a
+  real connectivity test (flood-filling sampled land/ocean grids) showed
+  that with land as the strong majority, land *itself* becomes the one
+  giant connected mass (with the ocean fragmented into many small inland
+  seas) - the exact mirror image of the original complaint, just with the
+  labels swapped. Moving the threshold toward the point where land and
+  ocean are close to evenly split is what actually let *both* sides
+  percolate into multiple large, separate connected regions - a basic
+  percolation-theory fact (a minority phase on a random field fragments;
+  only a share close to 50/50 lets either phase form multiple large
+  components) that wasn't obvious from the formula alone and only showed
+  up by measuring real connected-component sizes.
+- **The "is this really solved" test has to match the user's literal
+  complaint, and the naive version of that test can be topologically
+  impossible to satisfy.** A first attempt at the ocean test asserted a
+  *single* connected ocean covering most of total ocean area, mirroring
+  how `region_noise_area_fractions_land_in_a_reasonable_range` measures a
+  single fraction - but real coastlines legitimately produce several
+  separate seas (Pacific, Atlantic, Indian...), so demanding one dominant
+  basin is stricter than reality itself. `oceans_split_land_into_multiple_
+  masses_separated_by_real_seas` instead asserts what the user actually
+  asked for: at least two *real* (>=1% of sampled area, so a handful of
+  noise-driven single-cell ponds in the long tail don't count) separate
+  landmasses, and at least one ocean basin large enough to read as a real
+  sea - satisfiable by both "two continents, one ocean" and "three
+  continents, several seas," because the user's complaint was about
+  landmass separation existing at all, not about ocean topology
+  specifically.
+- **"The autocomplete dropdown stops at the first space" was a real,
+  deliberate design decision (its own CLAUDE.md entry above) - extending it
+  to complete a command's *arguments* too (`/locate`) had to generalize
+  that decision, not just bolt a special case onto it.** The dropdown's
+  core data stayed `commands::CommandSuggestion { text, usage, description
+  }`, unchanged in shape - the only shift was what `text` means: always
+  "whatever replaces everything after the leading `/`," which used to be
+  only ever a bare command name and is now sometimes a whole `name arg1
+  arg2` line. Because `chat.rs`'s Tab-fill and click-fill handlers
+  (`chat_text_input`'s `KeyCode::Tab` arm, `click_suggestion`) already just
+  did `chat.input = format!("/{} ", suggestion.text)` with no assumption
+  baked in about *how many words* `text` holds, **neither needed a single
+  line changed** - the exact "give the general formula a no-op for the old
+  case" shape this file keeps finding elsewhere (`mesher.rs`'s
+  `rotated_tile`, `light.rs`'s `attenuate`). Only `command_suggestions`
+  itself (decide *what* to suggest for the current input) needed new logic:
+  no space yet -> still the old command-name path (`registry.suggestions`,
+  completely untouched); a space -> split into the already-finished
+  command name plus argument tokens (`split_whitespace`, with a trailing-
+  space check tracked separately so "nothing typed yet for the next token"
+  and "still mid-word" stay distinguishable - `split_whitespace` alone
+  would silently swallow a trailing space and conflate the two), look that
+  exact name up (reusing the existing private `CommandSpec::matches`, not a
+  new prefix search), and call its new optional `arg_candidates` hook if it
+  has one.
+- **An argument-completion hook only ever needs the tokens *before* the one
+  being typed, never the partial text of that token itself - prefix
+  filtering is a generic, one-time concern, not something every command's
+  hook should re-implement.** `CommandSpec::arg_candidates: Option<Box<dyn
+  Fn(&[&str]) -> Vec<ArgCandidate>>>` takes only `prior` (the fully-typed
+  tokens so far); `CommandRegistry::arg_suggestions` is the one place that
+  filters the returned candidates by whatever prefix is currently typed
+  (case-insensitive `starts_with`, mirroring `suggestions`'s own top-level
+  filtering) and sorts them. `/locate`'s own hook
+  (`locate_arg_candidates`) is consequently a two-armed `match` on `prior`'s
+  *length* (`[] =>` the qualifier position, `[qualifier] =>` that
+  qualifier's own names, reading `Biome::ALL`/`Feature::ALL` directly so a
+  third biome or feature needs zero changes here) with no filtering logic
+  of its own at all - exactly the same "declarative data, one generic
+  algorithm" shape as `sky::MoonEventDef`'s table.
+- **An argument completion must echo back whatever command name the player
+  actually typed - an alias or the primary name - never silently normalize
+  it, because normalizing would make Tab/click fill in text different from
+  what's already on screen.** `CommandRegistry::arg_suggestions` builds
+  each result's `text` by joining the literal `command_name` parameter
+  (exactly as typed) with `prior` and the new candidate, not
+  `spec.name` (the canonical name) - caught by writing `an_argument_
+  completion_echoes_back_whatever_command_name_was_actually_typed` as a
+  real regression test (a throwaway command registered under one name
+  with an alias, completed by its alias) rather than trusting the
+  "obviously correct" choice between the two fields without checking.
+- **`Biome`/`Feature` both grew an `ALL`/`name`/`parse` triplet for the same
+  reason, in two different modules, and that's a feature of the pattern,
+  not duplication worth merging.** `/locate biome <name>` needs to parse
+  and enumerate biomes; `/locate feature <name>` needs the same for
+  terrain features - but biomes and features are unrelated concepts
+  (`biome.rs` vs. a new enum local to `terrain.rs`) with no shared base
+  worth generalizing into. Each gets its own tiny, self-contained table
+  (`const ALL: [Self; N]`, `fn name`, `fn parse` derived from the other
+  two) exactly where its variants already live, so a third biome or a
+  fourth feature is a one-line edit to `ALL`/`name` in the one file that
+  already defines it - not a shared registry `/locate` would otherwise
+  need to reach into two unrelated modules to maintain.
+- **A "find the nearest X" search needs an explicit, generous-but-finite
+  search bound, or it silently promises to find something that might not
+  exist within any reachable distance.** `terrain::locate_nearest`'s
+  expanding-ring search is capped at `LOCATE_MAX_RADIUS` (6000 blocks -
+  generous relative to every noise scale a predicate could be built on:
+  `biome::REGION_SCALE` 640, the drainage network's river catchments, continent noise's
+  far larger wavelength), returning `None` rather than looping forever if
+  nothing within that bound ever matches. It deliberately is *not* a
+  perfect global nearest-neighbor search - it stops at the first ring with
+  any match and picks that ring's own closest-by-real-distance hit, which
+  can in principle miss a slightly closer match just inside the next
+  ring's near edge. Documented as an accepted approximation rather than
+  fixed, for the same reason the bounded-region river search itself is
+  accepted as-is: a `/locate` command promises "get me close to a real
+  one," not "the provably single closest coordinate in the universe."
+- **Reusing the generator's own definitions for `/locate feature` is what
+  keeps "what counts as a river/mountain" from ever disagreeing with what
+  the generator actually placed.** `Feature::River` is `column_profile(..)
+  .in_river` - the exact wet channel `generate` floods - and
+  `Feature::Mountain` is `mountainness >= MOUNTAIN_RANGE_THRESHOLD`, the same
+  mask the range was raised by and the `Mountain` biome is gated on. (Both
+  were first written as altitude/carve-depth approximations; the river/
+  mountain rework below replaced them with these rather than keeping two
+  definitions of each concept.)
+- **"Can the game already do X?" gets answered by measuring, not by reading
+  the code that's supposed to do it.** Asked to confirm rivers could sit
+  flush or dug-in and mountains could be their own thing, a throwaway probe
+  over three seeds found ~96% of river columns at or below sea level with
+  banks *under* the water on average (rivers only formed in lowlands that
+  were already flooded; upland reaches were dry trenches), and columns
+  inside the mountain mask mostly 26-31 tall, almost never reaching the
+  snow line. Neither was visible from the code - the carve formula and the
+  mountain mask both looked reasonable in isolation. Reporting those
+  numbers was the honest answer to "confirm," and they set the targets the
+  rework was then tuned against.
+- **Water that can stand above sea level isn't held in by anything except
+  the generator's own care, so containment has to be an explicit rule with
+  its own invariant test.** Sea water is safe by construction - only
+  columns whose ground is *below* `SEA_LEVEL` fill. A river's surface sits
+  wherever its valley is, so a dry column beside the channel can easily be
+  lower than the water. `TerrainGenerator::column_profile`'s **levee rule**
+  raises any dry near-river column to at least every 4-neighbour's water
+  surface, computed from those neighbours' *raw* (pre-levee) profiles so
+  it's still a pure per-column function with no cascade.
+  `river_water_never_stands_beside_open_air_on_dry_land` checks every wet
+  column's neighbours across four real river windows, and turning the levee
+  rule off makes it fail immediately. The one deliberate exception is water
+  meeting water at different heights *within* a river - a 1-block rapid
+  where the surface steps down. Voxel water can't slope, so a river that
+  descends has to step somewhere; the step is static until something
+  nearby triggers the fluid sim.
+- **A river's surface is a pull-style value propagated downstream, and it
+  needs the same "only ever improve" cap as `recompute_cell`'s fluid
+  levels.** Each river cell's candidate surface is `bank height - incision`.
+  Incision varies along a river (`river_incision`), so a deeply incised
+  stretch followed by a flush one would have its surface jump *up* to the
+  flush stretch's banks - water climbing uphill. `drainage::Network::
+  water_level` caps each cell at the lowest surface of any river cell
+  draining into it (memoized, so walking upstream happens once per cell),
+  so a river's surface can only stay level or step down. Tested against the
+  synthetic `Valley` landscape in `drainage.rs` - break-tested by removing
+  the cap.
+- **Rivers became segments with real width instead of a blurred grid, and
+  that's what made "flush vs dug in" expressible at all.** The old carve
+  field bilinearly interpolated an 8-block grid, so a river's cross-section
+  was whatever interpolation happened to produce - one fixed soft V. Each
+  river cell is now a segment to the cell it drains into, carrying
+  water level, half-width, depth and incision at both ends.
+  `TerrainGenerator::river_sample` finds the nearest segment and interpolates
+  along it, so a column knows its distance from the centerline and can be
+  shaped deliberately: a rounded wet channel, then banks at `water +
+  incision` (a vertical wall `incision` blocks tall at the water's edge, or
+  none when flush), then terrain easing back to natural over
+  `VALLEY_WIDTH`. Narrower for incised rivers, the start of a canyon.
+- **A bug can hide behind an unrelated feature, and only shows when that
+  feature is switched off.** While break-testing the cliff code (setting
+  coast steepness to zero), the *mountain* tests went red: only 59 of 4,493
+  range columns reached the snow line. The soft ceiling (`soft_ceiling`,
+  which eases tall terrain toward the build limit instead of clamping it
+  flat) was being applied twice, once in `land_relief` and again in
+  `base_height`, compressing every peak below the snow line. The steep-
+  coast uplift happened to stack enough extra height on ~30% of land to
+  hide it. The break test was aimed at cliffs and caught a mountain bug -
+  worth remembering that "switch one feature off" also checks which
+  *other* tests secretly depended on it.
+- **A test can pass with its feature removed because a different feature
+  produces a lookalike - exclude the confounder rather than loosen the
+  test.** `coasts_come_both_as_cliffs_and_as_beaches` stayed green with
+  coast steepness forced to zero, because a mountain range running into
+  the sea is also a tall shore. It now skips columns with any
+  `mountainness`, after which disabling cliffs fails it (0 of 247 shoreline
+  columns). Same lesson as the `big heal` chat test: break the thing a test
+  claims to guard and confirm it goes red.
+- **Altitude-layered biomes need the column's height, so the "real" biome
+  moved onto the generator, and the region-only classifier was renamed so
+  it can't be mistaken for it.** A mountain's base keeps its region biome,
+  and `ALTITUDE_ZONES` (a declarative table, lowest band first - adding
+  spruce on the lower slopes is one entry) takes over above each band's
+  `min_height`. That makes a column's biome depend on its generated height,
+  which only `TerrainGenerator` knows. `biome::biome_at` became
+  `biome::region_biome_at` (it still can't return `Mountain`, which is
+  tested). `TerrainGenerator::biome_at` is the full answer, and every
+  consumer that cared about a column's actual biome switched to it:
+  `generate`, `world.rs`'s freeze rule (`try_freeze_cell` now takes a
+  `biome_at` closure, so its tests can still feed region noise), and
+  `/locate biome`. The `world::BiomeMap` resource, which existed only to
+  hand region noise to the freeze rule and `/locate`, was deleted rather
+  than kept around as a second, incomplete way to ask "what biome is this?"
+- **"Mountain generation separate, but in line with the mountain biome"
+  means one mask drives both.** `mountainness` is the range mask:
+  `land_relief` lifts terrain by it, `zoned_biome` only applies altitude
+  zones where it's at least `MOUNTAIN_RANGE_THRESHOLD`, and `/locate feature
+  mountain` searches for it. A tall column that *isn't* on a range (a
+  steep coast's raised headland) therefore keeps its region biome, and the
+  `Mountain` biome can never appear somewhere the terrain wasn't actually
+  built as a mountain.
+- **"Generator changes never alter explored land" is a snapshot of each
+  chunk's *generated* terrain, not a save of every block.** `snapshot.rs`
+  writes a chunk once, the first time it generates
+  (`saves/<world>/chunks/c.<cx>.<cz>.bin`, ~2.5 KB deflated: a block-*name*
+  palette plus `u16` indices). Every later visit loads it instead of
+  generating. Player edits and fluid still ride the existing
+  `EditLog`/fluid-save paths on top, unchanged. The write is temp file +
+  rename, so a neighbour reading the file concurrently sees it whole or not
+  at all. An unreadable file is generated again and replaced, never a crash.
+- **Only chunks from a *different* generator count as old, or the blend
+  creeps outward forever.** A new chunk blends into old neighbours
+  (`TerrainGenerator::generate_beside`): height is offset by the nearest
+  old column's difference from the current generator, fading over
+  `BLEND_DISTANCE` (16). A river fades to dry ground within
+  `RIVER_FADE_DISTANCE` (8). If *every* saved neighbour were old, chunk B
+  would blend into chunk A, which already blended into O, and so on
+  without end. Results would also depend on load order. Each snapshot
+  stores a fingerprint of the generator's actual *output* (FNV over a few
+  sample chunks, plus a manual `GENERATOR_REVISION`), and only neighbours
+  with a different fingerprint are blended against. Old chunks are never
+  written again, so the set a new chunk blends against is fixed, and two
+  new chunks agree on every column between them in either order.
+  `new_chunks_come_out_the_same_whichever_generates_first` goes red the
+  moment same-fingerprint neighbours are treated as old. Hashing output
+  rather than a version number has a useful side effect: a spurious
+  mismatch (a refactor, a toolchain change) is harmless, because an old
+  column that matches what the generator makes now contributes an offset
+  of zero (`an_old_chunk_this_generator_would_have_made_anyway_changes_
+  nothing`).
+- **Water in or near old chunks needs the levee rule's guarantee across
+  the seam too.** Three rules, each with a test that goes red without it:
+  - A new river near a *differing* old column is filled to its own water
+    level and eased to natural ground. The ordinary levee rule then holds
+    back the water still upstream.
+  - A blended channel whose bed ends up at or above its water counts as
+    dry.
+  - A new column beside old water standing above sea level is raised to
+    hold it in.
+  The leak test checks old land both higher *and* lower than the new
+  terrain. Only the lower case can actually leak, and the first draft
+  tested only the higher one.
+- **`write_save` was saving every fluid cell in every loaded chunk,
+  including every generated ocean cell, and that was hiding a migration
+  bug.** Harmless while terrain was deterministic from the seed. Once a
+  world's terrain can be generated anew (a pre-snapshot world opened on a
+  changed generator), those saved cells would put the old seas and rivers
+  back, floating over the new land. Two fixes:
+  - `Chunk::base_fluid` (one bit per cell, set where the chunk was
+    generated with fluid) lets `write_save` skip sources the snapshot
+    already restores.
+  - `collect_gen_tasks` only reapplies saved fluid onto a chunk restored
+    from its snapshot (`GeneratedChunk::restored`).
+  The bit has to be cleared whenever a cell's block changes (`set_block`,
+  and `set_fluid_cell` when the id changes). Otherwise generated water
+  that was edited to air and then refilled by the sim as a source looks
+  "generated", gets skipped, and the reload shows the edit's air instead.
+  The existing `water_restores_exactly_after_leaving_and_reentering_a_world`
+  caught exactly that, because its pocket happened to sit in a lake.
+- **To test "the generator changed" without changing the generator, use a
+  different seed.** It makes entirely different terrain through the same
+  code, which is all a snapshot or blend test needs. `snapshot.rs`'s tests
+  and `tests/headless.rs`'s `a_reload_shows_saved_chunk_snapshots_not_
+  freshly_generated_terrain` (which swaps spawn's snapshot for a seed-99
+  one) both do this.
+- **Waterfalls are a step in the river's surface plus a curtain over the
+  face, and both had to follow rules that already existed.**
+  - *The step:* in a segment whose water drops by at least
+    `WATERFALL_DROP` (3), `river_sample` keeps the upper level for every
+    column whose `natural` ground can hold it, then switches to the lower
+    one. Without that per-column check, the lip would sit wherever the
+    segment's midpoint fell. A lip out past a cliff edge would leave a
+    wall of river standing over the sea.
+  - *The curtain:* any wet column beside river water at least
+    `WATERFALL_CURTAIN` (2) higher is filled up to it with a flowing
+    level-1 top cell over `FLUID_FALLING`. That's exactly the state
+    `recompute_cell` settles a ledge into, so the simulation leaves it
+    alone. Generated fluid is no longer all sources, so snapshots store
+    every non-source level (sparse index + level after the block indices),
+    and `Chunk::base_fluid`'s bit now means "this cell's fluid is exactly
+    as generated". It clears on any change to the block *or* the level.
+  - Break-testing showed the curtain fixes a gap that had been there all
+    along. With stepping disabled, the search still found 5+ block drops at
+    river mouths, so exposed walls of standing river water already existed
+    there (the profile-level leak test allows water beside lower water).
+  - Measured over 6000x6000 blocks on three seeds: roughly as many falls
+    into the sea as inland, up to 28 blocks tall. Generation stays at
+    ~2-3ms per chunk.
+- **Two lighting bugs that looked unrelated had one shared cost: a FIFO
+  light queue flooded by work that shouldn't have existed.**
+  - *Dark lines along every chunk border under the sea.* The generator's
+    straight-down sky fill passed full sunlight through water, because
+    water isn't opaque. Propagation dims it. `seed_new_chunk` skips
+    interior full-sky cells but always seeds border cells, so the borders
+    settled dim and the interiors stayed wrong until a slow cascade crept
+    in from the edges. Fixed by sharing one rule: `light::sky_falling_into`
+    is both `offered`'s downward case and what `TerrainGenerator::
+    sky_columns` steps with. **A "settles eventually" test can't catch
+    this.** The first version of `sunlight_under_the_sea_has_no_seams_at_
+    chunk_borders` checked for a fixed point and passed with the bug
+    reintroduced, because the cascade does get there (9 s instead of
+    0.25 s). It now asserts the generator's fill already equals the
+    settled light in open sea.
+  - *A mined hole stays dark for a long time.* The light values were
+    right (`digging_a_shaft_lets_sunlight_down_it` passed at once). The
+    edit's updates were waiting at the back of a queue full of streaming
+    work, much of it that cascade. `LightQueue` now has an `urgent` queue
+    for `BlockSetEvent` work and everything it re-enqueues, drained first,
+    with a remesh flush the moment it empties.
+    `a_mined_hole_lights_up_even_while_chunks_are_still_loading` piles on
+    background work before digging and goes red if edits share the normal
+    queue.
+- **A river's surface eases down a block with the fluid sim's own flowing
+  levels, derived locally from the fraction the generator already had.** A
+  river's water level is a float interpolated along each segment, and the
+  surface used to be its floor: a whole-block step every few dozen blocks.
+  `RiverSample::slope` (drop per *grid step*, i.e. per Manhattan block,
+  because that's how the sim measures distance) turns the leftover
+  fraction into "how many steps downstream of the last drop is this
+  column". Within water's `flow_distance` the column gets one more water
+  block on top at that flowing level (`ColumnProfile::top_level`), which is
+  what the sim settles to downstream of a higher source. It's part of
+  `water_top`, so the levee rule raises the banks around it for free.
+  Measured against the sim's exact rule (a level is one more than the best
+  same-height neighbour), 83% of cells match. Measuring per straight-line
+  block instead of per grid step got 80% under a looser check, because a
+  diagonal river covers fewer grid steps than the sim counts. The rest are
+  diagonal stretches: static until something nearby triggers the sim,
+  which then settles them itself. An exact version would need a BFS over a
+  padded region per chunk *and* a second definition of a column's profile
+  beside `column_profile`, which is the drift this file keeps warning
+  about. `river_surfaces_ease_down_in_flowing_levels_between_steps` keeps
+  the 75% floor and checks the generated blocks carry the level.
+- **Cliffs read as "a terrain glitch" when they were a steep *ramp* with
+  grass on every step. Modelling them on real sea-cliff geomorphology
+  fixed that, as the user suggested.** The old steep coast just narrowed
+  the land-to-sea-floor blend (`CLIFF_BLEND`), which still left a ramp a
+  few blocks wide. Every column in it got the normal grass + 3 dirt +
+  stone, so the face was a staircase of grassy ledges. `coast_shape` now
+  converts the continent field into *blocks inland of the edge* (value
+  past the threshold divided by its local gradient) and builds the
+  features coastal geomorphology describes:
+  - a vertical edge, pushed in and out by a "rock hardness" noise into
+    headlands and bays (`CLIFF_EDGE_WOBBLE`)
+  - a wave-cut platform at `SEA_LEVEL - 1` with boulders thickest under
+    the face
+  - sea stacks offshore
+  In `generate`:
+  - Any column with a 4+ block drop *and* a 3+ block rise beside it is
+    bare rock.
+  - Any column with a 4+ drop keeps only one block of soil.
+  - Sea-facing faces get a wave-cut notch above the waterline.
+  These are generic slope rules, so steep mountain ground benefits too.
+  `generate` now builds one profile grid with a one-column ring
+  (`at(x, z)`) and reads neighbours from it. That serves both the slope
+  rules and the waterfall curtains without asking for any profile twice.
+  Mapping the result (an ASCII height map of a real stretch of coast,
+  printed from a throwaway test) caught a leftover: partly steep coasts
+  mixed the cliff and beach profiles into a thin low ridge just past the
+  platform. Cliff shape now applies fully from half steepness up
+  (`smoothstep(steep * 2)`).
+  `cliffed_coasts_have_rock_faces_platforms_and_sea_stacks` goes red for
+  deep soil on faces or sand on platforms.
+- **"Rivers flow to ponds and stop" was two different dead ends, found by
+  classifying every river mouth rather than guessing from the report.** A
+  throwaway survey of all mouths over 300x300 cells (seed 7) found:
+  - 76 real ocean mouths.
+  - 15 "sea" mouths with no deep water anywhere near: coastal hollows
+    where the continent field was a hair under the ocean threshold.
+  - 46 that weren't water at all: *pits*, cells with nothing lower around
+    them. Almost all were less than a block deep, on flat plains far
+    inland where the seaward tilt is too weak.
+  Fixes:
+  - **`Landscape::is_sea` means open ocean.** `OPEN_SEA_MARGIN` puts it a
+    quarter of the way into a beach's blend. A river crossing shallower
+    water on its way out is invisible, since its surface can't drop below
+    sea level.
+  - **Pits spill** (`drainage::Network::spill`). Flood outward from the pit
+    lowest-rim-first (a min-heap on the highest point water must rise
+    over) until reaching a cell whose *steepest-descent* chain ends at the
+    sea or at a pit strictly lower than this one. The cells on that path
+    flow along it. A cell can sit on several pits' paths along its chain
+    (its own terminal, the pit that one spills into, and so on); it
+    follows the lowest one's.
+  - **Why it can't loop:** each accepted outlet leads to strictly lower
+    pits. The natural `down` / `terminal` stay separate from the effective
+    `flow`, so a spill search never needs another pit's spill, and there's
+    no recursion that could deadlock a `OnceLock`.
+  - **`terminal` is capped at `MAX_CHAIN`** and returns `DRAINS_AWAY`. The
+    test `Valley` descends forever outside its ridges, and the uncapped walk
+    OOM-killed the test process, the same way the uncapped accumulation
+    walk once did.
+  `every_river_flows_on_until_it_reaches_the_open_sea` follows every river
+  cell over 200x200 cells on two seeds. `a_river_spills_out_of_a_hollow_
+  and_carries_on_to_the_sea` covers a synthetic hollow. Both go red with
+  spill paths ignored. Re-surveyed: 0 pit mouths on both seeds. Cold
+  generation on river-heavy seeds went from ~3 to ~5.5 ms per chunk (the
+  first spill searches; memoized after).
+  Ponds were deliberately left as standalone depressions rather than wired
+  to streams: the drainage network doesn't target them, and a river may
+  pass through one.
+  River size is also capped by *length* (`Network::length`, the longest
+  upstream path, computed in the same walk as accumulation): `size =
+  min(by_flow, by_length)`, so a short river stays a stream however much
+  land drains into it.
+- **Marshes and salt seas reuse the spill search's own byproduct: a
+  depression's footprint.** The user's framing was "have a solution for
+  when this happens instead of mangling the terrain." `drainage::Basin`
+  (what `spill` became) keeps every cell its flood covered before reaching
+  the outlet: exactly the lake the depression would hold filled to its
+  rim. `TerrainGenerator::wetland` turns a *river-fed* basin into:
+  - a **marsh** if it overflows. Ground at or below a low level (40th
+    percentile of the footprint's own ground) becomes flat mud, with
+    pools where a noise field says so. The river keeps its channel
+    through it.
+  - a **salt sea** if it keeps its water. A lake to just under the rim's
+    lowest point, on a salt bed, with salt flats on the shore, where
+    rivers end.
+  Things to keep in mind:
+  - **Whether a basin keeps its water must not depend on how much flows
+    into it** (`Landscape::keeps_its_water` sees only the pit's position
+    and the footprint's size). Spilling changes which cells flow where, so
+    keying it on accumulation would make the decision depend on itself.
+    "Is a river feeding it" is checked afterwards, only to decide whether
+    to *render* anything.
+  - **A footprint is whole 16-block cells,** and the first salt sea came
+    out with a ruler-straight shore along the cell grid (caught by an
+    ASCII map). `wetland_near` interpolates membership between the four
+    surrounding cell centres and wobbles the 0.5 threshold with noise.
+  - **Containment reuses the levee rule** through a new `near_wetland`
+    flag, deliberately separate from `near_river` (same two jobs, levee
+    and no caves, but a different reason).
+    `wetland_water_never_stands_beside_open_air` goes red without it.
+  - **A rarity test has to fail when the rarity knob is broken, not just
+    pass when it's set.** The first version asserted salt seas were at
+    most 20% of all wetlands and stayed green with `SALT_SEA_CHANCE = 1.0`,
+    because most basins are too small to qualify anyway, so size alone
+    kept it rare. It now compares among basins big enough to be one.
+  - **Memoize what every column asks.** Each column checks the basins of
+    its 9 nearest cells, and `is_sea` (continent noise + natural height)
+    was being re-evaluated on each. `Node::sea` brought generation back
+    from 6-9 ms to 3-6 ms per chunk.
+  Measured over 6x6 km on three seeds: 53-91 river-fed wetlands, 3-7 of
+  them salt seas (each a few thousand blocks²); marsh is ~0.5% of the
+  area.
+- **"The game got jittery" was measured, not guessed: a throwaway headless
+  benchmark (the real `WorldPlugin` + `LightPlugin` at render distance 8,
+  a player flying ~18 blocks/s, `app.update()` timed per frame) plus
+  temporary per-system timers (a drop-guard `Span` writing into a static
+  map, removed afterwards).** Before: p90 5.2 ms, p99 8.5 ms of main-thread
+  time, worst frames 20-30 ms. After: p90 2.4 ms, p99 5.3 ms, nothing over
+  16 ms. What it found, in order of size:
+  - **The light queue was growing to ~870,000 cells while moving and never
+    caught up.** `seed_new_chunk` queued every chunk-border cell, and,
+    since the undersea-seam fix made water cells no longer "full sky",
+    every underwater cell too. Each time the `VecDeque` outgrew its buffer
+    it was copied in one frame, which was the spike that ignored the time
+    budget. Lighting also lagged far behind the terrain. Now a cell is
+    queued only if a sideways neighbour is brighter. The fill already
+    gives exactly what arrives from above, and below can only be dimmer.
+    Neighbours across a seam are read from the loaded world, so a border
+    cell next to an already-lit chunk still gets queued. The backlog now
+    peaks under 10k. `streaming_while_moving_keeps_the_light_backlog_small`
+    goes red with the skip removed.
+  - **Count budgets aren't time budgets.** `process_light_updates` processed
+    up to 8,192 cells per frame whatever that cost (up to ~8 ms).
+    Background work now also stops at `LIGHT_TIME_BUDGET` (2.5 ms). Edits
+    (`urgent`) aren't held to it. `collect_gen_tasks` likewise stops taking
+    in finished chunks after `COLLECT_TIME_BUDGET`.
+  - **The seam pass did two `HashMap` lookups per cell, about 4,000 cells
+    per chunk landing.** The four neighbour chunks are now fetched once
+    and indexed directly.
+  - **Autosave scanned every chunk ever loaded** (24 ms with 1,100 loaded,
+    growing all session) and wrote JSON on the main thread. Now:
+    - `Chunk::touched` lets it skip chunks nothing has changed, whose only
+      fluid is what their snapshot restores.
+    - `FluidSaveCache` reuses a touched chunk's list until its `version`
+      changes.
+    - `persist` writes on the `IoTaskPool` for autosaves, synchronously on
+      exit. Writes are sequence-numbered and serialized behind one lock,
+      so an older in-flight autosave can never land after, and overwrite,
+      a newer save.
+    - `SaveStore::save_data` now writes a temp file and renames it into
+      place, so a cut-off background write can't truncate the save.
+  The benchmark can't see GPU mesh uploads, since it has no renderer. It
+  measured ~1.7 meshes per chunk entering view, so re-meshing isn't
+  running away, but upload cost on the user's machine is unmeasured from
+  here.
+- **Biomes come from climate maps through declarative tables, not from
+  one-off noise thresholds.** `biome::ClimateMaps` holds temperature and
+  humidity, both low-frequency, so similar climates clump.
+  `LAND_BIOMES`/`SEA_BIOMES` are rows of `ClimateBand` (temperature and
+  humidity ranges), and `classify` takes the first row that matches. A new
+  biome is a new row, and nothing else needs to change. Humidity drives
+  only grass tint so far; it's there for the next biome that needs it. The
+  old `BiomeNoise` resource became `world::WorldClimate`, and `mesh_chunk`
+  takes `&ClimateMaps`, so tint and biome read the same maps.
+  - **"Open sea" is its own check, not "water at sea level".**
+    `TerrainGenerator::is_open_sea` also requires no river, a `Normal`
+    surface, and the continent field to be (just about) ocean. Without
+    those, inland ponds, marsh pools and salt seas at sea level would have
+    been labelled `warm_sea` and the like. Sea biomes take over from the
+    region biome there, which is what ended the snow biome's ice sheets
+    running out over the ocean: the runtime freeze rule asks `biome_at`,
+    and sea biomes don't freeze water.
+  - **Shore ice and icebergs are both generation-time, keyed on the column's
+    biome.** Shore ice is a top-block swap where a cold sea is shallow (with
+    noise so the edge is patchy). Icebergs are an *overlay* sea biome:
+    `Icebergs` replaces `ColdSea` where a regional noise plus a coast bonus
+    clears a threshold, so they're commonest near land. Measured on seed 7:
+    ~50% of cold sea within 150 blocks of land is iceberg water, against
+    ~19% further out.
+  - **A clump test on simplex noise needs a ratio, not a tight absolute
+    bound.** Simplex has a built-in gradient even over short distances.
+    `climates_clump_together_over_hundreds_of_blocks` first required nearby
+    samples to differ by almost nothing and failed (0.113). It now asserts
+    near < 0.15 *and* far is at least 2.5x near, which is what "clumps"
+    actually means.
+  - **Waterfall curtains made an old leak test fail for the right reason.**
+    `a_river_running_into_an_old_chunk_ends_before_it_without_leaking`
+    flagged falling water beside air, which a curtain is supposed to have.
+    The test now checks only standing (source) water. Re-break-tested
+    after the change: disabling the river's dry fade still turns it red.
+    When a test that guards one rule starts failing because of a *newer*
+    rule, narrow it to what it was guarding, then prove it still catches
+    the original bug.
+- **A periodic check against GitHub's REST API eats the unauthenticated
+  rate limit (60 requests/hour per IP), and a 403 from it looks like an
+  outage.** The launcher re-checked the dev build every 60 s by listing all
+  releases through `api.github.com`, exactly the hourly allowance on its
+  own, so the Versions list and dev check both failed with a raw
+  `NetworkError: ... status: 403` (reported as a screenshot). The dev
+  release's tag and file names are fixed by `dev-build.yml`, so
+  `remote::fetch_dev_build` now reads `dev-manifest.json` and installs the
+  archive from `github.com/<owner>/<repo>/releases/download/dev/<file>`,
+  plain downloads that don't count against the API limit. A 404 there means
+  "no dev build yet". `selfupdate.rs` already did the same via
+  `raw.githubusercontent.com`. Only the Versions list still uses the API,
+  once per launch or Refresh, and `remote::explain_github_error` turns a
+  403/429 into "GitHub is limiting requests, wait then Refresh". Verified
+  with a throwaway live test that ran the real fetch + install against the
+  published dev release. Anything new that polls GitHub should use a
+  download URL like this, not the API.

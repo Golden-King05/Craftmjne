@@ -106,9 +106,16 @@ block *name*, not numeric id, so saves survive block-registry changes).
 `meta.json` also records the save format the world was written with, which
 is what lets every installed version safely share one saves folder — see
 "The launcher" below.
-Terrain itself is never saved — it's deterministic from the seed, so only the
-diff from procedural generation needs to persist. Autosaves every 30s and on
-returning to the menu.
+Each chunk's generated terrain is also saved, once, the first time it
+generates (`chunks/`, about 2.5 KB a chunk; see `snapshot.rs`). Revisiting a
+chunk loads it from there instead of generating it again, so an update that
+changes world generation never changes land you've already explored. Only
+unexplored chunks use the new generator, and where they meet old ones they
+blend in over about a chunk's width. Height eases from the old ground to the
+new terrain, and a river heading into old land runs dry a few blocks short
+of it. A world from before snapshots existed regenerates once with the
+current generator, then is protected the same way. Autosaves every 30s and
+on returning to the menu.
 
 ### Game modes
 
@@ -216,6 +223,82 @@ survives a save and reload. `mesher::rotated_tile` does the actual face
 remap; it's a no-op for any block whose `rotation` is `"none"`, so adding a
 second rotating block someday needs zero mesher changes.
 
+## World generation
+
+`src/terrain.rs` builds every column from a few independent layers, each its
+own noise stream:
+
+- **Continents and coasts.** A very low-frequency continent field splits
+  land from sea into several separate landmasses. A second field decides
+  each stretch of coast's *style*: gentle coasts fade into the sea over a
+  long beach. Steep ones are modelled on real sea cliffs: a near-vertical
+  face of bare rock under a thin line of soil; an edge that wanders in and
+  out into headlands and bays; a wave-cut notch at the foot of some faces;
+  a rocky wave-cut platform just under the water, littered with fallen
+  boulders; and sea stacks standing offshore. Steep slopes inland (and on
+  mountains) are bare rock too, rather than grass ledges.
+- **Mountain ranges.** A range mask (`mountainness`) decides where ranges
+  are; inside one, ridged noise lifts the terrain into ridgelines that reach
+  well above the snow line. Heights are eased toward the build ceiling
+  rather than clamped, so summits stay pointed instead of flattening.
+- **Climate maps.** Two broad, smooth noise maps cover the world
+  (`biome::ClimateMaps`): *temperature* (features over a kilometre or so)
+  and *humidity* (several hundred blocks). Because they change slowly, cold
+  places sit beside cold places and warm beside warm, so biomes come in
+  large clumps instead of speckles. Biomes are picked from them by
+  declarative tables (`biome::LAND_BIOMES`, `biome::SEA_BIOMES`): the first
+  row whose ranges contain a column's climate wins, so a new biome is one
+  more row. Grass color follows the same maps: lusher where it's humid,
+  yellower where it's dry, cooler near the cold regions.
+- **Seas by temperature.** Open ocean is a `warm_sea`, `temperate_sea` or
+  `cold_sea`, from the same temperature map as the land, so cold seas lie
+  off cold coasts. Seas no longer freeze over. A cold sea only grows a
+  patchy fringe of ice in its shallowest water (a couple of blocks deep)
+  along the shore. Further out it stays open.
+- **Icebergs.** An overlay biome on cold seas (`icebergs`). Bergs are
+  blobs of ice with snow on top, rising a few blocks out of the water and
+  reaching about three times as deep below it. They're most common hugging
+  cold coasts and thin out further offshore, though a few patches drift out
+  into open cold water.
+- **Biomes, layered by altitude.** Every land column has a *region* biome
+  from the climate (`plains`, or `snow` where it's cold). On a mountain
+  range, `biome::ALTITUDE_ZONES` replaces
+  it by height: the foot of a range keeps its region biome, and from height
+  44 up it becomes the desolate `mountain` biome (bare rock and scree, snow
+  caps from 50). Adding a band between them later (spruce on the lower
+  slopes) is one more table entry.
+- **Rivers.** Water is routed downhill over one unbounded drainage network
+  (`drainage.rs`, a 16-block grid that covers the whole world and is
+  computed lazily as you explore), and wherever enough of it gathers a river
+  forms with its own water surface. Rivers start in the uplands *above* sea
+  level and only ever end at the open ocean. A hollow that would trap the
+  water fills and spills over its lowest rim, with the river cutting
+  through, and the small ponds dotting the plains are just ponds: a river
+  may pass through one but never stops there. Rivers flow on,
+  easing down a block at a time with flowing water (the fluid sim's own
+  levels, so the surface slopes in eighths of a block rather than stepping
+  a whole one). Their
+  size depends on how much land drains into them *and* how far they've
+  run: a short stream stays a couple of blocks wide, and only a river that
+  has come a long way (over a kilometre, for some) grows to 16 blocks
+  across. How far a river has cut below its banks varies
+  along its length. Some run flush with the ground beside them; others sit
+  a few blocks down in a narrower valley, the start of a canyon.
+- **Marshes and salt seas.** Where a river runs into a depression that
+  overflows, its low ground becomes a marsh: flat mud dotted with shallow
+  pools, with the river winding through and on. Rarely, a big depression
+  keeps its water instead, as real inland seas with no outlet do. That
+  makes a salt sea: a lake on a salt bed ringed by salt flats, where the
+  rivers feeding it end. `/locate feature marsh` and `/locate feature
+  salt_sea` find them.
+- **Waterfalls.** Where a river drops 3 or more blocks between two points
+  of the network, it holds its level for as long as the ground can contain
+  it, then falls. Inland, that's a waterfall down a step in the valley. At
+  a cliff coast it's a waterfall off the cliff edge into the sea (the
+  tallest found so far is 28 blocks). The curtain is real water: falling
+  water under a flowing top cell, the same thing the fluid sim makes under
+  a ledge. In freezing biomes it's frozen solid.
+
 ## Chat and commands
 
 Press `T` to open a one-line chat box, or `/` to open it with `/` already
@@ -240,6 +323,16 @@ mainly as a place to type `/`-prefixed commands.
   hardcoded zero; see `texture_report::TextureReport`'s doc comment for
   why it should always read `0`). Below the counts it lists which specific
   names are yellow/red, in matching colors.
+- `/locate <biome|feature|structure> <name>` — reports the nearest match
+  (coordinates + distance) to wherever you're standing. `biome` searches
+  for `plains`/`snow`/`mountain` (the last being a range's desolate upper
+  slopes - see "World generation") and the seas `warm_sea`/`temperate_sea`/
+  `cold_sea`/`icebergs`; `feature` searches for
+  `river`/`ocean`/`mountain` against the generator's real terrain (the
+  same checks worldgen itself uses, not a second guess at what they mean -
+  `feature mountain` finds the range itself, `biome mountain` its peaks);
+  `structure` is reserved for when this game actually generates
+  structures to find, and currently just says so.
 
 Running *any* recognized command — even one that fails with a usage error —
 permanently sets a `cheats: true` flag on the world's `meta.json`
@@ -248,7 +341,15 @@ it's never shown in the UI and never cleared, and exists so a future
 achievements system can check it and skip a world that's had commands used in
 it. An unrecognized command name (a typo, not a real command) does not set it.
 
-Add a command by extending the match in `commands::execute`.
+Add a command with `CommandRegistry::register`/`CommandSpec::new` (see
+`commands::CommandRegistry::with_defaults` for the built-ins' own
+registration) — `commands.rs`'s module docs cover the full extension point,
+including the cheats-flag rule and how aliases work. The in-game chat
+dropdown (`T` or `/`, then start typing) autocompletes both the command
+name itself and, for a command built with `CommandSpec::with_arg_candidates`
+(`/locate` is the example), its arguments too - one token at a time, reusing
+whatever's already fully typed to decide what the next token's candidates
+are.
 
 ### Colored chat text
 
@@ -403,7 +504,9 @@ src/
 ├── blocks.rs    # BlockRegistry: loads blocks/*.json -> compiled flat lookup Tables
 ├── atlas.rs     # Painters resource: procedural tiles + optional textures/blocks/*.png -> RGBA atlas
 ├── icons.rs     # bakes isometric ItemModel::Default inventory icons from the atlas
-├── terrain.rs   # TerrainGenerator: heightmap, biomes, caves, ores, trees
+├── terrain.rs   # TerrainGenerator: heightmap, oceans, rivers, biomes, caves, ores, trees
+├── snapshot.rs  # saves each generated chunk once so later generator changes never alter it
+├── drainage.rs  # unbounded, lazily memoized drainage network rivers are routed over
 ├── light.rs     # LightPlugin: colored block light + sky light propagation
 ├── mesher.rs    # culled + AO-baked chunk meshing (runs on task pool)
 ├── world.rs     # WorldPlugin: ChunkMap, streaming, gen/mesh tasks, edits, save/load
@@ -415,7 +518,7 @@ src/
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
-├── commands.rs  # chat command dispatcher (/mode, /texture-report ...) + the cheats-flag rule
+├── commands.rs  # chat command dispatcher (/mode, /texture-report, /locate ...) + the cheats-flag rule
 ├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
 ├── texture_report.rs # TextureReport resource: green/yellow/red texture health, read by /texture-report
 └── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel
@@ -758,7 +861,12 @@ fn my_system(mut map: ResMut<craftmjne::world::ChunkMap>) {
 swap in your own generator there. Generation is deterministic per
 `(seed, chunk)` with no cross-chunk dependencies so chunks can generate in any
 order on any thread — keep that property (trees use a border margin for
-exactly this reason).
+exactly this reason). Rivers are the one deliberate exception: they need a
+real flow-accumulation simulation over a large area, so every chunk shares
+one `drainage::Network`, which memoizes per-cell flow in lazily-created
+tiles behind a mutex. Its results don't depend on which chunk asked first.
+See `drainage.rs`'s module doc comment before changing how generation is
+parallelized.
 
 ## Tests
 
