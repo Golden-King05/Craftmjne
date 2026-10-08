@@ -57,34 +57,66 @@ struct DevManifest {
     commit: String,
 }
 
-/// Looks up the current rolling dev build, if this platform has one.
-/// `Ok(None)` covers both "no 'dev' release exists yet" (the workflow has
-/// never run) and "it exists but hasn't built for this platform" - neither
-/// is an error, both just mean there's nothing to offer right now.
+/// Public download URL of a file attached to the rolling dev release.
+///
+/// This is `github.com/.../releases/download/...`, a plain file download,
+/// and deliberately *not* the REST API (`api.github.com`). The API allows
+/// only 60 unauthenticated requests an hour per IP address, and the dev
+/// build is re-checked every minute while the launcher is open - that alone
+/// used the whole allowance, so GitHub started answering 403 for everything,
+/// including the Versions list. The dev release's tag and file names are
+/// fixed by `.github/workflows/dev-build.yml`, so there's nothing the API
+/// would tell us that we can't name directly.
+fn dev_asset_url(file_name: &str) -> String {
+    format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{DEV_VERSION_SLOT}/{file_name}")
+}
+
+/// The archive `dev-build.yml` publishes for the platform we're running on.
+fn dev_archive_name() -> String {
+    let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
+    format!("craftmjne-{}.{ext}", self_update::get_target())
+}
+
+/// Whether a download error was GitHub saying the file doesn't exist.
+fn is_not_found(err: &str) -> bool {
+    err.contains("status: 404")
+}
+
+/// Looks up the current rolling dev build. `Ok(None)` means no dev release
+/// has been published yet (the workflow has never run) - not an error, just
+/// nothing to offer right now. A release that exists but has no archive for
+/// this platform (its build leg failed) shows up as an error at install
+/// time instead, since telling that apart up front would cost another
+/// request every minute.
 pub fn fetch_dev_build() -> Result<Option<DevBuild>, String> {
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
-        .build()
-        .and_then(|list| list.fetch())
-        .map_err(|e| e.to_string())?;
-
-    let Some(release) = releases.into_iter().find(|r| r.version == DEV_VERSION_SLOT) else {
-        return Ok(None);
+    let bytes = match download_bytes(&dev_asset_url("dev-manifest.json")) {
+        Ok(bytes) => bytes,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => return Err(err),
     };
-    let target = self_update::get_target();
-    let Some(asset) = release.asset_for(target, None) else {
-        return Ok(None);
-    };
-    let Some(manifest_asset) = release.assets.iter().find(|a| a.name == "dev-manifest.json") else {
-        return Ok(None);
-    };
-
-    let bytes = download_bytes(&manifest_asset.download_url)?;
     let manifest: DevManifest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let short_commit = manifest.commit.chars().take(7).collect();
 
-    Ok(Some(DevBuild { commit: manifest.commit, short_commit, download_url: asset.download_url }))
+    Ok(Some(DevBuild {
+        commit: manifest.commit,
+        short_commit,
+        download_url: dev_asset_url(&dev_archive_name()),
+    }))
+}
+
+/// Turns a GitHub error into something a player can act on. A 403 or 429
+/// from the API almost always means its limit of 60 requests an hour for
+/// unauthenticated clients was hit (by this launcher, or by anything else
+/// on the same network) - "NetworkError: ... status: 403" reads like
+/// GitHub is down or the repo is gone, which it isn't.
+pub fn explain_github_error(err: &str) -> String {
+    if err.contains("status: 403") || err.contains("status: 429") {
+        "GitHub is limiting requests from your network for now (it allows 60 an hour \
+         without signing in). Wait a while, then press Refresh."
+            .to_string()
+    } else {
+        err.to_string()
+    }
 }
 
 /// Downloads a small file (not a release archive - no extraction) fully
@@ -274,6 +306,37 @@ mod tests {
         assert!(!looks_like_a_game_version("launcher-v1.0.2"));
         assert!(!looks_like_a_game_version(DEV_VERSION_SLOT));
         assert!(!looks_like_a_game_version(""));
+    }
+
+    #[test]
+    fn dev_build_files_are_fetched_as_plain_downloads_not_api_calls() {
+        let manifest = dev_asset_url("dev-manifest.json");
+        assert_eq!(manifest, "https://github.com/golden-king05/craftmjne/releases/download/dev/dev-manifest.json");
+        assert!(!manifest.contains("api.github.com"));
+        // Must match what dev-build.yml packages, extension included -
+        // `Extract` picks its decompressor from it.
+        let archive = dev_asset_url(&dev_archive_name());
+        assert!(archive.ends_with(&format!("/dev/craftmjne-{}.zip", self_update::get_target()))
+            || archive.ends_with(&format!("/dev/craftmjne-{}.tar.gz", self_update::get_target())));
+        assert!(archive_name(&archive).starts_with("craftmjne-"));
+    }
+
+    #[test]
+    fn only_a_404_counts_as_no_dev_build_yet() {
+        assert!(is_not_found("Download request failed with status: 404"));
+        assert!(!is_not_found("Download request failed with status: 403"));
+        assert!(!is_not_found("error sending request for url"));
+    }
+
+    #[test]
+    fn a_rate_limited_request_is_explained_not_shown_raw() {
+        let raw = "NetworkError: api request failed with status: 403 - for: \"https://api.github.com/repos/golden-king05/craftmjne/releases?per_page=100\"";
+        let friendly = explain_github_error(raw);
+        assert!(friendly.contains("60 an hour"), "{friendly}");
+        assert!(!friendly.contains("NetworkError"));
+        // Anything else passes through untouched, so a real failure still
+        // says what it was.
+        assert_eq!(explain_github_error("dns error"), "dns error");
     }
 
     #[test]

@@ -146,7 +146,7 @@ impl LauncherApp {
         for done in self.jobs.drain() {
             match done {
                 JobDone::Releases(Ok(list)) => self.releases = Releases::Loaded(list),
-                JobDone::Releases(Err(err)) => self.releases = Releases::Failed(err),
+                JobDone::Releases(Err(err)) => self.releases = Releases::Failed(remote::explain_github_error(&err)),
                 JobDone::Installed { version, result } => {
                     self.downloads.finish(&version);
                     self.status = match result {
@@ -176,7 +176,9 @@ impl LauncherApp {
                     self.dev_build =
                         DevBuildState::Failed("No dev build has been published for this platform yet.".to_string());
                 }
-                JobDone::DevBuild(Err(err)) => self.dev_build = DevBuildState::Failed(err),
+                JobDone::DevBuild(Err(err)) => {
+                    self.dev_build = DevBuildState::Failed(remote::explain_github_error(&err))
+                }
                 JobDone::DevInstalled { commit, result } => {
                     self.downloads.finish(remote::DEV_VERSION_SLOT);
                     self.status = match result {
