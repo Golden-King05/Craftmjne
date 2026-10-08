@@ -48,12 +48,12 @@ pub struct WorldGen(pub Arc<TerrainGenerator>);
 #[derive(Resource)]
 pub struct ChunkSnapshots(pub Arc<ChunkStore>);
 
-/// This world's biome noise source (`biome::grass_tint`'s input), seeded
-/// once alongside `WorldGen` and shared read-only with every mesh task -
+/// This world's climate maps (`biome::grass_tint`'s input), seeded once
+/// alongside `WorldGen` and shared read-only with every mesh task -
 /// same lifecycle as `Tables`, and for the same reason: expensive-ish to
 /// build (permutation tables), cheap to share via `Arc` once built.
 #[derive(Resource, Clone)]
-pub struct BiomeNoise(pub Arc<crate::noise::SimplexNoise>);
+pub struct WorldClimate(pub Arc<crate::biome::ClimateMaps>);
 
 /// Non-render atlas data (pixel buffer + name->tile map), built at startup.
 #[derive(Resource)]
@@ -775,7 +775,7 @@ fn enter_world(
         Some(store.chunks_dir(&active.slug)),
         &registry,
     ))));
-    commands.insert_resource(BiomeNoise(Arc::new(crate::biome::noise_for_seed(active.meta.seed))));
+    commands.insert_resource(WorldClimate(Arc::new(crate::biome::ClimateMaps::for_seed(active.meta.seed))));
     commands.insert_resource(active.meta.mode);
 
     for e in &tasks {
@@ -1147,7 +1147,7 @@ fn stream_chunks(
     tables: Res<BlockTables>,
     gen: Res<WorldGen>,
     snapshots: Res<ChunkSnapshots>,
-    biome_noise: Res<BiomeNoise>,
+    climate: Res<WorldClimate>,
     players: Query<&Player>,
 ) {
     let Ok(player) = players.single() else { return };
@@ -1213,9 +1213,9 @@ fn stream_chunks(
         let version = chunk.version;
         map.mesh_in_flight += 1;
         let tables = tables.0.clone();
-        let biome_noise = biome_noise.0.clone();
+        let climate = climate.0.clone();
         let chunk_origin = (coord.x * CHUNK_SIZE, coord.y * CHUNK_SIZE);
-        let task = pool.spawn(async move { mesh_chunk(&padded, &tables, &biome_noise, chunk_origin) });
+        let task = pool.spawn(async move { mesh_chunk(&padded, &tables, &climate, chunk_origin) });
         commands.spawn(MeshTask { coord, version, task });
     }
 
@@ -1558,14 +1558,14 @@ mod tests {
     }
 
     /// Finds a real `(x, z)` column that classifies as `want` for this
-    /// noise - same scanning grid `biome.rs`'s own `region_noise_area_
-    /// fractions_land_in_a_reasonable_range` test already confirmed turns
+    /// climate - same scanning grid `biome.rs`'s own `snow_covers_a_real_
+    /// but_minority_share_of_land` test already confirmed turns
     /// up a real mix of both biomes, so this doesn't have to hand-pick
     /// coordinates that happen to work for one specific seed.
-    fn find_biome_column(noise: &crate::noise::SimplexNoise, want: biome::Biome) -> IVec3 {
+    fn find_biome_column(noise: &biome::ClimateMaps, want: biome::Biome) -> IVec3 {
         for i in -40..40 {
             for j in -40..40 {
-                let (x, z) = (i * 97, j * 131);
+                let (x, z) = (i * 197, j * 231);
                 if biome::region_biome_at(noise, x, z) == want {
                     return IVec3::new(x, 10, z);
                 }
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_converts_an_exposed_source_to_ice_in_a_freezing_biome() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
@@ -1591,7 +1591,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_leaves_plains_water_as_water() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Plains);
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_leaves_flowing_water_alone_even_in_a_freezing_biome() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, _stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, 3); // flowing, not a source
@@ -1617,7 +1617,7 @@ mod tests {
 
     #[test]
     fn try_freeze_cell_leaves_covered_water_alone_even_in_a_freezing_biome() {
-        let noise = biome::region_noise_for_seed(1);
+        let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, stone, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);

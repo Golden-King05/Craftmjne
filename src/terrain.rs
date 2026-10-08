@@ -137,6 +137,28 @@ const RIVER_HALF_WIDTH: (f64, f64) = (1.0, 8.0);
 /// How far past `OCEAN_THRESHOLD` the continent field has to be before
 /// drainage counts a place as the sea a river can end in - see `is_sea`.
 const OPEN_SEA_MARGIN: f32 = 0.015;
+/// How far past `OCEAN_THRESHOLD` (inland) sea-level water still counts as
+/// the sea for its biome - about 15 blocks, taking in the shallows at the
+/// shore and a cliff's platform.
+const SEA_BIOME_REACH: f32 = 0.005;
+/// Shallow water this deep or less in a cold sea freezes - shore ice along
+/// cold coasts, never across the open sea. A noise field wobbles it, so it
+/// comes in patches.
+const SHORE_ICE_DEPTH: f64 = 2.5;
+/// Iceberg waters: feature size of the patches, how strongly being near a
+/// coast favours them (within `ICEBERG_COAST_REACH` blocks of land), and
+/// the threshold the two together must clear.
+const ICEBERG_REGION_SCALE: f64 = 0.004;
+const ICEBERG_COAST_REACH: f64 = 300.0;
+const ICEBERG_COAST_BONUS: f64 = 0.5;
+const ICEBERG_THRESHOLD: f64 = 0.35;
+/// Individual icebergs: blob size, how much of the noise field is berg,
+/// and how fast they rise toward their middles. Most of a berg's bulk is
+/// below the water (`ICEBERG_KEEL` times its height above).
+const ICEBERG_SCALE: f64 = 0.07;
+const ICEBERG_BLOB: f64 = 0.4;
+const ICEBERG_RISE: f64 = 30.0;
+const ICEBERG_KEEL: i32 = 3;
 /// A depression has to cover at least this many drainage cells filled to
 /// its rim to become a salt sea, and then only this often - most overflow
 /// and become marshes instead.
@@ -409,7 +431,7 @@ pub struct TerrainGenerator {
     cave_b: SimplexNoise,
     /// Which *region* biome a column belongs to before altitude zones - see
     /// `biome.rs`'s module docs and `biome_at`.
-    biome: SimplexNoise,
+    climate: biome::ClimateMaps,
     /// The world-wide drainage network rivers are drawn from - see
     /// `drainage.rs`. Lazily filled and memoized as chunks ask; the one
     /// piece of terrain generation that isn't purely a function of its own
@@ -459,7 +481,7 @@ impl TerrainGenerator {
             river_character: SimplexNoise::new(seed ^ 0xd3a2_646c),
             cave_a: SimplexNoise::new(seed ^ 0x85ebca6b),
             cave_b: SimplexNoise::new(seed ^ 0xc2b2ae35),
-            biome: biome::region_noise_for_seed(seed),
+            climate: biome::ClimateMaps::for_seed(seed),
             drainage: crate::drainage::Network::new(seed),
             wetlands: Mutex::new(HashMap::new()),
         }
@@ -597,7 +619,7 @@ impl TerrainGenerator {
     /// boost, before any river has cut into it. What `drainage.rs`
     /// routes water across, and what a river's banks are measured against.
     fn natural_height(&self, wx: i32, wz: i32) -> f64 {
-        let boost = biome::drier_strength(&self.biome, wx, wz) as f64 * DRIER_HEIGHT_BOOST;
+        let boost = biome::drier_strength(&self.climate, wx, wz) as f64 * DRIER_HEIGHT_BOOST;
         (self.base_height(wx, wz) + boost).clamp(2.0, (WORLD_HEIGHT - 8) as f64)
     }
 
@@ -969,18 +991,67 @@ impl TerrainGenerator {
         self.column_profile(wx, wz).height
     }
 
-    /// The biome world column `(x, z)` really is: its region biome
-    /// (`biome::region_biome_at`), replaced by an altitude zone's biome on
-    /// a mountain range's upper slopes (`biome::zoned_biome`). The one
-    /// place a column's full biome is decided - worldgen and `world.rs`'s
-    /// runtime freezing rule both ask this, never the region noise alone.
+    /// The biome world column `(x, z)` really is. The one place a column's
+    /// full biome is decided - worldgen and `world.rs`'s runtime freezing
+    /// rule both ask this, never a climate map alone:
+    ///
+    /// - open sea takes its sea biome from the climate (`biome::
+    ///   sea_biome_at`), with icebergs overlaid on cold water near cold
+    ///   coasts (`in_iceberg_waters`);
+    /// - land (lakes and ponds included) takes its region biome
+    ///   (`biome::region_biome_at`), replaced by an altitude zone's on a
+    ///   mountain range's upper slopes (`biome::zoned_biome`).
     pub fn biome_at(&self, wx: i32, wz: i32) -> Biome {
-        self.biome_with_height(wx, wz, self.effective_height(wx, wz))
+        self.biome_of(wx, wz, &self.column_profile(wx, wz))
     }
 
-    /// `biome_at`, for a caller that already knows the column's height.
-    fn biome_with_height(&self, wx: i32, wz: i32, height: i32) -> Biome {
-        biome::zoned_biome(biome::region_biome_at(&self.biome, wx, wz), self.mountainness(wx, wz), height)
+    /// `biome_at`, for a caller that already has the column's profile.
+    fn biome_of(&self, wx: i32, wz: i32, col: &ColumnProfile) -> Biome {
+        if self.is_open_sea(wx, wz, col) {
+            let sea = biome::sea_biome_at(&self.climate, wx, wz);
+            return if sea == Biome::ColdSea && self.in_iceberg_waters(wx, wz) { Biome::Icebergs } else { sea };
+        }
+        biome::zoned_biome(biome::region_biome_at(&self.climate, wx, wz), self.mountainness(wx, wz), col.height)
+    }
+
+    /// Whether a column is the sea itself - water at sea level on the
+    /// ocean side of the coast - rather than a lake or pond on land, which
+    /// keeps its land biome (a pond in snow country still freezes over).
+    /// The small `SEA_BIOME_REACH` past the threshold takes in the shallows
+    /// right at the shore, a cliff's wave-cut platform among them.
+    fn is_open_sea(&self, wx: i32, wz: i32, col: &ColumnProfile) -> bool {
+        col.water_top == Some(SEA_LEVEL)
+            && !col.in_river
+            && col.surface == Surface::Normal
+            && self.continent_value(wx, wz) < OCEAN_THRESHOLD + SEA_BIOME_REACH
+    }
+
+    /// Roughly how far `(wx, wz)` lies out to sea, in blocks: the continent
+    /// field's distance past the threshold over its local gradient - the
+    /// same estimate cliffs use for "inland of the edge".
+    fn offshore_distance(&self, wx: i32, wz: i32) -> f64 {
+        let c = |dx: i32, dz: i32| self.continent_value(wx + dx, wz + dz) as f64;
+        let gradient = (((c(4, 0) - c(-4, 0)) / 8.0).powi(2) + ((c(0, 4) - c(0, -4)) / 8.0).powi(2)).sqrt();
+        (OCEAN_THRESHOLD as f64 - c(0, 0)) / gradient.max(1e-6)
+    }
+
+    /// Whether cold sea at `(wx, wz)` is iceberg waters. Icebergs calve off
+    /// glaciers and ice shelves, so they're thickest near a cold coast and
+    /// thin out across the open sea: patches of iceberg waters come from a
+    /// noise field, given a strong head start within `ICEBERG_COAST_REACH`
+    /// of land.
+    fn in_iceberg_waters(&self, wx: i32, wz: i32) -> bool {
+        let n = self.coast.fbm2(wx as f64 * ICEBERG_REGION_SCALE + 913.1, wz as f64 * ICEBERG_REGION_SCALE - 377.4, 2);
+        let near_coast = (1.0 - self.offshore_distance(wx, wz) / ICEBERG_COAST_REACH).clamp(0.0, 1.0);
+        n + ICEBERG_COAST_BONUS * near_coast > ICEBERG_THRESHOLD
+    }
+
+    /// How tall an iceberg stands at `(wx, wz)` above the water, if one
+    /// does - `0` for none. Bergs are blobs of a fine noise field, tallest
+    /// at their middles.
+    fn iceberg_height(&self, wx: i32, wz: i32) -> i32 {
+        let n = self.coast.fbm2(wx as f64 * ICEBERG_SCALE - 41.7, wz as f64 * ICEBERG_SCALE + 655.2, 2);
+        if n <= ICEBERG_BLOB { 0 } else { 1 + ((n - ICEBERG_BLOB) * ICEBERG_RISE) as i32 }
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> GeneratedChunk {
@@ -1026,7 +1097,7 @@ impl TerrainGenerator {
                 let rock = matches!(coast, CoastPart::Platform | CoastPart::Stack) || (drop >= 4 && rise >= 3);
                 heights[x + CS * z] = h;
                 columns.push(ColumnSurface { ground: h, water: col.water_top });
-                let biome = self.biome_with_height(wx, wz, h);
+                let biome = self.biome_of(wx, wz, &col);
                 let underwater = col.water_top.is_some();
 
                 let beach = h <= SEA_LEVEL + 1 || col.river_bank;
@@ -1101,6 +1172,26 @@ impl TerrainGenerator {
                     let freezes = biome.freezes_water() && col.surface != Surface::Salt;
                     for y in (h + 1)..=top {
                         blocks[base + y as usize] = if y == top && freezes { ids.ice } else { ids.water };
+                    }
+                    if biome.is_cold_sea() {
+                        // Shore ice: a cold sea's shallows freeze, in
+                        // patches, while its open water stays open.
+                        let depth = (top - h) as f64;
+                        let patchy = self.coast.fbm2(wx as f64 * 0.08 + 17.0, wz as f64 * 0.08 - 3.0, 2) * 2.0;
+                        if depth + patchy <= SHORE_ICE_DEPTH {
+                            blocks[base + top as usize] = ids.ice;
+                        }
+                    }
+                    if biome == Biome::Icebergs {
+                        // An iceberg: snow-capped ice standing out of the
+                        // water, with most of its bulk below.
+                        let rise = self.iceberg_height(wx, wz);
+                        if rise > 0 {
+                            let crown = (top + rise).min(WORLD_HEIGHT - 2);
+                            for y in (h + 1).max(top - rise * ICEBERG_KEEL)..=crown {
+                                blocks[base + y as usize] = if y == crown { ids.snow } else { ids.ice };
+                            }
+                        }
                     }
                     if !freezes {
                         fluid[base + top as usize] = col.top_level;
@@ -1471,12 +1562,17 @@ impl TerrainGenerator {
     /// altitude could actually change the answer (inside a mountain range).
     pub fn locate_biome(&self, target: Biome, origin_x: i32, origin_z: i32) -> Option<(i32, i32)> {
         locate_nearest(origin_x, origin_z, |x, z| {
-            let region = biome::region_biome_at(&self.biome, x, z);
-            let range = self.mountainness(x, z);
-            if range < biome::MOUNTAIN_RANGE_THRESHOLD {
-                return region == target;
-            }
-            biome::zoned_biome(region, range, self.effective_height(x, z)) == target
+            // The climate maps are cheap: only a column that could be the
+            // target by climate gets its real profile computed.
+            let candidate = if target.is_sea() {
+                let sea = biome::sea_biome_at(&self.climate, x, z);
+                sea == target || (target == Biome::Icebergs && sea == Biome::ColdSea)
+            } else if target == Biome::Mountain {
+                self.mountainness(x, z) >= biome::MOUNTAIN_RANGE_THRESHOLD
+            } else {
+                biome::region_biome_at(&self.climate, x, z) == target
+            };
+            candidate && self.biome_at(x, z) == target
         })
     }
 }
@@ -2103,7 +2199,11 @@ mod tests {
                 for lx in 0..CHUNK_SIZE {
                     let (x, z) = (cx * CHUNK_SIZE + lx, cz * CHUNK_SIZE + lz);
                     for y in (SEA_LEVEL + 1)..WORLD_HEIGHT {
-                        if at(x, y, z) != Some(water) {
+                        // Standing water only: a waterfall's curtain (falling
+                        // water under a flowing top) is meant to pour down an
+                        // open face.
+                        let i = block_index((x - cx * CHUNK_SIZE) as usize, y as usize, (z - cz * CHUNK_SIZE) as usize);
+                        if at(x, y, z) != Some(water) || chunk.fluid[i] != FLUID_SOURCE {
                             continue;
                         }
                         for (sx, sz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -2416,5 +2516,90 @@ mod tests {
             }
         }
         assert!(checked > 100, "only {checked} wetland water columns checked");
+    }
+
+    /// Cold country meets a cold sea that stays open: a snowy coast's
+    /// shallows ice over, the open water beyond never does - no more sheets
+    /// of ice stretching out to sea. Checked on the generated blocks of
+    /// every chunk along a stretch of cold coast.
+    #[test]
+    fn a_cold_sea_freezes_only_in_its_shallows() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let (mut frozen, mut open, mut chunks) = (0, 0, 0);
+        'search: for z in (-6000..6000).step_by(160) {
+            for x in (-6000..6000).step_by(160) {
+                let col = gen.column_profile(x, z);
+                if gen.biome_of(x, z, &col) != Biome::ColdSea || gen.offshore_distance(x, z) > 60.0 {
+                    continue;
+                }
+                let (cx, cz) = (x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+                let chunk = gen.generate(cx, cz);
+                chunks += 1;
+                for lz in 0..CS {
+                    for lx in 0..CS {
+                        let (wx, wz) = (cx * CHUNK_SIZE + lx as i32, cz * CHUNK_SIZE + lz as i32);
+                        let col = gen.column_profile(wx, wz);
+                        if gen.biome_of(wx, wz, &col) != Biome::ColdSea {
+                            continue;
+                        }
+                        let top = chunk.blocks[block_index(lx, SEA_LEVEL as usize, lz)];
+                        if top == gen.ids.ice {
+                            frozen += 1;
+                            assert!(SEA_LEVEL - col.height <= 4, "ice over {} blocks of water at ({wx}, {wz})", SEA_LEVEL - col.height);
+                        } else if top == gen.ids.water {
+                            open += 1;
+                        }
+                    }
+                }
+                if chunks >= 30 {
+                    break 'search;
+                }
+            }
+        }
+        assert!(frozen > 0 && open > frozen, "{frozen} frozen and {open} open cold-sea columns in {chunks} coastal chunks");
+    }
+
+    /// Icebergs drift in cold seas, thickest near the coasts they calve
+    /// from: iceberg waters cover a much larger share of cold sea near land
+    /// than out on the open water. And a berg is really there - ice
+    /// standing above the water, capped with snow.
+    #[test]
+    fn icebergs_crowd_cold_coasts_and_stand_out_of_the_water() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let (mut near, mut near_bergs, mut far, mut far_bergs) = (0, 0, 0, 0);
+        let mut berg = None;
+        for z in (-6000..6000).step_by(40) {
+            for x in (-6000..6000).step_by(40) {
+                let col = gen.column_profile(x, z);
+                let biome = gen.biome_of(x, z, &col);
+                if !biome.is_cold_sea() {
+                    continue;
+                }
+                let is_berg = biome == Biome::Icebergs;
+                if gen.offshore_distance(x, z) < 150.0 {
+                    near += 1;
+                    near_bergs += is_berg as i32;
+                } else {
+                    far += 1;
+                    far_bergs += is_berg as i32;
+                }
+                if is_berg && berg.is_none() && gen.iceberg_height(x, z) >= 3 {
+                    berg = Some((x, z, col.height));
+                }
+            }
+        }
+        let (near_share, far_share) = (near_bergs as f64 / near as f64, far_bergs as f64 / far as f64);
+        assert!(far_bergs > 0, "no icebergs out at sea at all");
+        assert!(near_share > 1.5 * far_share, "iceberg waters cover {near_share:.2} of cold sea near coasts, {far_share:.2} far out");
+
+        let (x, z, floor) = berg.expect("no iceberg tall enough to check");
+        let chunk = gen.generate(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+        let at = |y: i32| chunk.blocks[block_index(x.rem_euclid(CHUNK_SIZE) as usize, y as usize, z.rem_euclid(CHUNK_SIZE) as usize)];
+        let rise = gen.iceberg_height(x, z);
+        assert_eq!(at(SEA_LEVEL + rise), gen.ids.snow, "a berg's crown is snow");
+        assert_eq!(at(SEA_LEVEL + 1), gen.ids.ice, "ice stands above the water");
+        assert_eq!(at((SEA_LEVEL - 1).max(floor + 1)), gen.ids.ice, "and carries on below it");
     }
 }

@@ -2122,3 +2122,41 @@ etc.) instead of inventing a new approach:
   measured ~1.7 meshes per chunk entering view, so re-meshing isn't
   running away, but upload cost on the user's machine is unmeasured from
   here.
+- **Biomes come from climate maps through declarative tables, not from
+  one-off noise thresholds.** `biome::ClimateMaps` holds temperature and
+  humidity, both low-frequency, so similar climates clump.
+  `LAND_BIOMES`/`SEA_BIOMES` are rows of `ClimateBand` (temperature and
+  humidity ranges), and `classify` takes the first row that matches. A new
+  biome is a new row, and nothing else needs to change. Humidity drives
+  only grass tint so far; it's there for the next biome that needs it. The
+  old `BiomeNoise` resource became `world::WorldClimate`, and `mesh_chunk`
+  takes `&ClimateMaps`, so tint and biome read the same maps.
+  - **"Open sea" is its own check, not "water at sea level".**
+    `TerrainGenerator::is_open_sea` also requires no river, a `Normal`
+    surface, and the continent field to be (just about) ocean. Without
+    those, inland ponds, marsh pools and salt seas at sea level would have
+    been labelled `warm_sea` and the like. Sea biomes take over from the
+    region biome there, which is what ended the snow biome's ice sheets
+    running out over the ocean: the runtime freeze rule asks `biome_at`,
+    and sea biomes don't freeze water.
+  - **Shore ice and icebergs are both generation-time, keyed on the column's
+    biome.** Shore ice is a top-block swap where a cold sea is shallow (with
+    noise so the edge is patchy). Icebergs are an *overlay* sea biome:
+    `Icebergs` replaces `ColdSea` where a regional noise plus a coast bonus
+    clears a threshold, so they're commonest near land. Measured on seed 7:
+    ~50% of cold sea within 150 blocks of land is iceberg water, against
+    ~19% further out.
+  - **A clump test on simplex noise needs a ratio, not a tight absolute
+    bound.** Simplex has a built-in gradient even over short distances.
+    `climates_clump_together_over_hundreds_of_blocks` first required nearby
+    samples to differ by almost nothing and failed (0.113). It now asserts
+    near < 0.15 *and* far is at least 2.5x near, which is what "clumps"
+    actually means.
+  - **Waterfall curtains made an old leak test fail for the right reason.**
+    `a_river_running_into_an_old_chunk_ends_before_it_without_leaking`
+    flagged falling water beside air, which a curtain is supposed to have.
+    The test now checks only standing (source) water. Re-break-tested
+    after the change: disabling the river's dry fade still turns it red.
+    When a test that guards one rule starts failing because of a *newer*
+    rule, narrow it to what it was guarding, then prove it still catches
+    the original bug.

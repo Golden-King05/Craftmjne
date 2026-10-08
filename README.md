@@ -241,8 +241,28 @@ own noise stream:
   are; inside one, ridged noise lifts the terrain into ridgelines that reach
   well above the snow line. Heights are eased toward the build ceiling
   rather than clamped, so summits stay pointed instead of flattening.
-- **Biomes, layered by altitude.** Every column has a *region* biome
-  (`plains` or `snow`). On a mountain range, `biome::ALTITUDE_ZONES` replaces
+- **Climate maps.** Two broad, smooth noise maps cover the world
+  (`biome::ClimateMaps`): *temperature* (features over a kilometre or so)
+  and *humidity* (several hundred blocks). Because they change slowly, cold
+  places sit beside cold places and warm beside warm, so biomes come in
+  large clumps instead of speckles. Biomes are picked from them by
+  declarative tables (`biome::LAND_BIOMES`, `biome::SEA_BIOMES`): the first
+  row whose ranges contain a column's climate wins, so a new biome is one
+  more row. Grass color follows the same maps: lusher where it's humid,
+  yellower where it's dry, cooler near the cold regions.
+- **Seas by temperature.** Open ocean is a `warm_sea`, `temperate_sea` or
+  `cold_sea`, from the same temperature map as the land, so cold seas lie
+  off cold coasts. Seas no longer freeze over. A cold sea only grows a
+  patchy fringe of ice in its shallowest water (a couple of blocks deep)
+  along the shore. Further out it stays open.
+- **Icebergs.** An overlay biome on cold seas (`icebergs`). Bergs are
+  blobs of ice with snow on top, rising a few blocks out of the water and
+  reaching about three times as deep below it. They're most common hugging
+  cold coasts and thin out further offshore, though a few patches drift out
+  into open cold water.
+- **Biomes, layered by altitude.** Every land column has a *region* biome
+  from the climate (`plains`, or `snow` where it's cold). On a mountain
+  range, `biome::ALTITUDE_ZONES` replaces
   it by height: the foot of a range keeps its region biome, and from height
   44 up it becomes the desolate `mountain` biome (bare rock and scree, snow
   caps from 50). Adding a band between them later (spruce on the lower
@@ -306,7 +326,8 @@ mainly as a place to type `/`-prefixed commands.
 - `/locate <biome|feature|structure> <name>` — reports the nearest match
   (coordinates + distance) to wherever you're standing. `biome` searches
   for `plains`/`snow`/`mountain` (the last being a range's desolate upper
-  slopes - see "World generation"); `feature` searches for
+  slopes - see "World generation") and the seas `warm_sea`/`temperate_sea`/
+  `cold_sea`/`icebergs`; `feature` searches for
   `river`/`ocean`/`mountain` against the generator's real terrain (the
   same checks worldgen itself uses, not a second guess at what they mean -
   `feature mountain` finds the range itself, `biome mountain` its peaks);
