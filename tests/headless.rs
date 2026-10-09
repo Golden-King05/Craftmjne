@@ -501,16 +501,25 @@ fn surface_y(app: &App, x: i32, z: i32) -> i32 {
 /// instead of assuming a hardcoded one is dry, since where the generator
 /// puts lakes is not this test's business.
 fn open_air_above_ground(app: &App) -> IVec3 {
+    open_air_run(app, 0)
+}
+
+/// Like `open_air_above_ground`, but with `len` more cells of air running
+/// east from it - for a test that watches light spread sideways. On sloping
+/// ground the cells a few blocks east of the first dry column can be inside
+/// the hillside, which is dark however correct the lighting is.
+fn open_air_run(app: &App, len: i32) -> IVec3 {
+    let map = app.world().resource::<ChunkMap>();
     for z in 0..CHUNK_SIZE {
-        for x in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE - len {
             let y = surface_y(app, x, z);
             let pos = IVec3::new(x, y + 1, z);
-            if app.world().resource::<ChunkMap>().get_block(pos) == craftmjne::blocks::AIR {
+            if (0..=len).all(|dx| map.get_block(pos + IVec3::X * dx) == craftmjne::blocks::AIR) {
                 return pos;
             }
         }
     }
-    panic!("no dry column found in the spawn chunk");
+    panic!("no dry column with {len} blocks of open air east of it in the spawn chunk");
 }
 
 #[test]
@@ -550,7 +559,7 @@ fn a_placed_torch_lights_the_cells_around_it_in_its_own_color() {
     let mut app = headless_app(&temp);
     run_until_lit(&mut app);
 
-    let torch_pos = open_air_above_ground(&app);
+    let torch_pos = open_air_run(&app, 4);
     let torch = app.world().resource::<BlockRegistry>().id("torch");
     {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
@@ -577,8 +586,7 @@ fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
     let mut app = headless_app(&temp);
     run_until_lit(&mut app);
 
-    let y = surface_y(&app, 8, 8);
-    let torch_pos = IVec3::new(8, y + 1, 8);
+    let torch_pos = open_air_run(&app, 3);
     let probe = torch_pos + IVec3::X * 3;
     let torch = app.world().resource::<BlockRegistry>().id("torch");
     {

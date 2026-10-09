@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 pub const CHUNK_SIZE: i32 = 16; // chunk footprint in blocks (X and Z)
-pub const WORLD_HEIGHT: i32 = 64; // world height in blocks (one chunk = full column)
+pub const WORLD_HEIGHT: i32 = 128; // world height in blocks (one chunk = full column)
 pub const SEA_LEVEL: i32 = 26;
 
 pub const ATLAS_TILES: usize = 16; // atlas is ATLAS_TILES x ATLAS_TILES tiles

@@ -2177,3 +2177,66 @@ etc.) instead of inventing a new approach:
   with a throwaway live test that ran the real fetch + install against the
   published dev release. Anything new that polls GitHub should use a
   download URL like this, not the API.
+- **"No mountains" was the world height, not the mountain code.** The world
+  was 64 tall with the sea at 26, so land could rise only 38 blocks.
+  `WORLD_HEIGHT` is now 128, with the sea left at 26 on purpose: moving the
+  sea would have left every explored chunk's coast and rivers at the wrong
+  level. Things that went with it:
+  - **Snapshots record their height and load shorter ones.** `parse_header`
+    used to reject any height but the current one, which would have
+    silently regenerated every explored chunk (breaking "explored land never
+    changes"). `decode` now remaps a shorter chunk into the taller layout
+    with air above. `a_snapshot_saved_when_the_world_was_shorter_still_
+    loads_as_it_was` writes a real 64-tall file via `encode_at`, and goes
+    red with the remap removed.
+  - **128 is also a format limit.** Snapshot fluid levels are stored as a
+    `u16` cell index; 16x16x128 = 32,768 fits, 256 would not. Memory scales
+    too (~10 bytes a cell, so ~330 KB a chunk, and visited chunks are never
+    freed). Taller than 128 needs both looked at first.
+  - Land got lowlands-to-uplands (`LOWLAND`/`UPLAND_RISE`, by distance
+    inland from the continent field), a hill-country mask (`hilliness`), and
+    ranges about three times taller. Snow line, the mountain altitude zone
+    and the soft ceiling moved up to match. The range mask's ramp was
+    widened (0.2 -> 0.3) after a probe found a range front rising 47 blocks
+    in 20: taller mountains need wider foothills.
+- **Rivers "look like scars" was measured as trench walls, and fixed with
+  valleys sized to the cut.** A quarter of river channel columns sat more
+  than 8 blocks below the surrounding land (some 27, and up to ~50 once the
+  land got taller), but the valley eased back to the land over only 5-14
+  blocks. A river's valley now has a floodplain, then sides at
+  `VALLEY_SLOPE` (steeper with `mountainness`), steepening only when the
+  side couldn't otherwise climb out within `MAX_VALLEY_REACH` (a gorge).
+  - **Take the lowest valley of every nearby segment, not the nearest
+    segment's.** Wider valleys overlap, and switching to whichever segment
+    is nearest makes the floor jump along a seam. The minimum of continuous
+    surfaces is continuous. `RiverSample::valley` carries it.
+  - **A wider search needed a per-chunk segment list.** The reach went from
+    ~30 to ~63 blocks. `river_segments` gathers every segment that could
+    reach an area once, `Blend::for_chunk` caches it for a whole chunk, and
+    a lone `column_profile` call builds its own. Generation stayed at
+    ~3 ms a chunk.
+  - **The first metric didn't measure the complaint.** "3+ block steps near
+    rivers" over the whole valley reach barely separated old from new (and
+    once favoured the old code), because most counted columns were beyond
+    where the old valley reached at all. Restricting it to columns beside
+    rivers cut 6+ blocks below the land gave 1.7% vs 0.6%, now
+    `rivers_below_the_land_run_in_valleys_not_trenches` (red with the old
+    valley). An ASCII height map of a real deep crossing confirmed the
+    shape before trusting the number.
+- **The "weird spires" were a sign error.** Sea-stack height was
+  `land - 2 - (strength - threshold) * 30`, so a stack was tallest at its
+  edge and sank in the middle: thin rings of pillars with low slabs inside
+  (the floating squares in the screenshot). Stacks now rise toward their
+  middle, taper over `STACK_TAPER`, stand below the clifftop and under
+  `STACK_MAX_HEIGHT`. `sea_stacks_are_stocky_blocks_of_rock_not_spires`
+  measures every stack's footprint and height (height <= 6 x sqrt(footprint))
+  and goes red with the old formula ("56 blocks tall on 10 columns").
+- **A terrain change moves every test that searched for "the first X".**
+  Four tests broke for reasons that weren't bugs: the first waterfall found
+  was now in a snow biome (frozen solid by design), chunk (0,0) now sits on
+  a slope so its seam gap is the land's own step, spawn sits on a hillside
+  so a torch's probe cell was inside the hill, and the wetland-rarity test
+  only counted the few wetlands its searches passed. Each was checked by a
+  probe before touching the test, and each test was narrowed or made to
+  measure against the land itself (`own_gap`, `open_air_run`, a fixed
+  survey area) rather than loosened.

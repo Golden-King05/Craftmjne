@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 /// Altitude at or above which any column - in any biome - gets a snow cap.
 /// The `Mountain` biome's own surface (bare stone) sits *below* this on a
 /// mountain's upper slopes, so a range reads as grass -> bare rock -> snow.
-const SNOW_LINE: i32 = 50;
+const SNOW_LINE: i32 = 92;
 
 /// How far a fully `Biome::drier` column's terrain gets pushed above the
 /// plain baseline, at full `biome::drier_strength` - chosen so noticeably
@@ -78,9 +78,24 @@ const CLIFF_EDGE_SCALE: f64 = 0.02;
 /// the water, that a retreating cliff leaves at its foot.
 const PLATFORM_WIDTH: (f64, f64) = (3.0, 9.0);
 /// Feature size and threshold of sea stacks: the pillars of harder rock a
-/// cliff leaves standing offshore as it retreats.
-const STACK_SCALE: f64 = 0.07;
-const STACK_THRESHOLD: f64 = 0.55;
+/// cliff leaves standing offshore as it retreats. Large enough that a stack
+/// is a stocky block of rock several columns across, not a 1-block spire.
+const STACK_SCALE: f64 = 0.03;
+const STACK_THRESHOLD: f64 = 0.5;
+/// How far past `STACK_THRESHOLD` a stack's noise has to go to reach its
+/// full height - its flanks taper down to the platform over this, so a
+/// stack is widest at its foot, the way the sea leaves them - and only a
+/// large mass of rock gets tall: a small one stays a low rock.
+const STACK_TAPER: f64 = 0.2;
+/// The tallest a stack stands above the platform, however high the cliff
+/// behind it - beyond this, a stack of any width reads as a spire.
+const STACK_MAX_HEIGHT: f64 = 22.0;
+/// How far a stack's top stands below the clifftop it broke from, as a
+/// fraction of the cliff's height above the platform: the sea wears stacks
+/// down, so they never stand as tall as the land.
+const STACK_WEAR: f64 = 0.3;
+/// How far offshore of the cliff edge stacks stand (blocks).
+const STACK_OFFSHORE: (f64, f64) = (6.0, 30.0);
 /// How much higher a fully steep coast's whole landmass sits than it would
 /// otherwise - what makes its cliffs *tower* over the water rather than
 /// being a short step down from land barely above sea level. Applied to the
@@ -105,9 +120,24 @@ const MOUNTAIN_SCALE: f64 = 0.0035;
 /// Feature size of the ridged peak noise layered on top of a range.
 const PEAK_SCALE: f64 = 0.012;
 /// How far a range's core is lifted above the plains it rises out of.
-const MOUNTAIN_LIFT: f64 = 15.0;
+const MOUNTAIN_LIFT: f64 = 32.0;
 /// Extra height a ridge line adds on top of `MOUNTAIN_LIFT`.
-const PEAK_AMPLITUDE: f64 = 16.0;
+const PEAK_AMPLITUDE: f64 = 48.0;
+
+/// Land's height right at the coast, a few blocks above the sea...
+const LOWLAND: f64 = 29.0;
+/// ...rising this much higher deep inland, so a continent's interior is
+/// upland and its rivers have somewhere to run down from.
+const UPLAND_RISE: f64 = 16.0;
+/// How far past `OCEAN_THRESHOLD` (in `continent_value` units) land reaches
+/// its full upland height - hundreds of blocks inland, so the rise is felt
+/// as a long gentle climb, not a step.
+const UPLAND_REACH: f32 = 0.25;
+/// Feature size of the hill-country mask: which regions are rolling hills
+/// and which are flat plains.
+const HILL_SCALE: f64 = 0.0045;
+/// Relief of the local terrain noise in flat plains and in hill country.
+const HILL_AMPLITUDE: (f64, f64) = (4.0, 20.0);
 
 /// How strongly water is steered toward the sea, in routing-height blocks
 /// per unit of `continent_value` above the coastline. Added to real terrain
@@ -179,15 +209,26 @@ const MAX_INCISION: f64 = 6.0;
 /// is - large, so one stretch of river keeps a consistent character for a
 /// long way instead of flipping between flush and dug-in every few blocks.
 const RIVER_CHARACTER_SCALE: f64 = 0.0015;
-/// How far (blocks) past the wet channel a river still lowers the
-/// terrain toward its banks, for a flush river and a fully incised one - a
-/// flush river sits in a wide, gentle valley; an incised one cuts a
-/// narrower, steeper one.
-const VALLEY_WIDTH: (f64, f64) = (14.0, 5.0);
-/// How many drainage cells around a column's own `river_sample` checks for
-/// river segments - enough to cover the widest river plus its widest
-/// valley plus a node's jitter (`8 + 14 + 6` blocks < 2 cells; 3 for margin).
-const SEGMENT_SEARCH_CELLS: i32 = 3;
+/// Width (blocks) of the flat valley floor beside the water, for a flush
+/// river and a fully incised one - a flush lowland river winds across a
+/// floodplain; an incised one has its valley sides start almost at once.
+const FLOODPLAIN: (f64, f64) = (7.0, 2.0);
+/// How steeply a river's valley sides climb back to the land around it, in
+/// blocks up per block out: gentle in lowlands, steep in mountains, where
+/// rivers run in V-shaped valleys between ridges.
+const VALLEY_SLOPE: (f64, f64) = (0.45, 1.1);
+/// The furthest (blocks) a valley side reaches out from its floodplain.
+/// Where the land stands so high above a river that its usual slope
+/// wouldn't climb out within this, the side steepens instead - a gorge -
+/// so a river's valley is always bounded, and so is the search for it.
+const MAX_VALLEY_REACH: f64 = 48.0;
+/// How sharply a valley side bends up off its floor, and how rounded its
+/// shoulder is where it meets the land above.
+const VALLEY_BEND: f64 = 4.0;
+const VALLEY_SHOULDER: f64 = 6.0;
+/// Furthest a river can shape the terrain from its centerline: the widest
+/// channel, floodplain and valley side.
+const RIVER_REACH: f64 = 8.0 + 7.0 + MAX_VALLEY_REACH;
 /// A river dropping at least this many blocks between two drainage nodes
 /// does it as a waterfall rather than a run of 1-block rapids: the upper
 /// level holds for as long as the ground can contain it, then steps down
@@ -212,7 +253,7 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 }
 
 /// Where `soft_ceiling` starts bending terrain over.
-const SOFT_CEILING_START: f64 = 44.0;
+const SOFT_CEILING_START: f64 = 90.0;
 
 /// Eases heights above `SOFT_CEILING_START` asymptotically toward the
 /// world's build ceiling (`WORLD_HEIGHT - 8`) instead of letting the final
@@ -244,7 +285,39 @@ struct RiverSample {
     half_width: f64,
     depth: f64,
     incision: f64,
-    valley_width: f64,
+    /// How high the valley floor and sides stand here: the lowest of every
+    /// nearby segment's own valley surface, not just the nearest one's -
+    /// where two rivers' valleys overlap, taking whichever segment is
+    /// nearest would jump between them along a seam. `INFINITY` if no
+    /// valley reaches this far.
+    valley: f64,
+}
+
+/// One end of a `RiverSegment`: a river node and the river's size there.
+#[derive(Clone, Copy)]
+struct RiverEnd {
+    pos: (f64, f64),
+    water: f64,
+    half_width: f64,
+    depth: f64,
+    incision: f64,
+}
+
+/// A stretch of river from one drainage node to the node it drains into.
+/// A river ending at the sea or a pit is a segment of zero length, so its
+/// end is round.
+#[derive(Clone, Copy)]
+struct RiverSegment {
+    a: RiverEnd,
+    b: RiverEnd,
+}
+
+/// Smooth minimum: `min(a, b)` with the crease where they cross rounded off
+/// over about `k` - what turns a valley side meeting the land above into a
+/// shoulder rather than a sharp edge.
+fn smooth_min(a: f64, b: f64, k: f64) -> f64 {
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - h * h * k * 0.25
 }
 
 /// Which part of a cliffed coast a column is (see
@@ -368,11 +441,33 @@ pub struct OldChunk {
 struct Blend<'a> {
     old: &'a [OldChunk],
     current: RefCell<HashMap<(i32, i32), ColumnProfile>>,
+    /// The area (`x0, z0, x1, z1`, inclusive) this blend generates, and the
+    /// river segments within reach of it - gathered once, rather than every
+    /// column searching the drainage network around itself.
+    area: Option<(i32, i32, i32, i32)>,
+    segments: std::cell::OnceCell<Vec<RiverSegment>>,
 }
 
 impl<'a> Blend<'a> {
     fn new(old: &'a [OldChunk]) -> Self {
-        Self { old, current: RefCell::new(HashMap::new()) }
+        Self { old, current: RefCell::new(HashMap::new()), area: None, segments: std::cell::OnceCell::new() }
+    }
+
+    /// For generating chunk `(cx, cz)`: its columns, plus the two-column
+    /// ring around it that `generate` and the levee rule look at.
+    fn for_chunk(old: &'a [OldChunk], cx: i32, cz: i32) -> Self {
+        let (x0, z0) = (cx * CHUNK_SIZE - 2, cz * CHUNK_SIZE - 2);
+        Self { area: Some((x0, z0, x0 + CHUNK_SIZE + 3, z0 + CHUNK_SIZE + 3)), ..Self::new(old) }
+    }
+
+    /// The river segments that can reach column `(wx, wz)`.
+    fn segments(&self, gen: &TerrainGenerator, wx: i32, wz: i32) -> std::borrow::Cow<'_, [RiverSegment]> {
+        match self.area {
+            Some((x0, z0, x1, z1)) if (x0..=x1).contains(&wx) && (z0..=z1).contains(&wz) => {
+                std::borrow::Cow::Borrowed(self.segments.get_or_init(|| gen.river_segments(x0, z0, x1, z1)))
+            }
+            _ => std::borrow::Cow::Owned(gen.river_segments(wx, wz, wx, wz)),
+        }
     }
 
     /// The old column at `(wx, wz)`, if that column is inside an old chunk.
@@ -421,6 +516,8 @@ pub struct TerrainGenerator {
     mountain: SimplexNoise,
     /// Ridged peak noise layered onto a range - see `PEAK_SCALE`.
     peaks: SimplexNoise,
+    /// Which regions are hill country - see `hilliness`.
+    hills: SimplexNoise,
     /// Continent/ocean shaping noise - see `CONTINENT_SCALE`'s doc comment.
     continent: SimplexNoise,
     /// Which stretches of coast are cliffs - see `coast_steepness`.
@@ -476,6 +573,7 @@ impl TerrainGenerator {
             terrain: SimplexNoise::new(seed),
             mountain: SimplexNoise::new(seed ^ 0x9e3779b9),
             peaks: SimplexNoise::new(seed ^ 0x6c8e_9cf5),
+            hills: SimplexNoise::new(seed ^ 0x5bd1_e995),
             continent: SimplexNoise::new(seed ^ 0x27d4_eb2f),
             coast: SimplexNoise::new(seed ^ 0x1656_67b1),
             river_character: SimplexNoise::new(seed ^ 0xd3a2_646c),
@@ -501,7 +599,10 @@ impl TerrainGenerator {
     /// never disagree about where a range is.
     pub fn mountainness(&self, wx: i32, wz: i32) -> f64 {
         let m = self.mountain.fbm2(wx as f64 * MOUNTAIN_SCALE, wz as f64 * MOUNTAIN_SCALE, 3) * 0.5 + 0.5;
-        smoothstep((m - 0.55) / 0.2)
+        // A wide window, so a range rises out of the plains through
+        // foothills rather than a wall: its full height is ~80 blocks over
+        // the plains, and a narrow window put that over 20-odd blocks.
+        smoothstep((m - 0.5) / 0.3)
     }
 
     /// How much of a cliff the coast near `(x, z)` is, `0.0` (a gentle,
@@ -525,12 +626,22 @@ impl TerrainGenerator {
         MAX_INCISION * smoothstep((n + 0.1) / 0.5)
     }
 
-    /// Plains relief plus a mountain range wherever `mountainness` says
-    /// there is one - continent-blind on purpose, see `base_height` for how
-    /// it's combined with the ocean.
-    fn land_relief(&self, wx: i32, wz: i32) -> f64 {
+    /// How hilly the land around `(x, z)` is, `0.0` (flat plains) to `1.0`
+    /// (hill country).
+    fn hilliness(&self, wx: i32, wz: i32) -> f64 {
+        let n = self.hills.fbm2(wx as f64 * HILL_SCALE, wz as f64 * HILL_SCALE, 2) * 0.5 + 0.5;
+        smoothstep((n - 0.35) / 0.4)
+    }
+
+    /// Land relief - lowlands at the coast rising to uplands inland, plains
+    /// or hills, and a mountain range wherever `mountainness` says there is
+    /// one. `c` is the column's `continent_value`; the ocean itself is
+    /// `coast_shape`'s job, so this carries on as land past the shore.
+    fn land_relief(&self, wx: i32, wz: i32, c: f32) -> f64 {
         let detail = self.terrain.fbm2(wx as f64 * 0.011, wz as f64 * 0.011, 4);
-        let plains = 27.0 + detail * 5.0;
+        let inland = smoothstep(((c - OCEAN_THRESHOLD) / UPLAND_REACH) as f64);
+        let relief = lerp(HILL_AMPLITUDE.0, HILL_AMPLITUDE.1, self.hilliness(wx, wz));
+        let plains = LOWLAND + UPLAND_RISE * inland + detail * relief;
         let range = self.mountainness(wx, wz);
         if range <= 0.0 {
             return plains;
@@ -539,7 +650,7 @@ impl TerrainGenerator {
         // zero, which runs in long connected lines - ridges, rather than
         // the round hills plain fbm makes. Squared to sharpen the crest.
         let ridge = 1.0 - self.peaks.fbm2(wx as f64 * PEAK_SCALE, wz as f64 * PEAK_SCALE, 4).abs();
-        let mountain = MOUNTAIN_LIFT + PEAK_AMPLITUDE * ridge * ridge + detail * 6.0;
+        let mountain = MOUNTAIN_LIFT + PEAK_AMPLITUDE * ridge * ridge + detail * 10.0;
         plains + range * mountain
     }
 
@@ -564,8 +675,8 @@ impl TerrainGenerator {
         // The soft ceiling goes on exactly once, over everything that can
         // raise land - applying it inside `land_relief` too compressed every
         // peak twice and quietly kept ranges below the snow line.
-        let land = soft_ceiling(self.land_relief(wx, wz) + CLIFF_UPLIFT * steep);
         let c = self.continent_value(wx, wz);
+        let land = soft_ceiling(self.land_relief(wx, wz, c) + CLIFF_UPLIFT * steep);
         // A bit of the existing detail noise, scaled down, keeps the
         // seafloor from reading as a perfectly flat plate.
         let floor = || DEEP_OCEAN_FLOOR + self.terrain.fbm2(wx as f64 * 0.02, wz as f64 * 0.02, 3) * 3.0;
@@ -598,8 +709,10 @@ impl TerrainGenerator {
             (lerp(shelf, floor(), smoothstep((-inland - platform) / 10.0)), CoastPart::Open)
         };
         let stack = self.coast.fbm2(fx * STACK_SCALE - 801.1, fz * STACK_SCALE + 55.5, 2);
-        let (cliff, part) = if steep > 0.7 && (-40.0..-4.0).contains(&inland) && stack > STACK_THRESHOLD {
-            (land - 2.0 - (stack - STACK_THRESHOLD) * 30.0, CoastPart::Stack)
+        let (cliff, part) = if steep > 0.7 && (-STACK_OFFSHORE.1..-STACK_OFFSHORE.0).contains(&inland) && stack > STACK_THRESHOLD {
+            // Tallest in the middle, tapering to the platform at its edges.
+            let top = lerp(land, shelf, STACK_WEAR).min(shelf + STACK_MAX_HEIGHT);
+            (lerp(cliff, top, smoothstep((stack - STACK_THRESHOLD) / STACK_TAPER)).max(cliff), CoastPart::Stack)
         } else {
             (cliff, part)
         };
@@ -623,87 +736,119 @@ impl TerrainGenerator {
         (self.base_height(wx, wz) + boost).clamp(2.0, (WORLD_HEIGHT - 8) as f64)
     }
 
-    /// The nearest river to `(x, z)`, if one is within reach: the closest
-    /// segment between a river node and the node it drains into, with the
-    /// river's properties interpolated along it.
+    /// Every river segment that could shape a column in the area `x0..=x1`,
+    /// `z0..=z1`: any whose upstream node is close enough for some point on
+    /// it to be within `RIVER_REACH` of the area.
+    fn river_segments(&self, x0: i32, z0: i32, x1: i32, z1: i32) -> Vec<RiverSegment> {
+        use crate::drainage::CELL;
+        let net = &self.drainage;
+        // A segment is at most a little over two cells long (a diagonal step
+        // between jittered nodes), so its upstream end is within this much
+        // further than the reach.
+        let margin = RIVER_REACH as i32 + 2 * CELL;
+        let mut ends: HashMap<crate::drainage::Cell, RiverEnd> = HashMap::new();
+        let mut end = |cell: crate::drainage::Cell| {
+            *ends.entry(cell).or_insert_with(|| {
+                let (x, z) = net.node_pos(cell);
+                let accumulation = net.accumulation(self, cell);
+                let by_flow = (accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln();
+                // The longer a river has run, the bigger it can be: a short
+                // one stays a stream even where a lot of land drains into it.
+                let (short, long) = RIVER_LENGTH_FOR_SIZE;
+                let by_length = (net.length(self, cell) / short).ln() / (long / short).ln();
+                let size = by_flow.min(by_length).clamp(0.0, 1.0) as f64;
+                RiverEnd {
+                    pos: (x, z),
+                    water: net.water_level(self, cell, RIVER_THRESHOLD) as f64,
+                    half_width: lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size),
+                    depth: lerp(RIVER_DEPTH.0, RIVER_DEPTH.1, size),
+                    incision: self.river_incision(x, z),
+                }
+            })
+        };
+        let mut segments = Vec::new();
+        for cz in (z0 - margin).div_euclid(CELL)..=(z1 + margin).div_euclid(CELL) {
+            for cx in (x0 - margin).div_euclid(CELL)..=(x1 + margin).div_euclid(CELL) {
+                let cell = (cx, cz);
+                if net.accumulation(self, cell) <= RIVER_THRESHOLD {
+                    continue;
+                }
+                let a = end(cell);
+                // Downstream of a river cell is always a river cell too (it
+                // drains at least as much).
+                let b = net.downstream(self, cell).map_or(a, &mut end);
+                segments.push(RiverSegment { a, b });
+            }
+        }
+        segments
+    }
+
+    /// The nearest river to `(x, z)` among `segments`, if one is within
+    /// reach, with its properties interpolated along the segment.
     ///
     /// `natural` is the column's `natural_height`: where a river falls
     /// (`WATERFALL_DROP`), the upper level only reaches columns whose ground
     /// can hold it, which is what puts a waterfall's lip at a cliff edge.
-    fn river_sample(&self, wx: i32, wz: i32, natural: f64) -> Option<RiverSample> {
-        use crate::drainage::CELL;
-        let net = &self.drainage;
-        let home = (wx.div_euclid(CELL), wz.div_euclid(CELL));
+    fn river_sample(&self, wx: i32, wz: i32, natural: f64, segments: &[RiverSegment]) -> Option<RiverSample> {
         let (px, pz) = (wx as f64 + 0.5, wz as f64 + 0.5);
-
-        // One end of a segment: (position, water, half-width, depth, incision).
-        let point = |cell: crate::drainage::Cell| {
-            let (x, z) = net.node_pos(cell);
-            let accumulation = net.accumulation(self, cell);
-            let by_flow = (accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln();
-            // The longer a river has run, the bigger it can be: a short one
-            // stays a stream even where a lot of land drains into it.
-            let (short, long) = RIVER_LENGTH_FOR_SIZE;
-            let by_length = (net.length(self, cell) / short).ln() / (long / short).ln();
-            let size = by_flow.min(by_length).clamp(0.0, 1.0) as f64;
-            (
-                (x, z),
-                net.water_level(self, cell, RIVER_THRESHOLD) as f64,
-                lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size),
-                lerp(RIVER_DEPTH.0, RIVER_DEPTH.1, size),
-                self.river_incision(x, z),
-            )
-        };
-
-        let mut best: Option<(f64, RiverSample)> = None;
-        for dz in -SEGMENT_SEARCH_CELLS..=SEGMENT_SEARCH_CELLS {
-            for dx in -SEGMENT_SEARCH_CELLS..=SEGMENT_SEARCH_CELLS {
-                let cell = (home.0 + dx, home.1 + dz);
-                if net.accumulation(self, cell) <= RIVER_THRESHOLD {
-                    continue;
-                }
-                let a = point(cell);
-                // Downstream of a river cell is always a river cell too (it
-                // drains at least as much); a river ending at the sea or a
-                // pit is a segment of zero length - a round end.
-                let b = net.downstream(self, cell).map_or(a, point);
-                let ((ax, az), (bx, bz)) = (a.0, b.0);
-                let (sx, sz) = (bx - ax, bz - az);
-                let len2 = sx * sx + sz * sz;
-                let t = if len2 > 0.0 { (((px - ax) * sx + (pz - az) * sz) / len2).clamp(0.0, 1.0) } else { 0.0 };
-                let d = ((px - ax - sx * t).powi(2) + (pz - az - sz * t).powi(2)).sqrt();
-                if best.as_ref().is_some_and(|(bd, _)| *bd <= d) {
-                    continue;
-                }
-                let incision = lerp(a.4, b.4, t);
-                let falls = a.1 - b.1 >= WATERFALL_DROP;
-                best = Some((
-                    d,
-                    RiverSample {
-                        distance: d,
-                        // Per *grid step*, not per block of straight-line
-                        // distance: the fluid sim measures distance in
-                        // sideways steps, which a diagonal river takes more
-                        // of to cover the same ground.
-                        slope: if falls || len2 <= 0.0 {
-                            0.0
-                        } else {
-                            (a.1 - b.1) / (sx.abs() + sz.abs())
-                        },
-                        water: if falls {
-                            if t < 1.0 && natural >= a.1.floor() { a.1 } else { b.1 }
-                        } else {
-                            lerp(a.1, b.1, t)
-                        },
-                        half_width: lerp(a.2, b.2, t),
-                        depth: lerp(a.3, b.3, t),
-                        incision,
-                        valley_width: lerp(VALLEY_WIDTH.0, VALLEY_WIDTH.1, incision / MAX_INCISION),
-                    },
-                ));
+        let mut best: Option<RiverSample> = None;
+        let mut valley = f64::INFINITY;
+        // Steeper valley sides in mountains (see `VALLEY_SLOPE`), looked up
+        // once a valley turns out to be in reach.
+        let mut base_slope = None;
+        for &RiverSegment { a, b } in segments {
+            let ((ax, az), (bx, bz)) = (a.pos, b.pos);
+            let (sx, sz) = (bx - ax, bz - az);
+            let len2 = sx * sx + sz * sz;
+            let t = if len2 > 0.0 { (((px - ax) * sx + (pz - az) * sz) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let d = ((px - ax - sx * t).powi(2) + (pz - az - sz * t).powi(2)).sqrt();
+            if d > RIVER_REACH {
+                continue;
             }
+            let falls = a.water - b.water >= WATERFALL_DROP;
+            let water = if falls {
+                if t < 1.0 && natural >= a.water.floor() { a.water } else { b.water }
+            } else {
+                lerp(a.water, b.water, t)
+            };
+            let half_width = lerp(a.half_width, b.half_width, t);
+            let incision = lerp(a.incision, b.incision, t);
+
+            // This segment's valley. Its floor is the river's banks (`water
+            // + incision`): level with the water for a flush river, a wall
+            // `incision` blocks tall for an incised one. Past a floodplain,
+            // its sides climb back to the land at `VALLEY_SLOPE` - or
+            // steeper where the land is so far above the river that the side
+            // would otherwise reach out past `MAX_VALLEY_REACH`, which makes
+            // a gorge. A valley as wide as the river is deep is what lets a
+            // river cross high ground without leaving a trench through it.
+            let banks = water.floor() + incision;
+            if natural > banks {
+                let floodplain = lerp(FLOODPLAIN.0, FLOODPLAIN.1, incision / MAX_INCISION);
+                let out = (d - half_width - floodplain).max(0.0);
+                let base = *base_slope.get_or_insert_with(|| lerp(VALLEY_SLOPE.0, VALLEY_SLOPE.1, self.mountainness(wx, wz)));
+                let slope = base.max((natural - banks) / MAX_VALLEY_REACH);
+                // Bending up gently off the floor, then straight.
+                valley = valley.min(banks + slope * out * out / (out + VALLEY_BEND));
+            }
+
+            if best.as_ref().is_some_and(|r| r.distance <= d) {
+                continue;
+            }
+            best = Some(RiverSample {
+                distance: d,
+                // Per *grid step*, not per block of straight-line distance:
+                // the fluid sim measures distance in sideways steps, which a
+                // diagonal river takes more of to cover the same ground.
+                slope: if falls || len2 <= 0.0 { 0.0 } else { (a.water - b.water) / (sx.abs() + sz.abs()) },
+                water,
+                half_width,
+                depth: lerp(a.depth, b.depth, t),
+                incision,
+                valley: f64::INFINITY,
+            });
         }
-        best.map(|(_, sample)| sample)
+        best.map(|r| RiverSample { valley, ..r })
     }
 
     /// How column `(wx, wz)` blends into the old chunks around it:
@@ -831,26 +976,29 @@ impl TerrainGenerator {
                 top_level: FLUID_SOURCE,
             };
         }
+        let segments = blend.segments(self, wx, wz);
         if blend.old.is_empty() {
-            return self.raw_column_with(wx, wz, 0.0, 0.0);
+            return self.raw_column_with(wx, wz, 0.0, 0.0, &segments);
         }
         let (offset, dry) = self.blend_at(blend, wx, wz);
-        self.raw_column_with(wx, wz, offset, dry)
+        self.raw_column_with(wx, wz, offset, dry, &segments)
     }
 
     /// `raw_column_in`'s actual terrain: rivers and sea, raised by `offset`,
     /// with rivers faded `dry` (0..=1) of the way into dry ground.
-    fn raw_column_with(&self, wx: i32, wz: i32, offset: f64, dry: f64) -> ColumnProfile {
+    fn raw_column_with(&self, wx: i32, wz: i32, offset: f64, dry: f64, segments: &[RiverSegment]) -> ColumnProfile {
         let natural = self.natural_height(wx, wz);
         let mut h = natural;
         let mut river_water = None;
         let mut top_level = FLUID_SOURCE;
         let (mut river_bank, mut near_river) = (false, false);
 
-        if let Some(r) = self.river_sample(wx, wz, natural) {
+        if let Some(r) = self.river_sample(wx, wz, natural, segments) {
             let water = r.water.floor();
             let half_width = r.half_width;
-            if r.distance <= half_width + r.valley_width + 1.0 {
+            // The channel and the banks right beside it: what the levee rule
+            // has to hold in, and where a cave would drain the river.
+            if r.distance <= half_width + 3.0 {
                 near_river = true;
             }
             if half_width >= 0.5 && r.distance <= half_width {
@@ -882,15 +1030,12 @@ impl TerrainGenerator {
                     }
                 }
             } else {
-                // The valley: terrain within reach is pulled down toward the
-                // banks (`water + incision`), right at the water's edge and
-                // easing back to untouched terrain over `valley_width`. A
-                // flush river (incision 0) has banks level with its water;
-                // an incised one has a wall `incision` blocks tall there.
-                let banks = water + r.incision;
-                if natural > banks {
-                    let ease = smoothstep((r.distance - half_width) / r.valley_width);
-                    h = lerp(banks, natural, ease);
+                // The valley (see `river_sample`), meeting the land above it
+                // in a rounded shoulder - and never below this river's own
+                // water. (Where it meets the water exactly, the levee rule
+                // holds the water in.)
+                if r.valley < natural {
+                    h = smooth_min(natural, r.valley, VALLEY_SHOULDER).max(water);
                 }
                 river_bank = dry <= 0.0 && half_width >= 0.5 && r.distance <= half_width + 2.0 && h <= water + 1.0;
                 h = lerp(h, natural, dry);
@@ -1062,7 +1207,7 @@ impl TerrainGenerator {
     /// generator made, which stay as they were (see this module's doc
     /// comment). Old chunks more than `BLEND_DISTANCE` away have no effect.
     pub fn generate_beside(&self, cx: i32, cz: i32, old: &[OldChunk]) -> GeneratedChunk {
-        let blend = Blend::new(old);
+        let blend = Blend::for_chunk(old, cx, cz);
         let ids = &self.ids;
         let seed = self.seed;
         let mut blocks = vec![AIR; CS * CS * H];
@@ -1259,7 +1404,7 @@ impl TerrainGenerator {
                 }
 
                 // Ore veins.
-                for y in 2..(h - 3).min(40) {
+                for y in 2..(h - 3).min(96) {
                     if blocks[base + y as usize] != ids.stone {
                         continue;
                     }
@@ -2158,17 +2303,25 @@ mod tests {
         let old = old_chunk((1, 0), |x, z| ColumnSurface { ground: gen.effective_height(x, z) + 12, water: None });
         let blended = gen.generate_beside(0, 0, std::slice::from_ref(&old)).columns;
         let plain = gen.generate(0, 0).columns;
-        let (mut blended_gap, mut plain_gap) = (0, 0);
+        let (mut blended_gap, mut plain_gap, mut own_gap) = (0, 0, 0);
         for z in 0..CS {
             let seam = old.columns[CS * z].ground;
             blended_gap += (blended[CS - 1 + CS * z].ground - seam).abs();
             plain_gap += (plain[CS - 1 + CS * z].ground - seam).abs();
+            // How much the land itself changes from one column to the next
+            // here - on a slope, even a perfect blend meets the old chunk
+            // with a step this big.
+            own_gap += (plain[CS - 1 + CS * z].ground - gen.effective_height(CS as i32, z as i32)).abs();
             // The far side of the chunk is (almost) the generator's own.
             assert!((blended[CS * z].ground - plain[CS * z].ground).abs() <= 1);
         }
-        let (blended_gap, plain_gap) = (blended_gap as f64 / CS as f64, plain_gap as f64 / CS as f64);
+        let (blended_gap, plain_gap, own_gap) =
+            (blended_gap as f64 / CS as f64, plain_gap as f64 / CS as f64, own_gap as f64 / CS as f64);
         assert!(plain_gap >= 10.0, "test setup: the old chunk should really differ ({plain_gap})");
-        assert!(blended_gap <= 2.0, "new terrain should meet the old at the seam, gap {blended_gap}");
+        assert!(
+            blended_gap <= own_gap + 1.0,
+            "new terrain should meet the old at the seam, gap {blended_gap} (the land's own step there: {own_gap})"
+        );
     }
 
     /// A river that runs into an old chunk has nowhere to go - the old
@@ -2251,7 +2404,8 @@ mod tests {
             for z in [-r, r] {
                 for x in (-2000..2000).step_by(2) {
                     let Some(top) = gen.column_profile(x, z).water_top else { continue };
-                    if (top == SEA_LEVEL) != into_sea {
+                    // A waterfall where water freezes is ice, by design.
+                    if (top == SEA_LEVEL) != into_sea || gen.biome_at(x, z).freezes_water() {
                         continue;
                     }
                     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -2472,7 +2626,14 @@ mod tests {
         assert_eq!(block_at(x, col.water_top.unwrap(), z), gen.ids.water);
 
         // Rare even among depressions big enough to be one: most of those
-        // still overflow into marshes.
+        // still overflow into marshes. Survey a fixed area first, rather
+        // than judging by whichever few wetlands the searches above
+        // happened to pass.
+        for cz in (-120..120).step_by(2) {
+            for cx in (-120..120).step_by(2) {
+                gen.wetland_near(cx * CHUNK_SIZE, cz * CHUNK_SIZE);
+            }
+        }
         let big: Vec<WetlandKind> = gen
             .wetlands
             .lock()
@@ -2483,6 +2644,7 @@ mod tests {
             .map(|w| w.kind)
             .collect();
         let salt = big.iter().filter(|&&k| k == WetlandKind::SaltSea).count();
+        assert!(big.len() >= 10, "only {} big wetlands surveyed - too few to judge rarity", big.len());
         assert!(salt >= 1 && salt * 2 <= big.len(), "{salt} salt seas among {} big wetlands", big.len());
     }
 
@@ -2602,4 +2764,102 @@ mod tests {
         assert_eq!(at(SEA_LEVEL + 1), gen.ids.ice, "ice stands above the water");
         assert_eq!(at((SEA_LEVEL - 1).max(floor + 1)), gen.ids.ice, "and carries on below it");
     }
+    #[test]
+    fn sea_stacks_are_stocky_blocks_of_rock_not_spires() {
+        // Reported as "weird spires": stacks one or two blocks wide standing
+        // the full height of the cliff. Measure every stack's footprint and
+        // height and require it to be squat for its size.
+        let reg = BlockRegistry::with_defaults();
+        let mut stacks = 0;
+        for seed in [7u32, 42, 1337] {
+            let gen = TerrainGenerator::new(seed, &reg);
+            let (n, x0, z0) = (1200i32, -600, -600);
+            let mut grid = vec![None; (n * n) as usize];
+            for j in 0..n {
+                for i in 0..n {
+                    let (x, z) = (x0 + i, z0 + j);
+                    if gen.coast_steepness(x, z) <= 0.7 {
+                        continue;
+                    }
+                    let (h, part) = gen.coast_shape(x, z);
+                    if part == CoastPart::Stack && h > (SEA_LEVEL + 1) as f64 {
+                        grid[(i + n * j) as usize] = Some(h - SEA_LEVEL as f64);
+                    }
+                }
+            }
+            let mut seen = vec![false; grid.len()];
+            for start in 0..grid.len() {
+                if grid[start].is_none() || seen[start] {
+                    continue;
+                }
+                let (mut todo, mut size, mut top) = (vec![start], 0, 0.0f64);
+                seen[start] = true;
+                while let Some(c) = todo.pop() {
+                    size += 1;
+                    top = top.max(grid[c].unwrap());
+                    let (ci, cj) = (c as i32 % n, c as i32 / n);
+                    for (a, b) in [(ci + 1, cj), (ci - 1, cj), (ci, cj + 1), (ci, cj - 1)] {
+                        let k = (a + n * b) as usize;
+                        if (0..n).contains(&a) && (0..n).contains(&b) && grid[k].is_some() && !seen[k] {
+                            seen[k] = true;
+                            todo.push(k);
+                        }
+                    }
+                }
+                stacks += (size >= 10) as i32;
+                assert!(
+                    top <= 6.0 * (size as f64).sqrt(),
+                    "seed {seed}: a stack {top:.0} blocks tall stands on only {size} columns - a spire"
+                );
+            }
+        }
+        assert!(stacks >= 10, "only {stacks} sea stacks of any size - they shouldn't have disappeared");
+    }
+
+    #[test]
+    fn rivers_below_the_land_run_in_valleys_not_trenches() {
+        // Reported as rivers looking "like scars": where a river runs well
+        // below the land around it, its valley used to climb back out within
+        // a few blocks, leaving a trench with sheer walls cut through gentle
+        // ground. Count sudden 3+ block steps beside such rivers on ground
+        // that isn't steep by itself.
+        let reg = BlockRegistry::with_defaults();
+        let (mut valley, mut walls) = (0, 0);
+        for seed in [7u32, 42, 1337] {
+            let gen = TerrainGenerator::new(seed, &reg);
+            for i in 0..14 {
+                for j in 0..14 {
+                    let (cx, cz) = (i * 13 - 90, j * 13 - 90);
+                    let chunk = gen.generate(cx, cz);
+                    let segments = gen.river_segments(cx * 16, cz * 16, cx * 16 + 15, cz * 16 + 15);
+                    let ground = |x: i32, z: i32| chunk.columns[(x + 16 * z) as usize];
+                    for z in 0..15 {
+                        for x in 0..15 {
+                            let (wx, wz) = (cx * 16 + x, cz * 16 + z);
+                            let natural = gen.natural_height(wx, wz);
+                            let Some(r) = gen.river_sample(wx, wz, natural, &segments) else { continue };
+                            let out = r.distance - r.half_width;
+                            if !(1.0..=40.0).contains(&out)
+                                || ground(x, z).water.is_some()
+                                || natural - (r.water.floor() + r.incision) < 6.0
+                            {
+                                continue;
+                            }
+                            let h = ground(x, z).ground;
+                            let step = (h - ground(x + 1, z).ground).abs().max((h - ground(x, z + 1).ground).abs());
+                            let natural_step = (natural - gen.natural_height(wx + 1, wz))
+                                .abs()
+                                .max((natural - gen.natural_height(wx, wz + 1)).abs());
+                            valley += 1;
+                            walls += (step >= 3 && natural_step < 2.0) as i32;
+                        }
+                    }
+                }
+            }
+        }
+        let share = walls as f64 / valley as f64;
+        assert!(valley > 5000, "too few deep river valleys sampled ({valley}) to judge");
+        assert!(share < 0.01, "{walls} of {valley} valley columns ({:.1}%) are sheer trench walls", share * 100.0);
+    }
+
 }
