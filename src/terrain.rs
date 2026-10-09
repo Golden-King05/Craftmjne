@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 /// Altitude at or above which any column - in any biome - gets a snow cap.
 /// The `Mountain` biome's own surface (bare stone) sits *below* this on a
 /// mountain's upper slopes, so a range reads as grass -> bare rock -> snow.
-const SNOW_LINE: i32 = 92;
+const SNOW_LINE: i32 = 165;
 
 /// How far a fully `Biome::drier` column's terrain gets pushed above the
 /// plain baseline, at full `biome::drier_strength` - chosen so noticeably
@@ -86,7 +86,7 @@ const STACK_THRESHOLD: f64 = 0.5;
 /// full height - its flanks taper down to the platform over this, so a
 /// stack is widest at its foot, the way the sea leaves them - and only a
 /// large mass of rock gets tall: a small one stays a low rock.
-const STACK_TAPER: f64 = 0.2;
+const STACK_TAPER: f64 = 0.3;
 /// The tallest a stack stands above the platform, however high the cliff
 /// behind it - beyond this, a stack of any width reads as a spire.
 const STACK_MAX_HEIGHT: f64 = 22.0;
@@ -116,19 +116,19 @@ const DEEP_OCEAN_FLOOR: f64 = 9.0;
 /// mountainness`), not baked into the plains formula: the `Mountain`
 /// biome's altitude zones (`biome::zoned_biome`) and `/locate feature
 /// mountain` read exactly the same mask the terrain was raised by.
-const MOUNTAIN_SCALE: f64 = 0.0035;
+const MOUNTAIN_SCALE: f64 = 0.0017;
 /// Feature size of the ridged peak noise layered on top of a range.
-const PEAK_SCALE: f64 = 0.012;
+const PEAK_SCALE: f64 = 0.006;
 /// How far a range's core is lifted above the plains it rises out of.
-const MOUNTAIN_LIFT: f64 = 32.0;
+const MOUNTAIN_LIFT: f64 = 70.0;
 /// Extra height a ridge line adds on top of `MOUNTAIN_LIFT`.
-const PEAK_AMPLITUDE: f64 = 48.0;
+const PEAK_AMPLITUDE: f64 = 110.0;
 
 /// Land's height right at the coast, a few blocks above the sea...
 const LOWLAND: f64 = 29.0;
 /// ...rising this much higher deep inland, so a continent's interior is
 /// upland and its rivers have somewhere to run down from.
-const UPLAND_RISE: f64 = 16.0;
+const UPLAND_RISE: f64 = 24.0;
 /// How far past `OCEAN_THRESHOLD` (in `continent_value` units) land reaches
 /// its full upland height - hundreds of blocks inland, so the rise is felt
 /// as a long gentle climb, not a step.
@@ -137,7 +137,7 @@ const UPLAND_REACH: f32 = 0.25;
 /// and which are flat plains.
 const HILL_SCALE: f64 = 0.0045;
 /// Relief of the local terrain noise in flat plains and in hill country.
-const HILL_AMPLITUDE: (f64, f64) = (4.0, 20.0);
+const HILL_AMPLITUDE: (f64, f64) = (4.0, 26.0);
 
 /// How strongly water is steered toward the sea, in routing-height blocks
 /// per unit of `continent_value` above the coastline. Added to real terrain
@@ -253,7 +253,7 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 }
 
 /// Where `soft_ceiling` starts bending terrain over.
-const SOFT_CEILING_START: f64 = 90.0;
+const SOFT_CEILING_START: f64 = 190.0;
 
 /// Eases heights above `SOFT_CEILING_START` asymptotically toward the
 /// world's build ceiling (`WORLD_HEIGHT - 8`) instead of letting the final
@@ -598,11 +598,15 @@ impl TerrainGenerator {
     /// searches for it - so the landform and the biome on top of it can
     /// never disagree about where a range is.
     pub fn mountainness(&self, wx: i32, wz: i32) -> f64 {
-        let m = self.mountain.fbm2(wx as f64 * MOUNTAIN_SCALE, wz as f64 * MOUNTAIN_SCALE, 3) * 0.5 + 0.5;
+        // Two octaves, not more: a range's outline doesn't need fine
+        // wiggles, and every wiggle in this mask is multiplied by the whole
+        // height of the range - with three, range edges came out as cliffs.
+        let m = self.mountain.fbm2(wx as f64 * MOUNTAIN_SCALE, wz as f64 * MOUNTAIN_SCALE, 2) * 0.5 + 0.5;
         // A wide window, so a range rises out of the plains through
-        // foothills rather than a wall: its full height is ~80 blocks over
-        // the plains, and a narrow window put that over 20-odd blocks.
-        smoothstep((m - 0.5) / 0.3)
+        // foothills rather than a wall: its full height is well over 100
+        // blocks above the plains, and a narrow window put a range's whole
+        // rise into a few dozen blocks.
+        smoothstep((m - 0.42) / 0.45)
     }
 
     /// How much of a cliff the coast near `(x, z)` is, `0.0` (a gentle,
@@ -650,8 +654,12 @@ impl TerrainGenerator {
         // zero, which runs in long connected lines - ridges, rather than
         // the round hills plain fbm makes. Squared to sharpen the crest.
         let ridge = 1.0 - self.peaks.fbm2(wx as f64 * PEAK_SCALE, wz as f64 * PEAK_SCALE, 4).abs();
-        let mountain = MOUNTAIN_LIFT + PEAK_AMPLITUDE * ridge * ridge + detail * 10.0;
-        plains + range * mountain
+        // The range's broad base rises evenly across its whole width; its
+        // peaks only come in toward the core (squared), so a range climbs
+        // through foothills to a high plateau of ridges rather than
+        // packing its whole height into the last few dozen blocks.
+        let peaks = PEAK_AMPLITUDE * ridge * ridge + detail * 16.0;
+        plains + range * MOUNTAIN_LIFT + range * range * peaks
     }
 
     /// Land relief meeting the ocean - the terrain before any biome boost

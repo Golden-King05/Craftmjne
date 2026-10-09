@@ -808,17 +808,22 @@ fn a_mined_hole_lights_up_even_while_chunks_are_still_loading() {
         },
         2000,
     ));
-    // Pile on background work, like a dozen chunks landing at once would.
+    // Pile on background work, like a dozen chunks landing at once would:
+    // every cell of every loaded chunk, far more than a few frames can get
+    // through. (Re-seeding chunks used to be enough, but seeding now skips
+    // cells that can't change, so it barely queues anything.)
     {
-        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().0.clone();
-        app.world_mut().resource_scope(|world, mut lights: Mut<LightQueue>| {
-            let map = world.resource::<ChunkMap>();
-            for coord in map.chunks.keys().copied().collect::<Vec<_>>() {
-                for _ in 0..10 {
-                    craftmjne::light::seed_new_chunk(map, &tables, coord, &mut lights);
+        let coords: Vec<IVec2> = app.world().resource::<ChunkMap>().chunks.keys().copied().collect();
+        let mut lights = app.world_mut().resource_mut::<LightQueue>();
+        for coord in coords {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    for y in 0..craftmjne::config::WORLD_HEIGHT {
+                        lights.push(IVec3::new(coord.x * CHUNK_SIZE + x, y, coord.y * CHUNK_SIZE + z));
+                    }
                 }
             }
-        });
+        }
     }
     let top = open_air_above_ground(&app) - IVec3::Y;
     let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(top, 0).unwrap();

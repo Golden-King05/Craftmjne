@@ -289,7 +289,7 @@ pub struct AltitudeZone {
 /// first band a column keeps its region biome (plains at the foot of a
 /// range). Adding a middle band later (spruce forest on the lower slopes)
 /// is one more entry here; nothing that reads it changes.
-pub const ALTITUDE_ZONES: &[AltitudeZone] = &[AltitudeZone { min_height: 78, biome: Biome::Mountain }];
+pub const ALTITUDE_ZONES: &[AltitudeZone] = &[AltitudeZone { min_height: 135, biome: Biome::Mountain }];
 
 /// A column's full biome from its region biome, how strongly it sits in a
 /// mountain range, and its height - pure, so the zoning is testable
