@@ -2240,3 +2240,51 @@ etc.) instead of inventing a new approach:
   probe before touching the test, and each test was narrowed or made to
   measure against the land itself (`own_gap`, `open_air_run`, a fixed
   survey area) rather than loosened.
+- **"Can we go higher than 128?" needed three things besides the
+  constant, and each was found before it bit.** (`WORLD_HEIGHT` 256, sea
+  still 26.)
+  - **The snapshot format had two one-byte/two-byte assumptions.** The
+    header stored the chunk height in a `u8` (256 doesn't fit) and fluid
+    cells by `u16` index. Format 2 widens both to `u16`/`u32`.
+    `parse_header` reads either (the header's length depends on its
+    format), and `encode_as(.., height, format)` lets a test write a genuine
+    format-1, 64-tall file. The per-column ground/water bytes still fit,
+    since both are clamped to 255.
+  - **Memory had to become bounded.** Every visited chunk stayed loaded,
+    ~10 bytes a cell, ~640 KB a chunk at 256 tall. `unload_far_chunks`
+    drops chunks `UNLOAD_MARGIN` beyond the render distance by putting
+    them back in the state of a chunk not visited this session: edits
+    stay in `EditLog` and go back into `PendingEdits`; fluid is scanned
+    (`chunk_fluid_cells`, shared with `write_save`) into `OriginalFluids`
+    and `PendingFluids`; terrain is the snapshot on disk. So it adds no new
+    persistence path, and only unloads a chunk that has a snapshot (fluid
+    is only reapplied onto restored chunks). Measured at render distance 8,
+    flying: chunks capped at ~330 / ~210 MB.
+    `chunks_unloaded_far_away_come_back_exactly_as_they_were` compares the
+    whole chunk (blocks and fluid levels) after a walk back *and* after a
+    save made while unloaded, and goes red with any of the three hand-backs
+    removed.
+  - **An "only when the player changes chunk" trigger stranded chunks.**
+    If a far chunk was mid-mesh at that one moment it was skipped until the
+    player next crossed a chunk border. Found because the break-tests
+    failed with "never unloaded" instead of the expected message. It now
+    retries every frame while any far chunk was only temporarily busy.
+    When a break-test fails for the wrong reason, the test was passing by
+    luck.
+  - **Light seeding was queueing work that could never land.** The seam
+    pass offered light to the neighbour chunk across each seam, and an
+    unloaded neighbour reads as dark air, so every open cell up the whole
+    border looked improvable: ~6,500 cells a chunk at 256 tall, and a
+    341k backlog while flying (it had been 4x smaller and under the test's
+    limit at 64). Counters on each seeding path found it. It now skips
+    unloaded neighbours; the neighbour's own seeding pulls the light in
+    when it arrives. `a_mined_hole_lights_up_even_while_chunks_are_still_
+    loading` had been using that waste as its "lots of background work",
+    so it now queues a real backlog itself (re-break-tested).
+  - **Steep mountains came from the range mask, not the peaks.** Splitting
+    the slope into its parts showed the mask's gradient times the range's
+    full height dominated (p90 2.4 blocks/block vs 1.0 from the ridges),
+    because the mask's higher octaves wiggle its edge. Bigger ranges
+    (`MOUNTAIN_SCALE` 0.0017), two octaves, a wider ramp, and a base lift
+    that rises with `range` (peaks with `range²`) brought p90 to ~1.8 and
+    p99 to ~3.6. Lowering the ridge frequency alone had barely moved it.

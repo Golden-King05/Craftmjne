@@ -284,7 +284,6 @@ struct RiverSample {
     slope: f64,
     half_width: f64,
     depth: f64,
-    incision: f64,
     /// How high the valley floor and sides stand here: the lowest of every
     /// nearby segment's own valley surface, not just the nearest one's -
     /// where two rivers' valleys overlap, taking whichever segment is
@@ -852,7 +851,6 @@ impl TerrainGenerator {
                 water,
                 half_width,
                 depth: lerp(a.depth, b.depth, t),
-                incision,
                 valley: f64::INFINITY,
             });
         }
@@ -2849,7 +2847,7 @@ mod tests {
                             let out = r.distance - r.half_width;
                             if !(1.0..=40.0).contains(&out)
                                 || ground(x, z).water.is_some()
-                                || natural - (r.water.floor() + r.incision) < 6.0
+                                || natural - r.water.floor() < 6.0
                             {
                                 continue;
                             }

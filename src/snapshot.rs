@@ -125,6 +125,12 @@ impl ChunkStore {
         })
     }
 
+    /// Whether chunk `(cx, cz)` has a snapshot on disk - so it would load
+    /// back exactly as it was, rather than generating anew.
+    pub fn has_snapshot(&self, cx: i32, cz: i32) -> bool {
+        self.path(cx, cz).is_some_and(|p| p.is_file())
+    }
+
     fn path(&self, cx: i32, cz: i32) -> Option<PathBuf> {
         Some(self.dir.as_ref()?.join(format!("c.{cx}.{cz}.bin")))
     }
@@ -200,7 +206,7 @@ impl ChunkStore {
         let mut fluid = vec![FLUID_SOURCE; blocks.len()];
         // Format 1 counts and indexes fluid cells in two bytes, format 2 in four.
         let wide = header.format >= 2;
-        let mut number = |r: &mut &[u8]| -> Option<usize> {
+        let number = |r: &mut &[u8]| -> Option<usize> {
             Some(if wide {
                 u32::from_le_bytes(take(r, 4)?.try_into().ok()?) as usize
             } else {

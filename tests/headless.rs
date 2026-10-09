@@ -863,3 +863,77 @@ fn streaming_while_moving_keeps_the_light_backlog_small() {
     assert!(generated > 150, "test setup: only {generated} chunks streamed in");
     assert!(most < 40_000, "the light backlog reached {most} cells");
 }
+
+/// Far-away chunks are dropped from memory and come back exactly as they
+/// were - their edits *and* fluid state - whether you walk back to them or
+/// save and reload while they're unloaded.
+#[test]
+fn chunks_unloaded_far_away_come_back_exactly_as_they_were() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+
+    let (stone, water) = {
+        let reg = app.world().resource::<BlockRegistry>();
+        (reg.id("stone"), reg.id("water"))
+    };
+    // A player edit (through the edit log)...
+    let edited = open_air_above_ground(&app);
+    let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(edited, stone).unwrap();
+    app.world_mut().send_event(BlockSetEvent { pos: edited, id: stone, prev, axis: AXIS_Y });
+    // ...and a fluid cell no edit records - a flowing level, as the fluid
+    // sim would leave - which only the fluid save can bring back.
+    let wet = open_air_run(&app, 2) + IVec3::X * 2;
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(wet, water);
+        map.set_fluid_level_raw(wet, 3);
+    }
+    app.update();
+    let spawn = IVec2::ZERO;
+    let capture = |app: &App| {
+        let chunk = &app.world().resource::<ChunkMap>().chunks[&spawn];
+        (chunk.blocks.clone().unwrap(), chunk.fluid_level.clone().unwrap())
+    };
+    let before = capture(&app);
+    assert_eq!(before.0[craftmjne::config::block_index(
+        wet.x as usize, wet.y as usize, wet.z as usize)], water);
+
+    let fly_to = |app: &mut App, x: f32| {
+        let mut players = app.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app.world_mut()).unwrap();
+        player.pos = Vec3::new(x, 200.0, 8.0);
+        player.spawned = true;
+        player.fly = true;
+    };
+    let gone = |app: &mut App| !app.world().resource::<ChunkMap>().chunks.contains_key(&spawn);
+    let back = |app: &mut App| {
+        app.world().resource::<ChunkMap>().chunks.get(&spawn).is_some_and(|c| c.blocks.is_some())
+    };
+
+    // Away: the spawn chunk unloads, and memory holds only what's near.
+    fly_to(&mut app, 16.0 * 20.0);
+    assert!(run_until(&mut app, gone, 2000), "the spawn chunk never unloaded");
+    let r = app.world().resource::<WorldSettings>().render_distance + craftmjne::world::UNLOAD_MARGIN;
+    let loaded = app.world().resource::<ChunkMap>().chunks.len() as i32;
+    assert!(loaded <= (2 * r + 1) * (2 * r + 1), "{loaded} chunks still loaded far from most of them");
+
+    // Back again: exactly as it was.
+    fly_to(&mut app, 8.0);
+    assert!(run_until(&mut app, back, 2000), "the spawn chunk never came back");
+    let after = capture(&app);
+    assert!(after.0 == before.0, "blocks changed after unloading and reloading the chunk");
+    assert!(after.1 == before.1, "fluid levels changed after unloading and reloading the chunk");
+
+    // Away again, and save and reload while it's unloaded.
+    fly_to(&mut app, 16.0 * 20.0);
+    assert!(run_until(&mut app, gone, 2000));
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+    let mut app2 = reload_app(&temp);
+    fly_to(&mut app2, 8.0);
+    assert!(run_until(&mut app2, back, 2000));
+    let reloaded = capture(&app2);
+    assert!(reloaded.0 == before.0, "blocks changed after a save made while the chunk was unloaded");
+    assert!(reloaded.1 == before.1, "fluid changed after a save made while the chunk was unloaded");
+}

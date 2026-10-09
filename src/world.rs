@@ -980,29 +980,9 @@ fn write_save(
                 continue;
             }
         }
-        let start = fluids.len();
-        for z in 0..CS {
-            for x in 0..CS {
-                for y in 0..H {
-                    let idx = block_index(x, y, z);
-                    let id = blocks[idx];
-                    if !tables.fluid[id as usize] {
-                        continue;
-                    }
-                    if chunk.base_fluid.as_ref().is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1) {
-                        continue; // as generated: restored from the snapshot
-                    }
-                    fluids.push(FluidCell {
-                        x: coord.x * CHUNK_SIZE + x as i32,
-                        y: y as i32,
-                        z: coord.y * CHUNK_SIZE + z as i32,
-                        block: registry.def(id).id.clone(),
-                        level: levels[idx],
-                    });
-                }
-            }
-        }
-        cache.0.insert(*coord, (chunk.version, fluids[start..].to_vec()));
+        let cells = chunk_fluid_cells(*coord, blocks, levels, chunk.base_fluid.as_deref(), registry, tables);
+        fluids.extend(cells.iter().cloned());
+        cache.0.insert(*coord, (chunk.version, cells));
     }
     for (coord, saved) in &original_fluids.0 {
         if !map.chunks.contains_key(coord) {
@@ -1020,6 +1000,42 @@ fn write_save(
     });
     let data = WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count };
     persist(store.clone(), active.slug.clone(), data, background);
+}
+
+/// A loaded chunk's fluid state as saved: every fluid cell except sources
+/// the chunk was generated with (`base_fluid`), which its snapshot already
+/// restores.
+fn chunk_fluid_cells(
+    coord: IVec2,
+    blocks: &[BlockId],
+    levels: &[u8],
+    base_fluid: Option<&[u64]>,
+    registry: &BlockRegistry,
+    tables: &Tables,
+) -> Vec<FluidCell> {
+    let mut cells = Vec::new();
+    for z in 0..CS {
+        for x in 0..CS {
+            for y in 0..H {
+                let idx = block_index(x, y, z);
+                let id = blocks[idx];
+                if !tables.fluid[id as usize] {
+                    continue;
+                }
+                if base_fluid.is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1) {
+                    continue; // as generated: restored from the snapshot
+                }
+                cells.push(FluidCell {
+                    x: coord.x * CHUNK_SIZE + x as i32,
+                    y: y as i32,
+                    z: coord.y * CHUNK_SIZE + z as i32,
+                    block: registry.def(id).id.clone(),
+                    level: levels[idx],
+                });
+            }
+        }
+    }
+    cells
 }
 
 /// Each chunk's saved fluid cells, as of the chunk `version` they were
@@ -1308,6 +1324,109 @@ fn collect_gen_tasks(
     }
 }
 
+/// How many chunks beyond the render distance a chunk's data stays in
+/// memory once its mesh is gone (meshes go at `render_distance + 2`) -
+/// enough slack that walking back and forth across a boundary doesn't
+/// unload and reload the same chunks over and over.
+pub const UNLOAD_MARGIN: i32 = 4;
+
+/// Drops far-away chunks' data from memory. A chunk is ~10 bytes a cell,
+/// over half a megabyte at the full world height, and every visited chunk
+/// used to stay loaded for the whole session.
+///
+/// Unloading puts a chunk back exactly where a chunk not yet visited this
+/// session already is, so it reuses that path rather than adding one: its
+/// terrain is its snapshot on disk; its edits stay in `EditLog` (what gets
+/// saved) and go back into `PendingEdits` (what's reapplied when it loads);
+/// its fluid goes into `OriginalFluids` (saved for chunks that aren't
+/// loaded) and `PendingFluids` (reapplied on load). Only chunks with a
+/// snapshot are unloaded - without one, coming back would generate the
+/// chunk anew, and saved fluid isn't reapplied onto freshly generated
+/// terrain (`collect_gen_tasks`).
+#[allow(clippy::too_many_arguments)]
+fn unload_far_chunks(
+    mut map: ResMut<ChunkMap>,
+    settings: Res<WorldSettings>,
+    snapshots: Res<ChunkSnapshots>,
+    log: Res<EditLog>,
+    registry: Res<BlockRegistry>,
+    tables: Res<BlockTables>,
+    mut pending: ResMut<PendingEdits>,
+    mut pending_fluids: ResMut<PendingFluids>,
+    mut original_fluids: ResMut<OriginalFluids>,
+    mut cache: ResMut<FluidSaveCache>,
+    players: Query<&Player>,
+    mut last: Local<Option<IVec2>>,
+    mut retry: Local<bool>,
+) {
+    let Ok(player) = players.single() else { return };
+    let pc = ChunkMap::chunk_coord(player.pos.x.floor() as i32, player.pos.z.floor() as i32);
+    // Only when the player crosses into another chunk - or when a far chunk
+    // last time was only *temporarily* in the way (still generating or
+    // meshing, or its mesh not dropped yet). Without the retry, a chunk
+    // that happened to be busy at that one moment stayed loaded until the
+    // player next changed chunk.
+    if *last == Some(pc) && !*retry {
+        return;
+    }
+    *last = Some(pc);
+    *retry = false;
+
+    let far = settings.render_distance + UNLOAD_MARGIN;
+    let mut gone = Vec::new();
+    for (coord, chunk) in &map.chunks {
+        let d = *coord - pc;
+        if d.x * d.x + d.y * d.y <= far * far {
+            continue;
+        }
+        let busy = chunk.blocks.is_none()
+            || chunk.meshing
+            || chunk.meshed
+            || chunk.solid_entity.is_some()
+            || chunk.water_entity.is_some();
+        if busy {
+            *retry = true;
+        } else if snapshots.0.has_snapshot(coord.x, coord.y) {
+            gone.push(*coord);
+        }
+    }
+    if gone.is_empty() {
+        return;
+    }
+
+    for coord in &gone {
+        let chunk = map.chunks.remove(coord).unwrap();
+        cache.0.remove(coord);
+        // An untouched chunk's only fluid is what its snapshot restores.
+        let cells = match (chunk.touched, &chunk.blocks, &chunk.fluid_level) {
+            (true, Some(blocks), Some(levels)) => {
+                chunk_fluid_cells(*coord, blocks, levels, chunk.base_fluid.as_deref(), &registry, &tables.0)
+            }
+            _ => Vec::new(),
+        };
+        let reapply: Vec<(IVec3, BlockId, u8)> = cells
+            .iter()
+            .filter_map(|c| Some((IVec3::new(c.x, c.y, c.z), registry.by_name(&c.block).ok()?, c.level)))
+            .collect();
+        if cells.is_empty() {
+            original_fluids.0.remove(coord);
+            pending_fluids.0.remove(coord);
+        } else {
+            original_fluids.0.insert(*coord, cells);
+            pending_fluids.0.insert(*coord, reapply);
+        }
+        pending.0.remove(coord);
+    }
+    let gone: std::collections::HashSet<IVec2> = gone.into_iter().collect();
+    for (pos, &(id, axis)) in &log.0 {
+        let coord = ChunkMap::chunk_coord(pos.x, pos.z);
+        if gone.contains(&coord) {
+            pending.0.entry(coord).or_default().push((*pos, id, axis));
+        }
+    }
+    map.needs_scan = true;
+}
+
 fn collect_mesh_tasks(
     mut commands: Commands,
     mut map: ResMut<ChunkMap>,
@@ -1405,6 +1524,13 @@ impl Plugin for WorldPlugin {
                 stream_chunks
                     .in_set(ChunkPipelineSet::Stream)
                     .after(ChunkPipelineSet::Collect)
+                    .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
+            )
+            .add_systems(
+                Update,
+                unload_far_chunks
+                    .after(stream_chunks)
+                    .after(record_edits)
                     .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
             )
             .add_systems(
