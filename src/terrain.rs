@@ -46,6 +46,13 @@ const SNOW_LINE: i32 = 165;
 /// `mountain` noise already produced).
 const DRIER_HEIGHT_BOOST: f64 = 6.0;
 
+/// The densest any biome's trees grow (`Biome::tree_chance`'s largest
+/// value) - lets `tree_at` reject most columns before looking at them.
+const MAX_TREE_CHANCE: f32 = 0.08;
+/// How far a canopy reaches from its trunk - so how far past its own
+/// border a chunk looks for trees whose leaves reach into it.
+const TREE_CANOPY_RADIUS: i32 = 2;
+
 /// Very-low-frequency noise stream deciding where large, genuinely
 /// *connected* ocean basins sit, entirely separate from `mountain`/
 /// `terrain`'s local relief - see `TerrainGenerator::base_height`'s ocean
@@ -157,6 +164,30 @@ const ROUTING_SMOOTHING: f64 = 40.0;
 /// spot, which leaves about one cell in ten a river: a network you keep
 /// running into while exploring, without a stream every few steps.
 const RIVER_THRESHOLD: f32 = 48.0;
+/// The smaller catchment that makes a stream - a brook a block or two wide.
+/// Streams are part of the same drainage network, so nearly every one runs
+/// on downhill into a river (or straight to the sea). They're not drawn on
+/// mountain ranges, where every brook would be a string of waterfalls; the
+/// few that flow onto one end there.
+const STREAM_THRESHOLD: f32 = 16.0;
+/// The threshold every river/stream water level is computed with. One
+/// value everywhere, because `drainage::Network::water_level` memoizes per
+/// node: it's the lowest waterway threshold, so a river's surface is
+/// capped by the streams flowing into it too and never steps *up* where a
+/// stream joins.
+const WATER_LEVEL_THRESHOLD: f32 = STREAM_THRESHOLD;
+/// Half-width of the smallest and largest stream: one block wide (a
+/// diagonal stream still joins up edge to edge at 0.75) up to two.
+const STREAM_HALF_WIDTH: (f64, f64) = (0.75, 1.0);
+/// How much of a river's incision a stream gets - brooks run nearly flush.
+const STREAM_INCISION: f64 = 0.25;
+/// Ponds on plains streams and small rivers: how often a node gets one,
+/// its radius range, its depth, and the biggest catchment that still does
+/// (bigger rivers just widen in their floodplain).
+const POND_CHANCE: f32 = 0.15;
+const POND_RADIUS: (f64, f64) = (3.0, 6.5);
+const POND_DEPTH: f64 = 2.5;
+const POND_MAX_ACCUMULATION: f32 = RIVER_THRESHOLD * 3.0;
 /// Catchment at which a river reaches its full width/depth. Sizes grow
 /// logarithmically between `RIVER_THRESHOLD` and this, so headwaters stay
 /// thin for a long way and only the trunk of a large basin gets wide.
@@ -194,6 +225,13 @@ const ICEBERG_KEEL: i32 = 3;
 /// and become marshes instead.
 const SALT_SEA_MIN_CELLS: usize = 8;
 const SALT_SEA_CHANCE: f32 = 0.2;
+/// How often an overflowing depression becomes alpha plains instead of a
+/// marsh.
+const ALPHA_BASIN_CHANCE: f32 = 0.4;
+/// How rough an alpha-plains basin's ground is (blocks of extra bumps over
+/// the basin floor), and how deep a dip has to be to hold a puddle.
+const ALPHA_BASIN_RELIEF: f64 = 3.0;
+const ALPHA_PUDDLE_DIP: f64 = -1.2;
 /// River lengths, in drainage cells from the furthest source, over which a
 /// river's size can grow: one this short is a stream however much land
 /// drains into it, and only one this long can reach full width.
@@ -284,6 +322,9 @@ struct RiverSample {
     slope: f64,
     half_width: f64,
     depth: f64,
+    /// The nearest segment drops as a waterfall (`WATERFALL_DROP`): its
+    /// valley floor steps down at the lip, on purpose.
+    falls: bool,
     /// How high the valley floor and sides stand here: the lowest of every
     /// nearby segment's own valley surface, not just the nearest one's -
     /// where two rivers' valleys overlap, taking whichever segment is
@@ -300,6 +341,8 @@ struct RiverEnd {
     half_width: f64,
     depth: f64,
     incision: f64,
+    /// Radius of the pond the river widens into around this node, or `0`.
+    pond: f64,
 }
 
 /// A stretch of river from one drainage node to the node it drains into.
@@ -356,6 +399,9 @@ pub struct ColumnProfile {
     pub near_wetland: bool,
     /// What the ground is made of here, where that's decided by a wetland.
     pub surface: Surface,
+    /// Inside a depression that became alpha plains rather than a marsh -
+    /// the column's biome is `AlphaPlains` whatever its climate says.
+    pub alpha_plains: bool,
     /// The fluid level of the topmost water block: `FLUID_SOURCE`, or a
     /// flowing level where a river's surface is easing down from one block
     /// to the next (see `raw_column_with`).
@@ -374,12 +420,14 @@ pub enum Surface {
     Salt,
 }
 
-/// What a river-fed depression becomes: a marsh if it overflows, a salt
-/// sea if it keeps its water (`drainage::Landscape::keeps_its_water`).
+/// What a river-fed depression becomes: a salt sea if it keeps its water
+/// (`drainage::Landscape::keeps_its_water`); if it overflows, a marsh, or
+/// sometimes rough alpha-plains grassland with puddles in its dips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WetlandKind {
     Marsh,
     SaltSea,
+    AlphaPlains,
 }
 
 /// One depression's wetland: which kind, and the height its water stands
@@ -452,11 +500,13 @@ impl<'a> Blend<'a> {
         Self { old, current: RefCell::new(HashMap::new()), area: None, segments: std::cell::OnceCell::new() }
     }
 
-    /// For generating chunk `(cx, cz)`: its columns, plus the two-column
-    /// ring around it that `generate` and the levee rule look at.
+    /// For generating chunk `(cx, cz)`: its columns, plus the ring around
+    /// it that `generate`, the levee rule and trees over the border look at.
     fn for_chunk(old: &'a [OldChunk], cx: i32, cz: i32) -> Self {
-        let (x0, z0) = (cx * CHUNK_SIZE - 2, cz * CHUNK_SIZE - 2);
-        Self { area: Some((x0, z0, x0 + CHUNK_SIZE + 3, z0 + CHUNK_SIZE + 3)), ..Self::new(old) }
+        // Four columns out: trees just over the border (`TREE_CANOPY_RADIUS`)
+        // look at their neighbours, whose levee rule looks one further.
+        let (x0, z0) = (cx * CHUNK_SIZE - 4, cz * CHUNK_SIZE - 4);
+        Self { area: Some((x0, z0, x0 + CHUNK_SIZE + 7, z0 + CHUNK_SIZE + 7)), ..Self::new(old) }
     }
 
     /// The river segments that can reach column `(wx, wz)`.
@@ -643,7 +693,11 @@ impl TerrainGenerator {
     fn land_relief(&self, wx: i32, wz: i32, c: f32) -> f64 {
         let detail = self.terrain.fbm2(wx as f64 * 0.011, wz as f64 * 0.011, 4);
         let inland = smoothstep(((c - OCEAN_THRESHOLD) / UPLAND_REACH) as f64);
-        let relief = lerp(HILL_AMPLITUDE.0, HILL_AMPLITUDE.1, self.hilliness(wx, wz));
+        // Hill country is rougher than flat country, and the biome scales
+        // both: plains are wide and flat, forest rolls, alpha plains and snow
+        // keep the full relief (`biome::relief_scale`).
+        let relief = lerp(HILL_AMPLITUDE.0, HILL_AMPLITUDE.1, self.hilliness(wx, wz))
+            * biome::relief_scale(&self.climate, wx, wz);
         let plains = LOWLAND + UPLAND_RISE * inland + detail * relief;
         let range = self.mountainness(wx, wz);
         if range <= 0.0 {
@@ -758,36 +812,72 @@ impl TerrainGenerator {
             *ends.entry(cell).or_insert_with(|| {
                 let (x, z) = net.node_pos(cell);
                 let accumulation = net.accumulation(self, cell);
-                let by_flow = (accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln();
-                // The longer a river has run, the bigger it can be: a short
-                // one stays a stream even where a lot of land drains into it.
-                let (short, long) = RIVER_LENGTH_FOR_SIZE;
-                let by_length = (net.length(self, cell) / short).ln() / (long / short).ln();
-                let size = by_flow.min(by_length).clamp(0.0, 1.0) as f64;
-                RiverEnd {
-                    pos: (x, z),
-                    water: net.water_level(self, cell, RIVER_THRESHOLD) as f64,
-                    half_width: lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size),
-                    depth: lerp(RIVER_DEPTH.0, RIVER_DEPTH.1, size),
-                    incision: self.river_incision(x, z),
-                }
+                let water = net.water_level(self, cell, WATER_LEVEL_THRESHOLD) as f64;
+                let (half_width, depth, incision) = if accumulation <= RIVER_THRESHOLD {
+                    // A stream: a block or two wide, shallow, nearly flush.
+                    let t = ((accumulation - STREAM_THRESHOLD) / (RIVER_THRESHOLD - STREAM_THRESHOLD)).clamp(0.0, 1.0);
+                    (lerp(STREAM_HALF_WIDTH.0, STREAM_HALF_WIDTH.1, t as f64), 1.0, self.river_incision(x, z) * STREAM_INCISION)
+                } else {
+                    let by_flow = (accumulation / RIVER_THRESHOLD).ln() / (MAX_ACCUM_FOR_FULL_SIZE / RIVER_THRESHOLD).ln();
+                    // The longer a river has run, the bigger it can be: a
+                    // short one stays small even where a lot of land drains
+                    // into it.
+                    let (short, long) = RIVER_LENGTH_FOR_SIZE;
+                    let by_length = (net.length(self, cell) / short).ln() / (long / short).ln();
+                    let size = by_flow.min(by_length).clamp(0.0, 1.0) as f64;
+                    (
+                        lerp(RIVER_HALF_WIDTH.0, RIVER_HALF_WIDTH.1, size),
+                        lerp(RIVER_DEPTH.0, RIVER_DEPTH.1, size),
+                        self.river_incision(x, z),
+                    )
+                };
+                // A pond, on a plains stream or small river where it's
+                // nearly level - so its surface can be flat.
+                let pond = if accumulation < POND_MAX_ACCUMULATION
+                    && hash2(cell.0, cell.1, self.seed ^ 0x90d5) < POND_CHANCE
+                    && biome::region_biome_at(&self.climate, x as i32, z as i32) == Biome::Plains
+                    && net.downstream(self, cell).is_some_and(|d| {
+                        water - (net.water_level(self, d, WATER_LEVEL_THRESHOLD) as f64) < 1.0
+                    }) {
+                    lerp(POND_RADIUS.0, POND_RADIUS.1, hash2(cell.0, cell.1, self.seed ^ 0x90d6) as f64)
+                } else {
+                    0.0
+                };
+                RiverEnd { pos: (x, z), water, half_width, depth, incision, pond }
             })
         };
         let mut segments = Vec::new();
         for cz in (z0 - margin).div_euclid(CELL)..=(z1 + margin).div_euclid(CELL) {
             for cx in (x0 - margin).div_euclid(CELL)..=(x1 + margin).div_euclid(CELL) {
                 let cell = (cx, cz);
-                if net.accumulation(self, cell) <= RIVER_THRESHOLD {
+                if !self.waterway(cell) {
                     continue;
                 }
                 let a = end(cell);
                 // Downstream of a river cell is always a river cell too (it
-                // drains at least as much).
+                // drains at least as much). Downstream of a stream usually
+                // is, unless the stream runs out of the country streams are
+                // drawn in, where it ends.
                 let b = net.downstream(self, cell).map_or(a, &mut end);
                 segments.push(RiverSegment { a, b });
             }
         }
         segments
+    }
+
+    /// Whether drainage cell `cell` is drawn as water: a river anywhere, or a
+    /// stream anywhere off the mountain ranges.
+    fn waterway(&self, cell: crate::drainage::Cell) -> bool {
+        let accumulation = self.drainage.accumulation(self, cell);
+        if accumulation > RIVER_THRESHOLD {
+            return true;
+        }
+        if accumulation <= STREAM_THRESHOLD {
+            return false;
+        }
+        let (x, z) = self.drainage.node_pos(cell);
+        let (x, z) = (x as i32, z as i32);
+        self.mountainness(x, z) < biome::MOUNTAIN_RANGE_THRESHOLD
     }
 
     /// The nearest river to `(x, z)` among `segments`, if one is within
@@ -799,6 +889,10 @@ impl TerrainGenerator {
     fn river_sample(&self, wx: i32, wz: i32, natural: f64, segments: &[RiverSegment]) -> Option<RiverSample> {
         let (px, pz) = (wx as f64 + 0.5, wz as f64 + 0.5);
         let mut best: Option<RiverSample> = None;
+        // A column inside a pond is the pond, whichever stream line it
+        // happens to sit nearest - a stream flowing in would otherwise give
+        // its edge of the pond the stream's own, higher, water.
+        let mut in_pond: Option<RiverSample> = None;
         let mut valley = f64::INFINITY;
         // Steeper valley sides in mountains (see `VALLEY_SLOPE`), looked up
         // once a valley turns out to be in reach.
@@ -813,12 +907,30 @@ impl TerrainGenerator {
                 continue;
             }
             let falls = a.water - b.water >= WATERFALL_DROP;
-            let water = if falls {
+            let mut water = if falls {
                 if t < 1.0 && natural >= a.water.floor() { a.water } else { b.water }
             } else {
                 lerp(a.water, b.water, t)
             };
-            let half_width = lerp(a.half_width, b.half_width, t);
+            let mut half_width = lerp(a.half_width, b.half_width, t);
+            let mut depth = lerp(a.depth, b.depth, t);
+            let mut slope = if falls || len2 <= 0.0 { 0.0 } else { (a.water - b.water) / (sx.abs() + sz.abs()) };
+            // A pond at either end widens the river into a round pool
+            // around that node, with that node's level as a flat surface.
+            let len = len2.sqrt();
+            let mut pond = false;
+            for (end, along) in [(a, t * len), (b, (1.0 - t) * len)] {
+                if end.pond > along {
+                    let reach = (end.pond * end.pond - along * along).sqrt();
+                    if reach > half_width {
+                        half_width = reach;
+                        water = end.water;
+                        depth = depth.max(POND_DEPTH);
+                        slope = 0.0;
+                        pond = true;
+                    }
+                }
+            }
             let incision = lerp(a.incision, b.incision, t);
 
             // This segment's valley. Its floor is the river's banks (`water
@@ -839,6 +951,9 @@ impl TerrainGenerator {
                 valley = valley.min(banks + slope * out * out / (out + VALLEY_BEND));
             }
 
+            if pond && d <= half_width && in_pond.as_ref().is_none_or(|r| r.distance > d) {
+                in_pond = Some(RiverSample { distance: d, slope, water, half_width, depth, falls, valley: f64::INFINITY });
+            }
             if best.as_ref().is_some_and(|r| r.distance <= d) {
                 continue;
             }
@@ -847,14 +962,15 @@ impl TerrainGenerator {
                 // Per *grid step*, not per block of straight-line distance:
                 // the fluid sim measures distance in sideways steps, which a
                 // diagonal river takes more of to cover the same ground.
-                slope: if falls || len2 <= 0.0 { 0.0 } else { (a.water - b.water) / (sx.abs() + sz.abs()) },
+                slope,
                 water,
                 half_width,
-                depth: lerp(a.depth, b.depth, t),
+                depth,
+                falls,
                 valley: f64::INFINITY,
             });
         }
-        best.map(|r| RiverSample { valley, ..r })
+        in_pond.or(best).map(|r| RiverSample { valley, ..r })
     }
 
     /// How column `(wx, wz)` blends into the old chunks around it:
@@ -920,6 +1036,14 @@ impl TerrainGenerator {
                 // always deep enough to be a sea, not a puddle; the levee
                 // rule holds back whatever the rim can't.
                 (WetlandKind::SaltSea, (rim - 1.0).max(inside[0] + 3.0))
+            } else if hash2(pit.0, pit.1, self.seed ^ 0xa1fa) < ALPHA_BASIN_CHANCE && {
+                // Grassland only where grassland belongs - not in snow.
+                let (x, z) = net.node_pos(pit);
+                biome::region_biome_at(&self.climate, x as i32, z as i32).grassland()
+            } {
+                // Rough grassland instead of a marsh; the level is only the
+                // basin floor its bumps are measured from.
+                (WetlandKind::AlphaPlains, inside[inside.len() * 2 / 5])
             } else {
                 // Only the lowest ground is waterlogged.
                 (WetlandKind::Marsh, inside[inside.len() * 2 / 5] + 0.5)
@@ -979,6 +1103,7 @@ impl TerrainGenerator {
                 near_river: false,
                 near_wetland: false,
                 surface: Surface::Normal,
+                alpha_plains: false,
                 top_level: FLUID_SOURCE,
             };
         }
@@ -1050,7 +1175,7 @@ impl TerrainGenerator {
 
         // A marsh or salt sea, where a river reaches a depression. Not
         // beside an old chunk, which knows nothing about it.
-        let (mut surface, mut pond, mut near_wetland) = (Surface::Normal, None, false);
+        let (mut surface, mut pond, mut near_wetland, mut alpha_plains) = (Surface::Normal, None, false, false);
         if let (Some((wetland, inside)), true) = (self.wetland_near(wx, wz), dry <= 0.0) {
             near_wetland = true;
             let level = wetland.level;
@@ -1073,6 +1198,20 @@ impl TerrainGenerator {
                     pond = pools.then_some(level as i32);
                     surface = Surface::Mud;
                 }
+                WetlandKind::AlphaPlains if inside => {
+                    alpha_plains = true;
+                    // The low ground is rough and bumpy, the way this
+                    // world's original plains were, and its deeper dips
+                    // hold puddles at the ground's own level. A river
+                    // keeps its channel through it.
+                    if river_water.is_none() && natural <= level + 6.0 && h >= natural - 0.5 {
+                        let bump = self.terrain.fbm2(wx as f64 * 0.06 + 13.7, wz as f64 * 0.06 - 41.2, 3) * ALPHA_BASIN_RELIEF;
+                        h = natural + bump;
+                        if bump < ALPHA_PUDDLE_DIP {
+                            pond = Some(natural.floor() as i32);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1092,6 +1231,7 @@ impl TerrainGenerator {
             near_river,
             near_wetland,
             surface,
+            alpha_plains,
             top_level: if river_water.is_some() && river_water == water_top { top_level } else { FLUID_SOURCE },
         }
     }
@@ -1162,7 +1302,8 @@ impl TerrainGenerator {
             let sea = biome::sea_biome_at(&self.climate, wx, wz);
             return if sea == Biome::ColdSea && self.in_iceberg_waters(wx, wz) { Biome::Icebergs } else { sea };
         }
-        biome::zoned_biome(biome::region_biome_at(&self.climate, wx, wz), self.mountainness(wx, wz), col.height)
+        let region = if col.alpha_plains { Biome::AlphaPlains } else { biome::region_biome_at(&self.climate, wx, wz) };
+        biome::zoned_biome(region, self.mountainness(wx, wz), col.height)
     }
 
     /// Whether a column is the sea itself - water at sea level on the
@@ -1203,6 +1344,40 @@ impl TerrainGenerator {
     fn iceberg_height(&self, wx: i32, wz: i32) -> i32 {
         let n = self.coast.fbm2(wx as f64 * ICEBERG_SCALE - 41.7, wz as f64 * ICEBERG_SCALE + 655.2, 2);
         if n <= ICEBERG_BLOB { 0 } else { 1 + ((n - ICEBERG_BLOB) * ICEBERG_RISE) as i32 }
+    }
+
+    /// Whether a tree grows at world column `(wx, wz)`, and if so how tall
+    /// its trunk is. `profile(dx, dz)` is the column at that offset - this
+    /// one at `(0, 0)` - so a chunk can ask about columns just over its
+    /// border (`generate`) and get the same answer their own chunk does.
+    ///
+    /// Only on gentle, dry grass: no trees on cliff faces, river banks,
+    /// beaches, sea stacks or snow, and as many as the biome calls for
+    /// (`Biome::tree_chance`) - dense in forest, the odd one in plains.
+    fn tree_at(&self, wx: i32, wz: i32, profile: impl Fn(i32, i32) -> ColumnProfile) -> Option<i32> {
+        let r = hash2(wx, wz, self.seed ^ 0x51f3);
+        if r >= MAX_TREE_CHANCE {
+            return None; // cheap: most columns never get past this
+        }
+        let col = profile(0, 0);
+        let h = col.height;
+        if col.water_top.is_some() || col.river_bank || col.surface != Surface::Normal || h <= SEA_LEVEL + 2 || h >= SNOW_LINE
+        {
+            return None;
+        }
+        let biome = self.biome_of(wx, wz, &col);
+        if r >= biome.tree_chance() {
+            return None;
+        }
+        if [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| (profile(dx, dz).height - h).abs() > 1) {
+            return None;
+        }
+        if self.coast_shape(wx, wz).1 != CoastPart::Open {
+            return None;
+        }
+        let tall = biome == Biome::Forest && hash2(wx, wz, self.seed ^ 0x7a11) < 0.3;
+        let trunk = 4 + ((r * 1000.0) as i32) % 3 + if tall { 2 } else { 0 };
+        (h + trunk + 3 < WORLD_HEIGHT).then_some(trunk)
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> GeneratedChunk {
@@ -1424,58 +1599,71 @@ impl TerrainGenerator {
             }
         }
 
-        // Trees (second pass; margin keeps canopies inside this chunk).
-        for z in 2..CS - 2 {
-            for x in 2..CS - 2 {
-                if surface[x + CS * z] != ids.grass {
+        // Trees. Whether a column grows one is a pure function of the
+        // column and its neighbours (`tree_at`), so this chunk works out the
+        // trees just over its border too and draws the parts of their
+        // canopies that reach in - trees aren't kept away from chunk edges,
+        // which in a dense forest showed as treeless stripes on the grid.
+        // Columns inside an old chunk are left out: its trees were decided
+        // by the generator that made it.
+        let extra: RefCell<HashMap<(i32, i32), ColumnProfile>> = RefCell::new(HashMap::new());
+        let profile = |x: i32, z: i32| -> ColumnProfile {
+            if (-1..=CHUNK_SIZE).contains(&x) && (-1..=CHUNK_SIZE).contains(&z) {
+                return at(x, z);
+            }
+            let (wx, wz) = (cx * CHUNK_SIZE + x, cz * CHUNK_SIZE + z);
+            *extra.borrow_mut().entry((wx, wz)).or_insert_with(|| self.column_profile_in(wx, wz, &blend))
+        };
+        let reach = TREE_CANOPY_RADIUS;
+        let mut trees = Vec::new();
+        for z in -reach..CHUNK_SIZE + reach {
+            for x in -reach..CHUNK_SIZE + reach {
+                let (wx, wz) = (cx * CHUNK_SIZE + x, cz * CHUNK_SIZE + z);
+                if blend.old_column(wx, wz).is_some() {
                     continue;
                 }
-                let wx = cx * CHUNK_SIZE + x as i32;
-                let wz = cz * CHUNK_SIZE + z as i32;
-                let r = hash2(wx, wz, seed ^ 0x51f3);
-                if r >= 0.012 {
-                    continue;
+                if let Some(trunk) = self.tree_at(wx, wz, |dx, dz| profile(x + dx, z + dz)) {
+                    trees.push((x, z, profile(x, z).height, trunk));
                 }
-
-                let h = heights[x + CS * z];
-                let trunk_h = 4 + ((r * 1000.0) as i32) % 3;
-                if h + trunk_h + 2 >= WORLD_HEIGHT {
-                    continue;
-                }
-                let base = block_index(x, 0, z);
-                if blocks[base + h as usize] != ids.grass {
-                    continue; // surface was carved away
-                }
-
+            }
+        }
+        let inside = |x: i32, z: i32| (0..CHUNK_SIZE).contains(&x) && (0..CHUNK_SIZE).contains(&z);
+        // Trunks first, then leaves only into air - so a canopy never
+        // replaces another tree's trunk, whichever order they're drawn in.
+        for &(x, z, h, trunk) in &trees {
+            if !inside(x, z) {
+                continue;
+            }
+            let base = block_index(x as usize, 0, z as usize);
+            if blocks[base + h as usize] == ids.grass {
                 blocks[base + h as usize] = ids.dirt;
-                for t in 1..=trunk_h {
-                    blocks[base + (h + t) as usize] = ids.log;
-                }
-
-                // Canopy: two wide layers, a narrow layer, and a cap.
-                for ly in (trunk_h - 2)..=(trunk_h + 1) {
-                    let radius: i32 = if ly <= trunk_h - 1 { 2 } else { 1 };
-                    for dz in -radius..=radius {
-                        for dx in -radius..=radius {
-                            if dx.abs() == radius
-                                && dz.abs() == radius
-                                && (radius == 2 || ly == trunk_h + 1)
-                            {
-                                continue; // clip corners
-                            }
-                            let idx = block_index(
-                                (x as i32 + dx) as usize,
-                                (h + ly) as usize,
-                                (z as i32 + dz) as usize,
-                            );
-                            if blocks[idx] == AIR {
-                                blocks[idx] = ids.leaves;
-                            }
-                        }
+            }
+            for t in 1..=trunk {
+                blocks[base + (h + t) as usize] = ids.log;
+            }
+        }
+        for &(x, z, h, trunk) in &trees {
+            // Canopy: two wide layers, a narrow layer, and a cap.
+            let mut leaf = |lx: i32, y: i32, lz: i32| {
+                if inside(lx, lz) && (0..WORLD_HEIGHT).contains(&y) {
+                    let idx = block_index(lx as usize, y as usize, lz as usize);
+                    if blocks[idx] == AIR {
+                        blocks[idx] = ids.leaves;
                     }
                 }
-                blocks[base + (h + trunk_h + 1) as usize] = ids.leaves;
+            };
+            for ly in (trunk - 2)..=(trunk + 1) {
+                let radius: i32 = if ly <= trunk - 1 { TREE_CANOPY_RADIUS } else { 1 };
+                for dz in -radius..=radius {
+                    for dx in -radius..=radius {
+                        if dx.abs() == radius && dz.abs() == radius && (radius == 2 || ly == trunk + 1) {
+                            continue; // clip corners
+                        }
+                        leaf(x + dx, h + ly, z + dz);
+                    }
+                }
             }
+            leaf(x, h + trunk + 1, z);
         }
 
         GeneratedChunk {
@@ -1720,6 +1908,9 @@ impl TerrainGenerator {
                 sea == target || (target == Biome::Icebergs && sea == Biome::ColdSea)
             } else if target == Biome::Mountain {
                 self.mountainness(x, z) >= biome::MOUNTAIN_RANGE_THRESHOLD
+            } else if target == Biome::AlphaPlains {
+                // Rare patches by climate, or a basin anywhere grassland is.
+                biome::region_biome_at(&self.climate, x, z).grassland()
             } else {
                 biome::region_biome_at(&self.climate, x, z) == target
             };
@@ -1869,7 +2060,7 @@ mod tests {
                 }
                 let (x, z) = net.node_pos(cell);
                 let corner = (x as i32 - WINDOW / 2, z as i32 - WINDOW / 2);
-                if net.water_level(gen, cell, RIVER_THRESHOLD) >= SEA_LEVEL as f32 + 6.0 && upland.len() < 3 {
+                if net.water_level(gen, cell, WATER_LEVEL_THRESHOLD) >= SEA_LEVEL as f32 + 6.0 && upland.len() < 3 {
                     upland.push(corner);
                 } else if any.len() < 3 {
                     any.push(corner);
@@ -2263,7 +2454,7 @@ mod tests {
             for j in -60..60 {
                 let cell = (i * 4, j * 4);
                 if net.accumulation(gen, cell) <= RIVER_THRESHOLD
-                    || net.water_level(gen, cell, RIVER_THRESHOLD) < SEA_LEVEL as f32 + 3.0
+                    || net.water_level(gen, cell, WATER_LEVEL_THRESHOLD) < SEA_LEVEL as f32 + 3.0
                 {
                     continue;
                 }
@@ -2340,10 +2531,14 @@ mod tests {
         let (cx, cz) = upland_river_chunk(&gen);
         // Old land both higher and lower than this generator's: lower is
         // the case where a river left running would pour out over it.
+        // Offset from the ground this generator really makes there, not
+        // its natural height - a river valley can lower the land by just
+        // the offset, and an old column identical to the new one is
+        // rightly not blended at all.
         for ((dx, dz), raise) in [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().flat_map(|d| [(d, 6), (d, -6)]) {
             let coord = (cx + dx, cz + dz);
             let old = vec![old_chunk(coord, |x, z| ColumnSurface {
-                ground: (gen.natural_height(x, z) as i32 + raise).max(SEA_LEVEL),
+                ground: (gen.effective_height(x, z) + raise).max(SEA_LEVEL),
                 water: None,
             })];
             let blend = Blend::new(&old);
@@ -2845,7 +3040,10 @@ mod tests {
                             let natural = gen.natural_height(wx, wz);
                             let Some(r) = gen.river_sample(wx, wz, natural, &segments) else { continue };
                             let out = r.distance - r.half_width;
+                            // A waterfall's valley steps down at its lip on
+                            // purpose - not a trench.
                             if !(1.0..=40.0).contains(&out)
+                                || r.falls
                                 || ground(x, z).water.is_some()
                                 || natural - r.water.floor() < 6.0
                             {
@@ -2866,6 +3064,195 @@ mod tests {
         let share = walls as f64 / valley as f64;
         assert!(valley > 5000, "too few deep river valleys sampled ({valley}) to judge");
         assert!(share < 0.01, "{walls} of {valley} valley columns ({:.1}%) are sheer trench walls", share * 100.0);
+    }
+
+    /// Streams are drawn below river size so plains and forest have brooks,
+    /// and they're part of the drainage network: nearly every one runs on
+    /// into a river or straight to the sea rather than ending in the ground.
+    #[test]
+    fn streams_run_on_into_rivers_or_the_sea() {
+        let reg = BlockRegistry::with_defaults();
+        let (mut streams, mut sinks) = (0, 0);
+        for seed in [7u32, 42, 1337] {
+            let gen = TerrainGenerator::new(seed, &reg);
+            let net = &gen.drainage;
+            for cz in -80..80 {
+                for cx in -80..80 {
+                    let cell = (cx, cz);
+                    if !gen.waterway(cell) || net.accumulation(&gen, cell) > RIVER_THRESHOLD {
+                        continue;
+                    }
+                    streams += 1;
+                    let mut c = cell;
+                    for _ in 0..500 {
+                        match net.downstream(&gen, c) {
+                            None => break,
+                            Some(d) if net.accumulation(&gen, d) > RIVER_THRESHOLD => break,
+                            Some(d) if !gen.waterway(d) => {
+                                sinks += 1;
+                                break;
+                            }
+                            Some(d) => c = d,
+                        }
+                    }
+                }
+            }
+        }
+        assert!(streams > 1000, "only {streams} streams - they should be common");
+        assert!(
+            (sinks as f64) < streams as f64 * 0.015,
+            "{sinks} of {streams} streams end in the ground instead of reaching a river or the sea"
+        );
+    }
+
+    /// Ponds on plains streams: round pools at their node's water level,
+    /// flat, and held in like any other water standing above sea level.
+    #[test]
+    fn ponds_are_flat_pools_on_plains_streams_and_hold_their_water() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let ponds: Vec<RiverEnd> = gen
+            .river_segments(-1500, -1500, 1500, 1500)
+            .into_iter()
+            .map(|s| s.a)
+            .filter(|a| a.pond > 0.0)
+            .collect();
+        assert!(ponds.len() >= 20, "only {} ponds found", ponds.len());
+        let mut checked = 0;
+        for pond in ponds.iter().take(25) {
+            let (px, pz) = (pond.pos.0.floor() as i32, pond.pos.1.floor() as i32);
+            assert_eq!(gen.biome_at(px, pz), Biome::Plains, "a pond outside the plains at ({px}, {pz})");
+            let r = pond.pond.ceil() as i32;
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    let (x, z) = (px + dx, pz + dz);
+                    // Measured from the column's centre to the pond's.
+                    let d = ((x as f64 + 0.5 - pond.pos.0).powi(2) + (z as f64 + 0.5 - pond.pos.1).powi(2)).sqrt();
+                    if d > pond.pond - 0.5 {
+                        continue;
+                    }
+                    let col = gen.column_profile(x, z);
+                    let Some(top) = col.water_top else { panic!("dry ground inside a pond at ({x}, {z})") };
+                    if top == SEA_LEVEL {
+                        continue; // a pond at sea level, where the sea's own rules hold it
+                    }
+                    assert_eq!(top, pond.water.floor() as i32, "a pond's surface isn't flat at ({x}, {z})");
+                    for (nx, nz) in [(x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)] {
+                        let n = gen.column_profile(nx, nz);
+                        assert!(
+                            n.water_top.is_some() || n.height >= top,
+                            "pond water at ({x}, {z}) stands beside open air at ({nx}, {nz})"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 200, "only {checked} pond columns checked");
+    }
+
+    /// The roughness of land away from mountains, cliffs and rivers, by
+    /// biome: the height range over a 24-block square around each sample.
+    fn relief_by_biome(gen: &TerrainGenerator) -> (HashMap<Biome, Vec<i32>>, usize, usize) {
+        let (mut relief, mut basins, mut patches): (HashMap<Biome, Vec<i32>>, usize, usize) = (HashMap::new(), 0, 0);
+        for i in 0..120 {
+            for j in 0..120 {
+                let (x, z) = (i * 41 - 2500, j * 41 - 2500);
+                let col = gen.column_profile(x, z);
+                let biome = gen.biome_of(x, z, &col);
+                if biome == Biome::AlphaPlains {
+                    if col.alpha_plains { basins += 1 } else { patches += 1 }
+                }
+                let near_river = gen
+                    .river_sample(x, z, gen.natural_height(x, z), &gen.river_segments(x, z, x, z))
+                    .is_some_and(|r| r.distance < 40.0);
+                if biome.is_sea() || gen.mountainness(x, z) > 0.0 || gen.coast_steepness(x, z) > 0.05 || near_river {
+                    continue;
+                }
+                let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+                for dz in (0..=24).step_by(6) {
+                    for dx in (0..=24).step_by(6) {
+                        let h = gen.natural_height(x + dx, z + dz) as i32;
+                        (lo, hi) = (lo.min(h), hi.max(h));
+                    }
+                }
+                relief.entry(biome).or_default().push(hi - lo);
+            }
+        }
+        (relief, basins, patches)
+    }
+
+    /// Plains are wide and flat, forest rolls, alpha plains are rough - and
+    /// alpha plains come both from low basins and from rare patches.
+    #[test]
+    fn plains_are_flat_forest_rolls_and_alpha_plains_are_rough() {
+        let reg = BlockRegistry::with_defaults();
+        let median = |v: &mut Vec<i32>| {
+            v.sort();
+            v[v.len() / 2]
+        };
+        let (mut basins, mut patches) = (0, 0);
+        for seed in [7u32, 42] {
+            let gen = TerrainGenerator::new(seed, &reg);
+            let (mut relief, b, p) = relief_by_biome(&gen);
+            (basins, patches) = (basins + b, patches + p);
+            let plains = median(relief.get_mut(&Biome::Plains).unwrap());
+            let forest = median(relief.get_mut(&Biome::Forest).unwrap());
+            let alpha = median(relief.get_mut(&Biome::AlphaPlains).unwrap());
+            assert!(plains <= 4, "seed {seed}: plains aren't flat (median relief {plains})");
+            assert!(plains < forest && forest <= alpha, "seed {seed}: relief plains {plains}, forest {forest}, alpha {alpha}");
+        }
+        assert!(basins > 0 && patches > 0, "alpha plains from basins: {basins}, from patches: {patches}");
+    }
+
+    /// Forests are dense and plains have the odd tree; and trees grow right
+    /// up to chunk edges, with their canopies carrying on into the next
+    /// chunk instead of being cut off.
+    #[test]
+    fn forests_are_dense_and_trees_cross_chunk_borders() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let log = reg.id("log");
+        let leaves = reg.id("leaves");
+        let mut trunks: HashMap<Biome, (usize, usize)> = HashMap::new();
+        let (mut edge_trunks, mut crossing, mut carried) = (0, 0, 0);
+        for i in 0..24 {
+            for j in 0..24 {
+                let (cx, cz) = (i * 7 - 80, j * 7 - 80);
+                let chunk = gen.generate(cx, cz);
+                let east = gen.generate(cx + 1, cz);
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let (wx, wz) = (cx * CHUNK_SIZE + x as i32, cz * CHUNK_SIZE + z as i32);
+                        let ground = chunk.columns[x + CS * z].ground;
+                        let biome = gen.biome_at(wx, wz);
+                        let entry = trunks.entry(biome).or_default();
+                        entry.1 += 1;
+                        let is_trunk = chunk.blocks[block_index(x, ground as usize + 1, z)] == log;
+                        entry.0 += is_trunk as usize;
+                        if is_trunk && x <= 1 {
+                            edge_trunks += 1;
+                        }
+                        // A trunk at the east edge: its canopy layer just
+                        // below the top reaches one block into the next
+                        // chunk - leaves there, or another tree's trunk,
+                        // which always wins over leaves.
+                        if is_trunk && x == CS - 1 {
+                            let top = (ground as usize + 1..H).take_while(|&y| chunk.blocks[block_index(x, y, z)] == log).last().unwrap();
+                            crossing += 1;
+                            let next = east.blocks[block_index(0, top - 1, z)];
+                            carried += (next == leaves || next == log) as usize;
+                        }
+                    }
+                }
+            }
+        }
+        let density = |b: Biome| trunks.get(&b).map_or(0.0, |&(t, n)| t as f64 / n.max(1) as f64);
+        let (forest, plains) = (density(Biome::Forest), density(Biome::Plains));
+        assert!(forest > 0.03, "forest has trees on only {:.1}% of columns", forest * 100.0);
+        assert!(plains < 0.01 && plains < forest / 5.0, "plains trees {:.2}% vs forest {:.2}%", plains * 100.0, forest * 100.0);
+        assert!(edge_trunks > 20, "only {edge_trunks} trunks at chunk edges - trees are still kept away from them");
+        assert!(crossing >= 5 && carried == crossing, "only {carried} of {crossing} edge trees carry their canopy into the next chunk");
     }
 
 }

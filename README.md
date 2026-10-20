@@ -272,8 +272,24 @@ they were, with air above.)
   reaching about three times as deep below it. They're most common hugging
   cold coasts and thin out further offshore, though a few patches drift out
   into open cold water.
-- **Biomes, layered by altitude.** Every land column has a *region* biome
-  from the climate (`plains`, or `snow` where it's cold). On a mountain
+- **Land biomes.** Every land column has a *region* biome from the
+  climate:
+  - **`plains`** - wide, mostly flat grassland with the odd tree, streams
+    running through it to the rivers, and ponds along them.
+  - **`forest`** - where it's humid: dense trees and gently rolling land
+    (steeper where it meets a mountain range). The place to go for wood.
+  - **`snow`** - where it's cold.
+  - **`alpha_plains`** - the rough, bumpy, puddled grassland that used to
+    be the only land biome. It turns up in some of the low basins that
+    would otherwise become marshes, and in rare patches elsewhere.
+
+  How rough the land is follows the biome and eases across each border, so
+  the terrain never steps where the biome changes.
+- **Streams and ponds.** Below river size, smaller waterways a block or
+  two wide drain the land everywhere off the mountain ranges, joining the
+  same network, so nearly every stream runs on into a river (or straight
+  to the sea). On plains streams, some spots widen into round ponds.
+- **Biomes, layered by altitude.** On a mountain
   range, `biome::ALTITUDE_ZONES` replaces
   it by height: the foot of a range keeps its region biome, and from height
   135 up it becomes the desolate `mountain` biome (bare rock and scree,
@@ -301,9 +317,10 @@ they were, with air above.)
   lowlands, V-shaped and steep in mountains), reaching up to about 50
   blocks out, and steepening into a gorge only where the land towers over
   the river. Where two rivers' valleys overlap they merge smoothly.
-- **Marshes and salt seas.** Where a river runs into a depression that
-  overflows, its low ground becomes a marsh: flat mud dotted with shallow
-  pools, with the river winding through and on. Rarely, a big depression
+- **Marshes, alpha plains and salt seas.** Where a river runs into a
+  depression that overflows, its low ground becomes a marsh (flat mud
+  dotted with shallow pools, with the river winding through and on), or in
+  grassland sometimes rough alpha plains with puddles in its dips. Rarely, a big depression
   keeps its water instead, as real inland seas with no outlet do. That
   makes a salt sea: a lake on a salt bed ringed by salt flats, where the
   rivers feeding it end. `/locate feature marsh` and `/locate feature
@@ -342,8 +359,8 @@ mainly as a place to type `/`-prefixed commands.
   names are yellow/red, in matching colors.
 - `/locate <biome|feature|structure> <name>` — reports the nearest match
   (coordinates + distance) to wherever you're standing. `biome` searches
-  for `plains`/`snow`/`mountain` (the last being a range's desolate upper
-  slopes - see "World generation") and the seas `warm_sea`/`temperate_sea`/
+  for `plains`/`forest`/`alpha_plains`/`snow`/`mountain` (the last being a
+  range's desolate upper slopes - see "World generation") and the seas `warm_sea`/`temperate_sea`/
   `cold_sea`/`icebergs`; `feature` searches for
   `river`/`ocean`/`mountain` against the generator's real terrain (the
   same checks worldgen itself uses, not a second guess at what they mean -

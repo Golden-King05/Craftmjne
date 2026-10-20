@@ -624,7 +624,9 @@ mod tests {
         assert_eq!(
             texts("/locate biome "),
             vec![
+                "locate biome alpha_plains",
                 "locate biome cold_sea",
+                "locate biome forest",
                 "locate biome icebergs",
                 "locate biome mountain",
                 "locate biome plains",

@@ -2288,3 +2288,49 @@ etc.) instead of inventing a new approach:
     (`MOUNTAIN_SCALE` 0.0017), two octaves, a wider ramp, and a base lift
     that rises with `range` (peaks with `range²`) brought p90 to ~1.8 and
     p99 to ~3.6. Lowering the ridge frequency alone had barely moved it.
+- **New biomes reshape terrain, so a biome's roughness is a continuous
+  field, not a lookup on the classified biome.** Plains (flat), forest
+  (rolling, humid) and alpha plains (the old rough grassland) differ in
+  relief. `biome::relief_scale` ramps between them across each climate
+  boundary, from the same thresholds `classify` uses (the `drier_strength`
+  pattern), so terrain never steps at a biome edge.
+  - **Alpha plains are an overlay, not a climate row.** Rare patches come
+    from `ClimateMaps::alpha_patch`, applied inside `region_biome_at`.
+    Basins come from `WetlandKind::AlphaPlains`, chosen by a hash of the
+    pit, never by flow, for the same reason salt seas aren't.
+    `ColumnProfile::alpha_plains` carries it to `biome_of`. Basin
+    roughness is added after drainage (like marsh flattening), so it can't
+    feed back into where the water goes.
+  - **Streams are a lower drainage threshold, and that forced one water-
+    level threshold everywhere.** `Network::water_level` memoizes per node
+    regardless of the threshold it was called with, so mixed thresholds
+    would make a node's level depend on which caller came first.
+    `WATER_LEVEL_THRESHOLD` is the stream threshold, used by every caller,
+    which also means a river is capped by the streams feeding it.
+    `waterway` decides what's drawn: rivers anywhere, streams off mountain
+    ranges. Drawing streams only in grassland and forest left ~5% of
+    streams sinking into the ground where they flowed into snow
+    (`streams_run_on_into_rivers_or_the_sea` goes red with that rule).
+  - **Ponds are a widening of the river around a node, and a column inside
+    one has to take the pond's sample.** Choosing the nearest centerline
+    let a stream flowing in give its edge of the pond the stream's higher
+    water. `river_sample`'s `in_pond` wins over `best`. The first version
+    of the pond test was itself wrong: it truncated negative coordinates
+    toward zero and measured from block corners, so it "found" dry ground
+    that was really outside the pond. A probe of the exact column showed
+    it, before anything in the generator was changed.
+  - **Trees are a pure per-column rule (`tree_at`) so canopies cross chunk
+    borders.** Each chunk evaluates columns `TREE_CANOPY_RADIUS` past its
+    edge and draws the leaves that reach in. Trunks are drawn before any
+    leaves, and leaves only into air, so the result doesn't depend on
+    order. `Blend::for_chunk` covers 4 columns out for those lookups. The
+    border test counts a neighbouring trunk as "carried": 5 of 70
+    "misses" turned out to be another tree's trunk in the way, which was
+    confirmed before tightening the test to require all of them.
+  - **Two old tests broke for reasons that were the test's.** The trench
+    test now skips waterfall segments (`RiverSample::falls`): 106 of 190
+    "walls" were waterfall lips, which streams made far more common. The
+    old-chunk river test had built its "different" old land from
+    `natural_height`, which a new valley could lower by exactly the
+    offset, making the old column identical and rightly unblended. It now
+    offsets `effective_height`. Both were re-break-tested.

@@ -12,10 +12,21 @@
 //! A column's biome is read off those maps through declarative tables
 //! (`LAND_BIOMES`, `SEA_BIOMES`) - ranges of temperature and humidity, the
 //! way a Whittaker diagram lays out real biomes - rather than thresholded
-//! ad hoc wherever a biome matters. Today only temperature separates
-//! anything (Snow vs Plains; cold, temperate and warm seas), but a desert
-//! (hot and dry) or a jungle (hot and wet) is one more row in a table, and
-//! it lands next to the climates that suit it automatically.
+//! ad hoc wherever a biome matters. Temperature separates snow from the
+//! rest (and cold, temperate and warm seas); humidity separates forest
+//! from plains. A desert (hot and dry) or a jungle (hot and wet) is one
+//! more row in a table, and it lands next to the climates that suit it
+//! automatically.
+//!
+//! **Alpha plains** - the rough, puddled grassland that used to be the only
+//! land biome - aren't a climate. They're an overlay: rare patches anywhere
+//! plains would be (`ClimateMaps::alpha_patch`), and some of the low basins
+//! that would otherwise hold a marsh (`terrain::WetlandKind::AlphaPlains`).
+//!
+//! A biome also decides how rough the land is (`relief_scale`): flat
+//! plains, gently rolling forest, rough alpha plains. That's blended
+//! across each biome boundary the way `drier_strength` is, so terrain
+//! never steps where the biome changes.
 //!
 //! Land and sea are decided by the terrain, not here: `terrain::
 //! TerrainGenerator::biome_at` asks `region_biome_at` for land and
@@ -40,6 +51,7 @@ use crate::noise::SimplexNoise;
 const TINT_SEED_OFFSET: u32 = 0x7f4a_7c15;
 const TEMPERATURE_SEED_OFFSET: u32 = 0xa511_e9c3;
 const HUMIDITY_SEED_OFFSET: u32 = 0x3c6e_f372;
+const ALPHA_SEED_OFFSET: u32 = 0x1b87_3593;
 
 /// How large a climate zone reads as, in blocks: temperature changes over
 /// the scale of whole regions you travel through, humidity a bit faster.
@@ -47,6 +59,14 @@ const TEMPERATURE_SCALE: f64 = 1400.0;
 const HUMIDITY_SCALE: f64 = 800.0;
 /// The scale of grass tint's fine variation within a climate.
 const TINT_DETAIL_SCALE: f64 = 180.0;
+/// Size of the rare alpha-plains patches, and how much of the alpha noise
+/// counts as one - tuned (`alpha_plains_patches_are_rare`) to a few percent
+/// of plains.
+const ALPHA_SCALE: f64 = 500.0;
+pub const ALPHA_THRESHOLD: f32 = 0.42;
+
+/// At or above this humidity, temperate land is forest rather than plains.
+pub const FOREST_HUMIDITY: f32 = 0.1;
 
 /// Below this temperature, land is `Biome::Snow`. Tuned (see `snow_covers_
 /// a_real_but_minority_share_of_land`) so snow is a real region you find,
@@ -86,6 +106,7 @@ pub struct ClimateMaps {
     temperature: SimplexNoise,
     humidity: SimplexNoise,
     tint_detail: SimplexNoise,
+    alpha: SimplexNoise,
 }
 
 impl ClimateMaps {
@@ -94,7 +115,14 @@ impl ClimateMaps {
             temperature: SimplexNoise::new(seed ^ TEMPERATURE_SEED_OFFSET),
             humidity: SimplexNoise::new(seed ^ HUMIDITY_SEED_OFFSET),
             tint_detail: SimplexNoise::new(seed ^ TINT_SEED_OFFSET),
+            alpha: SimplexNoise::new(seed ^ ALPHA_SEED_OFFSET),
         }
+    }
+
+    /// Where the rare alpha-plains patches are: plains at or above
+    /// `ALPHA_THRESHOLD` here are alpha plains instead.
+    pub fn alpha_patch(&self, x: i32, z: i32) -> f32 {
+        self.alpha.fbm2(x as f64 / ALPHA_SCALE, z as f64 / ALPHA_SCALE, 2) as f32
     }
 
     /// `-1.0` (frozen) to `1.0` (hot) at column `(x, z)`.
@@ -138,7 +166,15 @@ pub fn grass_tint(climate: &ClimateMaps, x: i32, z: i32) -> [f32; 3] {
 /// wherever it matters.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Biome {
+    /// Wide, mostly flat grassland, with the odd tree, streams running
+    /// through it to the rivers and ponds along them.
     Plains,
+    /// The rough, puddled grassland that was this world's original land:
+    /// in low basins where water would otherwise pool, and rare patches
+    /// elsewhere - see the module docs.
+    AlphaPlains,
+    /// Densely wooded, gently rolling land, where it's humid.
+    Forest,
     Snow,
     /// The desolate upper slopes of a mountain range - bare rock and scree,
     /// snow-capped above `terrain::SNOW_LINE`. Never a *region* biome: it
@@ -187,11 +223,29 @@ impl Biome {
         matches!(self, Biome::ColdSea | Biome::Icebergs)
     }
 
+    /// How likely a suitable grass column is to grow a tree.
+    pub fn tree_chance(self) -> f32 {
+        match self {
+            Biome::Forest => 0.08,
+            Biome::AlphaPlains => 0.012,
+            Biome::Plains => 0.0025,
+            _ => 0.0,
+        }
+    }
+
+    /// Grassland and forest: where alpha-plains basins can form, as opposed
+    /// to snow country.
+    pub fn grassland(self) -> bool {
+        matches!(self, Biome::Plains | Biome::AlphaPlains | Biome::Forest)
+    }
+
     /// Every biome that exists, for anything that needs to enumerate them
     /// (`/locate biome`'s argument autocomplete and parsing) instead of
     /// re-deriving the list by hand.
-    pub const ALL: [Biome; 7] = [
+    pub const ALL: [Biome; 9] = [
         Biome::Plains,
+        Biome::AlphaPlains,
+        Biome::Forest,
         Biome::Snow,
         Biome::Mountain,
         Biome::WarmSea,
@@ -205,6 +259,8 @@ impl Biome {
     pub fn name(self) -> &'static str {
         match self {
             Biome::Plains => "plains",
+            Biome::AlphaPlains => "alpha_plains",
+            Biome::Forest => "forest",
             Biome::Snow => "snow",
             Biome::Mountain => "mountain",
             Biome::WarmSea => "warm_sea",
@@ -236,6 +292,7 @@ const ANY: (f32, f32) = (-2.0, 2.0);
 /// -0.3)`, placed before `Plains`.
 pub const LAND_BIOMES: &[ClimateBand] = &[
     ClimateBand { temperature: (-2.0, COLD), humidity: ANY, biome: Biome::Snow },
+    ClimateBand { temperature: ANY, humidity: (FOREST_HUMIDITY, 2.0), biome: Biome::Forest },
     ClimateBand { temperature: ANY, humidity: ANY, biome: Biome::Plains },
 ];
 
@@ -263,7 +320,35 @@ pub fn classify(table: &[ClimateBand], climate: Climate) -> Biome {
 /// biome_at` is, and it's what worldgen and the runtime freezing rule use.
 /// Named `region_` so this can't be mistaken for it.
 pub fn region_biome_at(climate: &ClimateMaps, x: i32, z: i32) -> Biome {
-    classify(LAND_BIOMES, climate.at(x, z))
+    match classify(LAND_BIOMES, climate.at(x, z)) {
+        Biome::Plains if climate.alpha_patch(x, z) >= ALPHA_THRESHOLD => Biome::AlphaPlains,
+        biome => biome,
+    }
+}
+
+/// How rough a biome's land is, as a multiple of the full hill relief
+/// (`terrain.rs`'s `HILL_AMPLITUDE`).
+pub const PLAINS_RELIEF: f64 = 0.3;
+pub const FOREST_RELIEF: f64 = 0.8;
+/// How far either side of a biome boundary (in climate units) the relief
+/// takes to change, so the land eases from one biome's roughness to the
+/// next instead of stepping.
+const RELIEF_BLEND: f32 = 0.08;
+
+/// How rough the land at `(x, z)` is for its biome, `PLAINS_RELIEF` (flat
+/// plains) to `1.0` (alpha plains and snow, at full hill relief) - from
+/// the same maps and thresholds that classify the biome, ramped across
+/// each boundary.
+pub fn relief_scale(climate: &ClimateMaps, x: i32, z: i32) -> f64 {
+    let ramp = |v: f32, edge: f32| ((v - edge + RELIEF_BLEND) / (2.0 * RELIEF_BLEND)).clamp(0.0, 1.0) as f64;
+    let Climate { temperature, humidity } = climate.at(x, z);
+    let forest = ramp(humidity, FOREST_HUMIDITY);
+    let mut scale = PLAINS_RELIEF + (FOREST_RELIEF - PLAINS_RELIEF) * forest;
+    // Alpha patches only replace plains, so they fade out into forest.
+    let alpha = ramp(climate.alpha_patch(x, z), ALPHA_THRESHOLD) * (1.0 - forest);
+    scale += (1.0 - scale) * alpha;
+    let cold = drier_strength_at(temperature) as f64;
+    scale + (1.0 - scale) * cold
 }
 
 /// Which sea biome world column `(x, z)` would be if it's open ocean -
@@ -437,6 +522,8 @@ mod tests {
         let at = |t, h| Climate { temperature: t, humidity: h };
         assert_eq!(classify(LAND_BIOMES, at(COLD - 0.01, 0.0)), Biome::Snow);
         assert_eq!(classify(LAND_BIOMES, at(COLD, 0.0)), Biome::Plains);
+        assert_eq!(classify(LAND_BIOMES, at(COLD, FOREST_HUMIDITY)), Biome::Forest);
+        assert_eq!(classify(LAND_BIOMES, at(COLD - 0.01, 0.9)), Biome::Snow);
         assert_eq!(classify(SEA_BIOMES, at(WARM_SEA, 0.9)), Biome::WarmSea);
         assert_eq!(classify(SEA_BIOMES, at(0.0, -0.9)), Biome::TemperateSea);
     }
