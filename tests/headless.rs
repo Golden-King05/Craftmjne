@@ -501,16 +501,25 @@ fn surface_y(app: &App, x: i32, z: i32) -> i32 {
 /// instead of assuming a hardcoded one is dry, since where the generator
 /// puts lakes is not this test's business.
 fn open_air_above_ground(app: &App) -> IVec3 {
+    open_air_run(app, 0)
+}
+
+/// Like `open_air_above_ground`, but with `len` more cells of air running
+/// east from it - for a test that watches light spread sideways. On sloping
+/// ground the cells a few blocks east of the first dry column can be inside
+/// the hillside, which is dark however correct the lighting is.
+fn open_air_run(app: &App, len: i32) -> IVec3 {
+    let map = app.world().resource::<ChunkMap>();
     for z in 0..CHUNK_SIZE {
-        for x in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE - len {
             let y = surface_y(app, x, z);
             let pos = IVec3::new(x, y + 1, z);
-            if app.world().resource::<ChunkMap>().get_block(pos) == craftmjne::blocks::AIR {
+            if (0..=len).all(|dx| map.get_block(pos + IVec3::X * dx) == craftmjne::blocks::AIR) {
                 return pos;
             }
         }
     }
-    panic!("no dry column found in the spawn chunk");
+    panic!("no dry column with {len} blocks of open air east of it in the spawn chunk");
 }
 
 #[test]
@@ -550,7 +559,7 @@ fn a_placed_torch_lights_the_cells_around_it_in_its_own_color() {
     let mut app = headless_app(&temp);
     run_until_lit(&mut app);
 
-    let torch_pos = open_air_above_ground(&app);
+    let torch_pos = open_air_run(&app, 4);
     let torch = app.world().resource::<BlockRegistry>().id("torch");
     {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
@@ -577,8 +586,7 @@ fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
     let mut app = headless_app(&temp);
     run_until_lit(&mut app);
 
-    let y = surface_y(&app, 8, 8);
-    let torch_pos = IVec3::new(8, y + 1, 8);
+    let torch_pos = open_air_run(&app, 3);
     let probe = torch_pos + IVec3::X * 3;
     let torch = app.world().resource::<BlockRegistry>().id("torch");
     {
@@ -800,17 +808,22 @@ fn a_mined_hole_lights_up_even_while_chunks_are_still_loading() {
         },
         2000,
     ));
-    // Pile on background work, like a dozen chunks landing at once would.
+    // Pile on background work, like a dozen chunks landing at once would:
+    // every cell of every loaded chunk, far more than a few frames can get
+    // through. (Re-seeding chunks used to be enough, but seeding now skips
+    // cells that can't change, so it barely queues anything.)
     {
-        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().0.clone();
-        app.world_mut().resource_scope(|world, mut lights: Mut<LightQueue>| {
-            let map = world.resource::<ChunkMap>();
-            for coord in map.chunks.keys().copied().collect::<Vec<_>>() {
-                for _ in 0..10 {
-                    craftmjne::light::seed_new_chunk(map, &tables, coord, &mut lights);
+        let coords: Vec<IVec2> = app.world().resource::<ChunkMap>().chunks.keys().copied().collect();
+        let mut lights = app.world_mut().resource_mut::<LightQueue>();
+        for coord in coords {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    for y in 0..craftmjne::config::WORLD_HEIGHT {
+                        lights.push(IVec3::new(coord.x * CHUNK_SIZE + x, y, coord.y * CHUNK_SIZE + z));
+                    }
                 }
             }
-        });
+        }
     }
     let top = open_air_above_ground(&app) - IVec3::Y;
     let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(top, 0).unwrap();
@@ -849,4 +862,78 @@ fn streaming_while_moving_keeps_the_light_backlog_small() {
     let generated = app.world().resource::<ChunkMap>().stats().0;
     assert!(generated > 150, "test setup: only {generated} chunks streamed in");
     assert!(most < 40_000, "the light backlog reached {most} cells");
+}
+
+/// Far-away chunks are dropped from memory and come back exactly as they
+/// were - their edits *and* fluid state - whether you walk back to them or
+/// save and reload while they're unloaded.
+#[test]
+fn chunks_unloaded_far_away_come_back_exactly_as_they_were() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+
+    let (stone, water) = {
+        let reg = app.world().resource::<BlockRegistry>();
+        (reg.id("stone"), reg.id("water"))
+    };
+    // A player edit (through the edit log)...
+    let edited = open_air_above_ground(&app);
+    let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(edited, stone).unwrap();
+    app.world_mut().send_event(BlockSetEvent { pos: edited, id: stone, prev, axis: AXIS_Y });
+    // ...and a fluid cell no edit records - a flowing level, as the fluid
+    // sim would leave - which only the fluid save can bring back.
+    let wet = open_air_run(&app, 2) + IVec3::X * 2;
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(wet, water);
+        map.set_fluid_level_raw(wet, 3);
+    }
+    app.update();
+    let spawn = IVec2::ZERO;
+    let capture = |app: &App| {
+        let chunk = &app.world().resource::<ChunkMap>().chunks[&spawn];
+        (chunk.blocks.clone().unwrap(), chunk.fluid_level.clone().unwrap())
+    };
+    let before = capture(&app);
+    assert_eq!(before.0[craftmjne::config::block_index(
+        wet.x as usize, wet.y as usize, wet.z as usize)], water);
+
+    let fly_to = |app: &mut App, x: f32| {
+        let mut players = app.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app.world_mut()).unwrap();
+        player.pos = Vec3::new(x, 200.0, 8.0);
+        player.spawned = true;
+        player.fly = true;
+    };
+    let gone = |app: &mut App| !app.world().resource::<ChunkMap>().chunks.contains_key(&spawn);
+    let back = |app: &mut App| {
+        app.world().resource::<ChunkMap>().chunks.get(&spawn).is_some_and(|c| c.blocks.is_some())
+    };
+
+    // Away: the spawn chunk unloads, and memory holds only what's near.
+    fly_to(&mut app, 16.0 * 20.0);
+    assert!(run_until(&mut app, gone, 2000), "the spawn chunk never unloaded");
+    let r = app.world().resource::<WorldSettings>().render_distance + craftmjne::world::UNLOAD_MARGIN;
+    let loaded = app.world().resource::<ChunkMap>().chunks.len() as i32;
+    assert!(loaded <= (2 * r + 1) * (2 * r + 1), "{loaded} chunks still loaded far from most of them");
+
+    // Back again: exactly as it was.
+    fly_to(&mut app, 8.0);
+    assert!(run_until(&mut app, back, 2000), "the spawn chunk never came back");
+    let after = capture(&app);
+    assert!(after.0 == before.0, "blocks changed after unloading and reloading the chunk");
+    assert!(after.1 == before.1, "fluid levels changed after unloading and reloading the chunk");
+
+    // Away again, and save and reload while it's unloaded.
+    fly_to(&mut app, 16.0 * 20.0);
+    assert!(run_until(&mut app, gone, 2000));
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+    let mut app2 = reload_app(&temp);
+    fly_to(&mut app2, 8.0);
+    assert!(run_until(&mut app2, back, 2000));
+    let reloaded = capture(&app2);
+    assert!(reloaded.0 == before.0, "blocks changed after a save made while the chunk was unloaded");
+    assert!(reloaded.1 == before.1, "fluid changed after a save made while the chunk was unloaded");
 }

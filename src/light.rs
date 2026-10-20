@@ -539,14 +539,28 @@ pub fn seed_new_chunk(map: &ChunkMap, tables: &Tables, coord: IVec2, lights: &mu
     // runs on every visit - as a per-visit rule ("enqueue any neighbour I
     // could improve") the same idea regenerates work faster than the queue
     // drains and never terminates.
+    //
+    // Only into a neighbour that's loaded, though. An unloaded one reads as
+    // dark air, so every open cell up the whole seam looked improvable -
+    // about 6,500 cells per chunk once the world was 256 tall, the bulk of
+    // the backlog while moving - and none of it could land anywhere
+    // (`set_light` refuses a missing chunk). When that neighbour does
+    // arrive, its own seeding above reads this chunk across the seam and
+    // pulls the light in.
     for i in 0..CS as i32 {
         for y in 0..H as i32 {
-            for (inside, out) in [
+            for (s, (inside, out)) in [
                 (IVec3::new(0, y, i), IVec3::new(-1, y, i)),
                 (IVec3::new(CHUNK_SIZE - 1, y, i), IVec3::new(CHUNK_SIZE, y, i)),
                 (IVec3::new(i, y, 0), IVec3::new(i, y, -1)),
                 (IVec3::new(i, y, CHUNK_SIZE - 1), IVec3::new(i, y, CHUNK_SIZE)),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if sides[s].is_none() {
+                    continue;
+                }
                 let (id, there) = outside(out.x, y as usize, out.z);
                 if tables.opaque[id as usize] {
                     continue;

@@ -25,6 +25,13 @@
 //! a plain source (a waterfall's falling water) as index + level. Names,
 //! not ids, so adding a block file that shifts ids doesn't scramble saved
 //! terrain.
+//!
+//! **The world has grown taller since the first snapshots were written**
+//! (`config::WORLD_HEIGHT` 64 -> 128, sea level unchanged). The header
+//! records the height a chunk was saved at, and a shorter chunk loads into
+//! the current layout with air above it, so land explored before the change
+//! keeps loading exactly as it was instead of failing to parse and being
+//! generated afresh.
 
 use crate::blocks::{BlockId, BlockRegistry, AIR, AXIS_Y, FLUID_SOURCE};
 use bevy::log::warn;
@@ -41,8 +48,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 const MAGIC: &[u8; 4] = b"CMCK";
-const FORMAT: u8 = 1;
-const HEADER_LEN: usize = 4 + 1 + 1 + 1 + 8 + CS * CS * 2;
+/// The format written now. Format 1 stored the chunk's height in one byte
+/// and its fluid cells' indices in two, which a 256-tall chunk outgrows;
+/// format 2 widens both. Both still load.
+const FORMAT: u8 = 2;
+/// A header's length in `format`: magic, format, chunk width, height (one
+/// byte in format 1, two after), fingerprint, then two bytes per column.
+const fn header_len(format: u8) -> usize {
+    4 + 1 + 1 + if format >= 2 { 2 } else { 1 } + 8 + CS * CS * 2
+}
+/// Enough of a file to hold any format's header.
+const MAX_HEADER_LEN: usize = header_len(FORMAT);
 /// No water over a column, in the header's one-byte water height.
 const NO_WATER: u8 = 0;
 
@@ -71,6 +87,11 @@ pub struct ChunkStore {
 
 /// A snapshot's header: everything except the blocks themselves.
 struct Header {
+    format: u8,
+    /// Where the compressed body starts.
+    len: usize,
+    /// The world height the chunk was saved at - at most the current one.
+    height: usize,
     fingerprint: u64,
     columns: Vec<ColumnSurface>,
 }
@@ -104,6 +125,12 @@ impl ChunkStore {
         })
     }
 
+    /// Whether chunk `(cx, cz)` has a snapshot on disk - so it would load
+    /// back exactly as it was, rather than generating anew.
+    pub fn has_snapshot(&self, cx: i32, cz: i32) -> bool {
+        self.path(cx, cz).is_some_and(|p| p.is_file())
+    }
+
     fn path(&self, cx: i32, cz: i32) -> Option<PathBuf> {
         Some(self.dir.as_ref()?.join(format!("c.{cx}.{cz}.bin")))
     }
@@ -135,9 +162,9 @@ impl ChunkStore {
     }
 
     fn read_header(&self, cx: i32, cz: i32) -> Option<Header> {
-        let mut file = fs::File::open(self.path(cx, cz)?).ok()?;
-        let mut buf = [0u8; HEADER_LEN];
-        file.read_exact(&mut buf).ok()?;
+        let file = fs::File::open(self.path(cx, cz)?).ok()?;
+        let mut buf = Vec::with_capacity(MAX_HEADER_LEN);
+        file.take(MAX_HEADER_LEN as u64).read_to_end(&mut buf).ok()?;
         parse_header(&buf)
     }
 
@@ -154,9 +181,10 @@ impl ChunkStore {
     }
 
     fn decode(&self, gen: &TerrainGenerator, bytes: &[u8]) -> Option<GeneratedChunk> {
-        let header = parse_header(bytes.get(..HEADER_LEN)?)?;
+        let header = parse_header(bytes)?;
+        let saved_h = header.height;
         let mut body = Vec::new();
-        DeflateDecoder::new(&bytes[HEADER_LEN..]).read_to_end(&mut body).ok()?;
+        DeflateDecoder::new(&bytes[header.len..]).read_to_end(&mut body).ok()?;
         let mut r = body.as_slice();
         let count = u16::from_le_bytes(take(&mut r, 2)?.try_into().ok()?) as usize;
         let mut palette = Vec::with_capacity(count);
@@ -167,16 +195,32 @@ impl ChunkStore {
             // air rather than refusing the whole chunk.
             palette.push(self.by_name.get(name).copied().unwrap_or(AIR));
         }
-        let indices = take(&mut r, CS * CS * H * 2)?;
-        let blocks: Vec<BlockId> = indices
-            .chunks_exact(2)
-            .map(|b| palette.get(u16::from_le_bytes([b[0], b[1]]) as usize).copied().unwrap_or(AIR))
-            .collect();
+        let indices = take(&mut r, CS * CS * saved_h * 2)?;
+        // Saved cell `i` (laid out for `saved_h`, Y fastest) in the current,
+        // possibly taller, layout - the same column, the same height.
+        let remap = |i: usize| (i % saved_h) + H * (i / saved_h);
+        let mut blocks = vec![AIR; CS * CS * H];
+        for (i, b) in indices.chunks_exact(2).enumerate() {
+            blocks[remap(i)] = palette.get(u16::from_le_bytes([b[0], b[1]]) as usize).copied().unwrap_or(AIR);
+        }
         let mut fluid = vec![FLUID_SOURCE; blocks.len()];
-        let levels = u16::from_le_bytes(take(&mut r, 2)?.try_into().ok()?) as usize;
+        // Format 1 counts and indexes fluid cells in two bytes, format 2 in four.
+        let wide = header.format >= 2;
+        let number = |r: &mut &[u8]| -> Option<usize> {
+            Some(if wide {
+                u32::from_le_bytes(take(r, 4)?.try_into().ok()?) as usize
+            } else {
+                u16::from_le_bytes(take(r, 2)?.try_into().ok()?) as usize
+            })
+        };
+        let levels = number(&mut r)?;
         for _ in 0..levels {
-            let cell = take(&mut r, 3)?;
-            *fluid.get_mut(u16::from_le_bytes([cell[0], cell[1]]) as usize)? = cell[2];
+            let i = number(&mut r)?;
+            let level = take(&mut r, 1)?[0];
+            if i >= CS * CS * saved_h {
+                return None;
+            }
+            fluid[remap(i)] = level;
         }
         Some(GeneratedChunk {
             fluid,
@@ -189,9 +233,24 @@ impl ChunkStore {
     }
 
     fn encode(&self, fingerprint: u64, chunk: &GeneratedChunk) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_LEN + 4096);
+        self.encode_as(fingerprint, chunk, H, FORMAT)
+    }
+
+    /// `encode`, keeping only the bottom `height` blocks of each column, in
+    /// file `format` - always the full world height and current format in
+    /// the game; otherwise only in tests, to write the snapshots older
+    /// versions saved.
+    fn encode_as(&self, fingerprint: u64, chunk: &GeneratedChunk, height: usize, format: u8) -> Vec<u8> {
+        let saved = |i: usize| (i / height) * H + i % height;
+        let cells = CS * CS * height;
+        let mut out = Vec::with_capacity(header_len(format) + 4096);
         out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&[FORMAT, CS as u8, H as u8]);
+        out.extend_from_slice(&[format, CS as u8]);
+        if format >= 2 {
+            out.extend_from_slice(&(height as u16).to_le_bytes());
+        } else {
+            out.push(height as u8);
+        }
         out.extend_from_slice(&fingerprint.to_le_bytes());
         for c in &chunk.columns {
             // Heights are 0..H, so `water + 1` never collides with NO_WATER.
@@ -201,8 +260,8 @@ impl ChunkStore {
 
         let mut palette: Vec<BlockId> = Vec::new();
         let mut index_of: HashMap<BlockId, u16> = HashMap::new();
-        let mut indices = Vec::with_capacity(chunk.blocks.len() * 2);
-        for &id in &chunk.blocks {
+        let mut indices = Vec::with_capacity(cells * 2);
+        for id in (0..cells).map(|i| chunk.blocks[saved(i)]) {
             let i = *index_of.entry(id).or_insert_with(|| {
                 palette.push(id);
                 (palette.len() - 1) as u16
@@ -218,11 +277,18 @@ impl ChunkStore {
             body.extend_from_slice(name);
         }
         body.extend_from_slice(&indices);
-        let levels: Vec<usize> = (0..chunk.fluid.len()).filter(|&i| chunk.fluid[i] != FLUID_SOURCE).collect();
-        body.extend_from_slice(&(levels.len() as u16).to_le_bytes());
+        let levels: Vec<usize> = (0..cells).filter(|&i| chunk.fluid[saved(i)] != FLUID_SOURCE).collect();
+        let number = |body: &mut Vec<u8>, n: usize| {
+            if format >= 2 {
+                body.extend_from_slice(&(n as u32).to_le_bytes());
+            } else {
+                body.extend_from_slice(&(n as u16).to_le_bytes());
+            }
+        };
+        number(&mut body, levels.len());
         for i in levels {
-            body.extend_from_slice(&(i as u16).to_le_bytes());
-            body.push(chunk.fluid[i]);
+            number(&mut body, i);
+            body.push(chunk.fluid[saved(i)]);
         }
 
         let mut encoder = DeflateEncoder::new(out, Compression::fast());
@@ -252,19 +318,32 @@ impl ChunkStore {
     }
 }
 
+/// The header at the start of `buf` (which may run on into the body).
 fn parse_header(buf: &[u8]) -> Option<Header> {
-    if buf.len() < HEADER_LEN || &buf[..4] != MAGIC || buf[4] != FORMAT || buf[5] as usize != CS || buf[6] as usize != H {
+    let format = *buf.get(4)?;
+    if !(1..=FORMAT).contains(&format) || buf.len() < header_len(format) || &buf[..4] != MAGIC || buf[5] as usize != CS {
         return None;
     }
-    let fingerprint = u64::from_le_bytes(buf[7..15].try_into().ok()?);
-    let columns = buf[15..HEADER_LEN]
+    let len = header_len(format);
+    let (height, rest) = if format >= 2 {
+        (u16::from_le_bytes([buf[6], buf[7]]) as usize, 8)
+    } else {
+        (buf[6] as usize, 7)
+    };
+    // Any saved height up to the current one loads (see the module docs);
+    // a taller one would have to lose blocks, so it doesn't.
+    if height == 0 || height > H {
+        return None;
+    }
+    let fingerprint = u64::from_le_bytes(buf[rest..rest + 8].try_into().ok()?);
+    let columns = buf[rest + 8..len]
         .chunks_exact(2)
         .map(|c| ColumnSurface {
             ground: c[0] as i32,
             water: (c[1] != NO_WATER).then(|| c[1] as i32 - 1),
         })
         .collect();
-    Some(Header { fingerprint, columns })
+    Some(Header { format, len, height, fingerprint, columns })
 }
 
 fn take<'a>(r: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
@@ -329,6 +408,33 @@ mod tests {
         for entry in fs::read_dir(from).unwrap().flatten() {
             fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
         }
+    }
+
+    #[test]
+    fn a_snapshot_saved_when_the_world_was_shorter_still_loads_as_it_was() {
+        // Worlds explored at the old 64-block height must keep their land,
+        // not fail to parse and be generated again by the new generator.
+        const OLD_H: usize = 64;
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(3, &reg);
+        let store = ChunkStore::new(None, &reg);
+        let mut chunk = gen.generate(2, -1);
+        // Only what fits in the old height, as an old save would hold.
+        for i in 0..chunk.blocks.len() {
+            if i % H >= OLD_H {
+                chunk.blocks[i] = AIR;
+                chunk.fluid[i] = FLUID_SOURCE;
+            }
+        }
+        let water = chunk.blocks.iter().position(|&b| b == reg.id("water")).unwrap();
+        chunk.fluid[water] = 4;
+        // Written exactly as those versions did: format 1, one-byte height.
+        let loaded = store.decode(&gen, &store.encode_as(7, &chunk, OLD_H, 1)).expect("an old snapshot must load");
+        assert!(loaded.restored);
+        assert!(loaded.blocks == chunk.blocks, "blocks moved or changed when loading a shorter snapshot");
+        assert_eq!(loaded.fluid[water], 4);
+        assert!(loaded.fluid == chunk.fluid);
+        assert_eq!(loaded.columns, chunk.columns);
     }
 
     #[test]
@@ -411,7 +517,7 @@ mod tests {
         let good = store.load_or_generate(&gen, 0, 0);
         let path = dir.0.join("c.0.0.bin");
         let mut bytes = fs::read(&path).unwrap();
-        bytes.truncate(HEADER_LEN + 10);
+        bytes.truncate(header_len(FORMAT) + 10);
         fs::write(&path, bytes).unwrap();
         assert!(store.load_or_generate(&gen, 0, 0).blocks == good.blocks);
         assert!(store.load(&gen, 0, 0).is_some(), "the bad file should have been replaced");

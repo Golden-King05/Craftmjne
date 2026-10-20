@@ -226,7 +226,15 @@ second rotating block someday needs zero mesher changes.
 ## World generation
 
 `src/terrain.rs` builds every column from a few independent layers, each its
-own noise stream:
+own noise stream. The world is 256 blocks tall with the sea at 26
+(`config.rs`), so mountains can tower over 200 blocks above the water. (It
+was 64, then 128 tall; chunks explored back then keep loading exactly as
+they were, with air above.)
+
+- **Lowlands, uplands and hills.** Land sits a few blocks above the sea at
+  the coast and climbs gently to uplands about 24 blocks higher deep
+  inland. A separate hill-country mask decides which regions are flat
+  plains and which are rolling hills up to about 50 blocks tall.
 
 - **Continents and coasts.** A very low-frequency continent field splits
   land from sea into several separate landmasses. A second field decides
@@ -235,11 +243,15 @@ own noise stream:
   face of bare rock under a thin line of soil; an edge that wanders in and
   out into headlands and bays; a wave-cut notch at the foot of some faces;
   a rocky wave-cut platform just under the water, littered with fallen
-  boulders; and sea stacks standing offshore. Steep slopes inland (and on
+  boulders; and sea stacks standing offshore - stocky masses of rock that
+  taper down to the platform and stand lower than the cliff they broke
+  from, never more than about 22 blocks. Steep slopes inland (and on
   mountains) are bare rock too, rather than grass ledges.
 - **Mountain ranges.** A range mask (`mountainness`) decides where ranges
-  are; inside one, ridged noise lifts the terrain into ridgelines that reach
-  well above the snow line. Heights are eased toward the build ceiling
+  are - big ones, several hundred blocks across. A range's broad base
+  rises evenly out of the plains through foothills, and ridged noise
+  lifts its core into ridgelines and peaks up to about 230, well above
+  the snow line; its steepest faces are bare rock. Heights are eased toward the build ceiling
   rather than clamped, so summits stay pointed instead of flattening.
 - **Climate maps.** Two broad, smooth noise maps cover the world
   (`biome::ClimateMaps`): *temperature* (features over a kilometre or so)
@@ -264,8 +276,8 @@ own noise stream:
   from the climate (`plains`, or `snow` where it's cold). On a mountain
   range, `biome::ALTITUDE_ZONES` replaces
   it by height: the foot of a range keeps its region biome, and from height
-  44 up it becomes the desolate `mountain` biome (bare rock and scree, snow
-  caps from 50). Adding a band between them later (spruce on the lower
+  135 up it becomes the desolate `mountain` biome (bare rock and scree,
+  snow caps from 165). Adding a band between them later (spruce on the lower
   slopes) is one more table entry.
 - **Rivers.** Water is routed downhill over one unbounded drainage network
   (`drainage.rs`, a 16-block grid that covers the whole world and is
@@ -283,7 +295,12 @@ own noise stream:
   has come a long way (over a kilometre, for some) grows to 16 blocks
   across. How far a river has cut below its banks varies
   along its length. Some run flush with the ground beside them; others sit
-  a few blocks down in a narrower valley, the start of a canyon.
+  a few blocks down, the start of a canyon. Where a river runs well below
+  the land around it, it runs in a real valley: a floodplain beside the
+  water, then sides climbing back to the land at a slope (gentle in the
+  lowlands, V-shaped and steep in mountains), reaching up to about 50
+  blocks out, and steepening into a gorge only where the land towers over
+  the river. Where two rivers' valleys overlap they merge smoothly.
 - **Marshes and salt seas.** Where a river runs into a depression that
   overflows, its low ground becomes a marsh: flat mud dotted with shallow
   pools, with the river winding through and on. Rarely, a big depression
@@ -483,8 +500,12 @@ tagging/releasing has to be done from a normal git checkout or the GitHub UI.
   contiguous slice copies) and flat `Vec<bool>` block-property tables in every
   hot loop; the mesher's AO neighbourhood offsets are precomputed integers.
 - **Streaming with budgets** — chunks generate/mesh sorted by distance with
-  capped in-flight tasks; far meshes are dropped while block data (and your
-  edits) are kept. Bevy frustum-culls per chunk automatically.
+  capped in-flight tasks; far meshes are dropped, and further out
+  (`world::UNLOAD_MARGIN` chunks past the render distance) a chunk's data
+  is dropped too and reloaded from its snapshot when you come back, with
+  your edits and its water reapplied - so memory stays bounded however far
+  you explore (about 210 MB of chunk data at render distance 8). Bevy
+  frustum-culls per chunk automatically.
 - **Fixed-timestep physics** — 120 Hz substeps, framerate-independent, with
   swept axis-separated AABB collision against the voxel grid.
 
