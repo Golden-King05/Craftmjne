@@ -1,6 +1,14 @@
 {
   "id": "torch",
   "name": "Torch",
-  "light": { "level": 16, "color": [255, 236, 208] },
-  "block_model": "torch.bbmodel"
+  "light": {
+    "level": 16,
+    "color": [
+      255,
+      236,
+      208
+    ]
+  },
+  "block_model": "torch.bbmodel",
+  "hardness": 0.0
 }

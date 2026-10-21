@@ -323,7 +323,9 @@ struct RiverSample {
     half_width: f64,
     depth: f64,
     /// The nearest segment drops as a waterfall (`WATERFALL_DROP`): its
-    /// valley floor steps down at the lip, on purpose.
+    /// valley floor steps down at the lip, on purpose. Only the tests read
+    /// it (to tell a waterfall's lip from a trench wall).
+    #[cfg_attr(not(test), allow(dead_code))]
     falls: bool,
     /// How high the valley floor and sides stand here: the lowest of every
     /// nearby segment's own valley surface, not just the nearest one's -

@@ -94,6 +94,7 @@ grass's underside too.
 | `stone.png` | stone (all faces) |
 | `torch.png` | torch (all faces) |
 | `water.png` | water (all faces) |
+| `destroy_stage_0.png` ... `destroy_stage_9.png` | the cracks drawn over a block being mined, lightest to most cracked. Transparent except for the cracks; draw them dark, since they're shown fully lit over every block |
 
 Adding a brand new block works the same way — a bare `blocks/ruby_block.json`
 with just an `id` (`texture_scheme` defaults to `default`) looks for

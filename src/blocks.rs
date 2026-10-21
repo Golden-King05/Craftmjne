@@ -31,6 +31,8 @@
 //!   "selectable": true,
 //!   "replaceable": false,
 //!   "breakable": true,
+//!   "hardness": 3.0,
+//!   "drops": true,
 //!   "max_stack": 124,
 //!   "item": true,
 //!   "item_model": "default",
@@ -51,6 +53,21 @@
 //!   controls how far the fluid spreads from a source before drying up (see
 //!   `world.rs`'s `FluidQueue`/`recompute_cell` for the spread sim and
 //!   `mesher.rs`'s `fluid_height` for the resulting slope).
+//! - `breakable` is whether a player can mine this block at all, in either
+//!   game mode (default `true`; `blocks/bedrock.json` is the one built-in
+//!   `false`).
+//! - `hardness` is how tough this block is to mine (default `1.0`). Survival
+//!   mining time is `hardness * interact::SECONDS_PER_HARDNESS` with a bare
+//!   hand - `0` breaks instantly (torches), dirt is `0.5`, stone `1.5`;
+//!   Creative ignores it and breaks everything instantly. It's
+//!   a property of the material rather than a duration so a future tool can
+//!   divide it by its own speed instead of every block listing a time per
+//!   tool.
+//! - `drops` is what breaking this block in Survival gives you: `true` (the
+//!   default) drops the block itself, `false` drops nothing (leaves, ice),
+//!   and a block id string drops that block instead (grass drops `"dirt"`).
+//!   A named block that doesn't exist fails at startup, the same as a
+//!   missing texture painter would; one with `item: false` drops nothing.
 //! - `max_stack` is how many of this block a single inventory/hotbar slot
 //!   can hold (see [`ItemStack`]); defaults to [`DEFAULT_MAX_STACK`] (124)
 //!   if omitted — set it per-block for anything that should stack
@@ -151,7 +168,7 @@ pub type BlockId = u16;
 /// A slot's contents: which block and how many. `id == AIR` (or `count ==
 /// 0`) means empty — `is_empty()` treats either as the same thing, so
 /// callers don't need to keep both fields in sync by hand.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct ItemStack {
     pub id: BlockId,
     pub count: u32,
@@ -168,6 +185,46 @@ impl ItemStack {
 /// How many of a block a single slot holds unless a block file overrides it
 /// with `max_stack`.
 pub const DEFAULT_MAX_STACK: u32 = 124;
+
+/// A block file's `hardness` when it doesn't give one.
+pub const DEFAULT_HARDNESS: f32 = 1.0;
+
+/// What breaking a block in Survival gives the player. Resolved to an id by
+/// [`BlockRegistry::drop_of`].
+#[derive(Clone, PartialEq, Debug, Default)]
+pub enum Drops {
+    /// The block itself - what almost everything wants.
+    #[default]
+    Itself,
+    /// Nothing at all (leaves, ice).
+    Nothing,
+    /// A different block, by registry id (grass drops dirt).
+    Block(String),
+}
+
+/// `drops` as written in a block file: `true`/`false`, or a block id.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DropsFile {
+    Flag(bool),
+    Block(String),
+}
+
+impl Default for DropsFile {
+    fn default() -> Self {
+        DropsFile::Flag(true)
+    }
+}
+
+impl From<DropsFile> for Drops {
+    fn from(file: DropsFile) -> Self {
+        match file {
+            DropsFile::Flag(true) => Drops::Itself,
+            DropsFile::Flag(false) => Drops::Nothing,
+            DropsFile::Block(name) => Drops::Block(name),
+        }
+    }
+}
 
 /// A fluid cell's stored level, meaningful only while that cell's block id is
 /// a fluid (see `Chunk::fluid_level` in `world.rs`). `0` is a permanent
@@ -540,6 +597,11 @@ pub struct BlockDef {
     pub replaceable: bool,
     /// Can be mined (bedrock is not).
     pub breakable: bool,
+    /// How long this block takes to mine, as a material property rather
+    /// than a duration - see the module docs' `hardness` section.
+    pub hardness: f32,
+    /// What breaking it in Survival yields. See [`Drops`].
+    pub drops: Drops,
     /// How many of this block a single inventory/hotbar slot holds. See
     /// [`ItemStack`]; defaults to [`DEFAULT_MAX_STACK`].
     pub max_stack: u32,
@@ -633,6 +695,8 @@ impl Default for BlockDef {
             selectable: true,
             replaceable: false,
             breakable: true,
+            hardness: DEFAULT_HARDNESS,
+            drops: Drops::Itself,
             max_stack: DEFAULT_MAX_STACK,
             item: true,
             item_model: ItemModel::default(),
@@ -682,6 +746,10 @@ struct BlockFile {
     replaceable: Option<bool>,
     #[serde(default = "default_true")]
     breakable: bool,
+    #[serde(default = "default_hardness")]
+    hardness: f32,
+    #[serde(default)]
+    drops: DropsFile,
     #[serde(default = "default_max_stack")]
     max_stack: u32,
     #[serde(default = "default_true")]
@@ -710,6 +778,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_hardness() -> f32 {
+    DEFAULT_HARDNESS
+}
+
 fn default_max_stack() -> u32 {
     DEFAULT_MAX_STACK
 }
@@ -734,6 +806,8 @@ impl BlockFile {
             selectable: self.selectable.unwrap_or(selectable),
             replaceable: self.replaceable.unwrap_or(replaceable),
             breakable: self.breakable,
+            hardness: self.hardness.max(0.0),
+            drops: self.drops.into(),
             max_stack: self.max_stack,
             item: self.item,
             item_model: self.item_model,
@@ -932,6 +1006,20 @@ impl BlockRegistry {
         &self.defs[id as usize]
     }
 
+    /// The item breaking block `id` gives in Survival, or `None` for nothing,
+    /// including when the block it would drop has no item (`item: false`).
+    /// A `Drops::Block` naming an unknown block also gives `None` here, but
+    /// `compile` refuses to start with one, so that never happens in a
+    /// running game.
+    pub fn drop_of(&self, id: BlockId) -> Option<BlockId> {
+        let drop = match &self.def(id).drops {
+            Drops::Itself => id,
+            Drops::Nothing => return None,
+            Drops::Block(name) => self.by_name(name).ok()?,
+        };
+        (drop != AIR && self.def(drop).item).then_some(drop)
+    }
+
     /// Every distinct texture name any registered block's six faces resolve
     /// to (explicit `textures` overrides and `texture_scheme`-derived names
     /// alike, plus any `overlay` names) - what `world::compile_content`
@@ -997,6 +1085,15 @@ impl BlockRegistry {
             uv_pad,
             uv_span: uv_tile - 2.0 * uv_pad,
         };
+        for def in self.defs.iter().skip(1) {
+            if let Drops::Block(name) = &def.drops {
+                assert!(
+                    self.by_name.contains_key(name),
+                    "block {:?}: drops unknown block {name:?}",
+                    def.id
+                );
+            }
+        }
         for (id, def) in self.defs.iter().enumerate().skip(1) {
             tables.solid[id] = def.solid;
             tables.opaque[id] = def.transparency == Transparency::No;
@@ -1219,6 +1316,60 @@ mod tests {
         // so north's tile must differ from top's, but top must match east's.
         assert_ne!(tables.tiles[lamp * 6 + 5], tables.tiles[lamp * 6 + 2]);
         assert_eq!(tables.tiles[lamp * 6 + 2], tables.tiles[lamp * 6]);
+    }
+
+    #[test]
+    fn hardness_and_drops_default_and_parse() {
+        let def = serde_json::from_str::<BlockFile>(r#"{"id": "stone"}"#).unwrap().into_def();
+        assert_eq!(def.hardness, DEFAULT_HARDNESS);
+        assert_eq!(def.drops, Drops::Itself);
+        assert!(def.breakable);
+
+        let def = serde_json::from_str::<BlockFile>(r#"{"id": "leaves", "hardness": 0.2, "drops": false}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.hardness, 0.2);
+        assert_eq!(def.drops, Drops::Nothing);
+
+        let def = serde_json::from_str::<BlockFile>(r#"{"id": "grass", "drops": "dirt"}"#).unwrap().into_def();
+        assert_eq!(def.drops, Drops::Block("dirt".into()));
+
+        // A negative hardness can't make mining take negative time.
+        let def = serde_json::from_str::<BlockFile>(r#"{"id": "odd", "hardness": -2}"#).unwrap().into_def();
+        assert_eq!(def.hardness, 0.0);
+    }
+
+    #[test]
+    fn shipped_blocks_drop_what_they_should() {
+        let reg = BlockRegistry::with_defaults();
+        let id = |n| reg.id(n);
+        assert_eq!(reg.drop_of(id("stone")), Some(id("cobblestone")));
+        assert_eq!(reg.drop_of(id("grass")), Some(id("dirt")));
+        assert_eq!(reg.drop_of(id("dirt")), Some(id("dirt")));
+        assert_eq!(reg.drop_of(id("leaves")), None);
+        assert_eq!(reg.drop_of(id("ice")), None);
+        assert_eq!(reg.drop_of(AIR), None, "air has no item, so it can never drop");
+        assert!(!reg.def(id("bedrock")).breakable);
+        // Every shipped block's drop names something real.
+        for (i, def) in reg.defs.iter().enumerate().skip(1) {
+            if let Drops::Block(name) = &def.drops {
+                assert!(reg.by_name(name).is_ok(), "{} drops unknown {name}", def.id);
+            }
+            assert!(def.hardness >= 0.0, "block {i}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "drops unknown block")]
+    fn a_drop_naming_an_unknown_block_fails_at_startup() {
+        let mut reg = BlockRegistry::with_defaults();
+        reg.register(BlockDef { id: "ruby".into(), drops: Drops::Block("rubyy".into()), ..BlockDef::default() });
+        let mut painters = crate::atlas::default_painters();
+        for name in reg.texture_names() {
+            painters.ensure_registered(&name);
+        }
+        let atlas = crate::atlas::build_atlas(&painters);
+        reg.compile(&atlas.indices, atlas.tile_size);
     }
 
     #[test]

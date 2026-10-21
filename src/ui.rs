@@ -142,7 +142,8 @@ fn setup_hud(mut commands: Commands) {
                 Node {
                     width: Val::Percent(100.0),
                     position_type: PositionType::Absolute,
-                    bottom: Val::Px(78.0),
+                    // Clear of the hearts and air row (`health.rs`).
+                    bottom: Val::Px(96.0),
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
@@ -164,7 +165,7 @@ fn setup_hud(mut commands: Commands) {
 
             root.spawn((
                 HintText,
-                Text::new("WASD move  Space jump  F fly (creative)  T chat  E inventory  1-9 blocks  F3 debug  Esc pause"),
+                Text::new("WASD move  Space jump  F fly (creative)  T chat  E inventory  1-9 blocks  Q drop  F3 debug  Esc pause"),
                 TextFont { font_size: 14.0, ..default() },
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
                 Node {

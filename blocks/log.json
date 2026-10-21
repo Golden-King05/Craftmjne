@@ -2,5 +2,6 @@
   "id": "log",
   "name": "Log",
   "rotation": "log",
-  "texture_scheme": "log"
+  "texture_scheme": "log",
+  "hardness": 2.0
 }

@@ -1,7 +1,8 @@
 //! In-world inventory screen. Press E to open/close it (Escape also closes
 //! it, taking priority over the pause menu). Survival shows the hotbar plus
-//! three rows of personal storage - both start completely empty, since
-//! there's no block-pickup-on-break yet (a natural next step; see README).
+//! three rows of personal storage - both start empty in a new world and fill
+//! up as you pick up what you mine (`items.rs`); both are saved with the
+//! world.
 //! Creative shows the same hotbar+storage view *or* a scrollable list of
 //! every registered block, switched with a button above the grid; clicking
 //! a block gives a full stack of it in the currently selected hotbar slot.
@@ -17,8 +18,8 @@ use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemStack, AIR};
 use crate::chat::ChatState;
 use crate::interact::Hotbar;
 use crate::render::{AtlasImage, IconAtlasImage};
-use crate::save::GameMode;
-use crate::state::{AppState, PauseState};
+use crate::save::{GameMode, InventorySave, SlotSave};
+use crate::state::{AppState, DeathState, PauseState};
 use crate::ui::block_icon;
 
 /// Personal storage beyond the hotbar: three rows of `STORAGE_ROW_WIDTH`,
@@ -37,6 +38,57 @@ pub struct Inventory {
 impl Default for Inventory {
     fn default() -> Self {
         Self { slots: vec![ItemStack::EMPTY; INVENTORY_SIZE] }
+    }
+}
+
+/// Slots as saved: by block name, `None` for empty.
+pub fn stacks_to_save(slots: &[ItemStack], registry: &BlockRegistry) -> Vec<Option<SlotSave>> {
+    slots
+        .iter()
+        .map(|s| (!s.is_empty()).then(|| SlotSave { block: registry.def(s.id).id.clone(), count: s.count }))
+        .collect()
+}
+
+/// The inverse of [`stacks_to_save`], always exactly `len` slots long. A
+/// block that no longer exists (a removed mod) or has no item comes back as
+/// an empty slot, and a count is clamped to what one slot can hold, so a
+/// hand-edited or out-of-date save can't put anything impossible in a slot.
+pub fn stacks_from_save(saved: &[Option<SlotSave>], len: usize, registry: &BlockRegistry) -> Vec<ItemStack> {
+    let mut slots = vec![ItemStack::EMPTY; len];
+    for (slot, saved) in slots.iter_mut().zip(saved) {
+        let Some(saved) = saved else { continue };
+        let Ok(id) = registry.by_name(&saved.block) else { continue };
+        let def = registry.def(id);
+        if id == AIR || !def.item || saved.count == 0 {
+            continue;
+        }
+        *slot = ItemStack { id, count: saved.count.min(def.max_stack.max(1)) };
+    }
+    slots
+}
+
+pub fn inventory_to_save(hotbar: &Hotbar, inventory: &Inventory, registry: &BlockRegistry) -> InventorySave {
+    InventorySave {
+        hotbar: stacks_to_save(&hotbar.slots, registry),
+        storage: stacks_to_save(&inventory.slots, registry),
+        selected: hotbar.selected,
+    }
+}
+
+/// Restores a saved hotbar and storage, or empties both for a world that
+/// has none saved (a new world, or one from before inventories were saved).
+pub fn restore_inventory(
+    saved: Option<&InventorySave>,
+    hotbar: &mut Hotbar,
+    inventory: &mut Inventory,
+    registry: &BlockRegistry,
+) {
+    *hotbar = Hotbar::default();
+    *inventory = Inventory::default();
+    if let Some(saved) = saved {
+        hotbar.slots = stacks_from_save(&saved.hotbar, hotbar.slots.len(), registry);
+        inventory.slots = stacks_from_save(&saved.storage, inventory.slots.len(), registry);
+        hotbar.selected = saved.selected.min(hotbar.slots.len() - 1);
     }
 }
 
@@ -104,10 +156,11 @@ fn toggle_inventory(
     keys: Res<ButtonInput<KeyCode>>,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
+    death: Res<DeathState>,
     mut inv: ResMut<InventoryState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || paused.open || !keys.just_pressed(KeyCode::KeyE) {
+    if chat.open || paused.open || death.open || !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
@@ -482,6 +535,7 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Inventory>()
             .init_resource::<InventoryState>()
+            .init_resource::<DeathState>()
             .add_systems(OnEnter(AppState::InGame), reset_on_enter)
             .add_systems(OnExit(AppState::InGame), despawn_inventory_ui)
             .add_systems(
@@ -507,6 +561,29 @@ impl Plugin for InventoryPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slots_round_trip_through_the_save_and_bad_entries_come_back_empty() {
+        let registry = BlockRegistry::with_defaults();
+        let dirt = registry.id("dirt");
+        let stone = registry.id("stone");
+        let slots = vec![ItemStack { id: dirt, count: 12 }, ItemStack::EMPTY, ItemStack { id: stone, count: 1 }];
+        let saved = stacks_to_save(&slots, &registry);
+        assert_eq!(saved[1], None);
+        assert_eq!(stacks_from_save(&saved, 3, &registry), slots);
+
+        let odd = vec![
+            Some(SlotSave { block: "no_such_block".into(), count: 3 }),
+            Some(SlotSave { block: "dirt".into(), count: 100_000 }),
+            Some(SlotSave { block: "air".into(), count: 3 }),
+            Some(SlotSave { block: "dirt".into(), count: 4 }),
+        ];
+        let back = stacks_from_save(&odd, 3, &registry);
+        assert_eq!(back.len(), 3, "a longer saved list is cut to the slots that exist");
+        assert!(back[0].is_empty(), "unknown block");
+        assert_eq!(back[1], ItemStack { id: dirt, count: registry.def(dirt).max_stack }, "count clamped");
+        assert!(back[2].is_empty(), "air isn't an item");
+    }
 
     #[test]
     fn default_inventory_is_empty() {

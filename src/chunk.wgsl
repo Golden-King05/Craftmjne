@@ -43,6 +43,9 @@ struct ChunkParams {
     alpha_cutoff: f32,
 }
 
+// 1/sqrt(3): what an untinted chunk face's [1, 1, 1] arrives as.
+const UNTINTED: f32 = 0.57735027;
+
 @group(2) @binding(0) var atlas_texture: texture_2d<f32>;
 @group(2) @binding(1) var atlas_sampler: sampler;
 @group(2) @binding(2) var<uniform> params: ChunkParams;
@@ -55,7 +58,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let sky = vec3<f32>(in.color.a, in.uv_b.x, in.uv_b.y) * params.sky_light.rgb;
     let light = max(in.color.rgb, sky);
-    let lit = color.rgb * light * in.world_normal;
+    // A zero "normal" means untinted (`mesher::cube_mesh` - dropped items
+    // and the crack overlay, which rotate, and a rotated [1, 1, 1] would no
+    // longer be grey). Chunk meshes send [1, 1, 1] for untinted faces, which
+    // Bevy's vertex shader normalizes to length 1 on the way here, so
+    // UNTINTED is that same value: both kinds of mesh come out equally lit.
+    let untinted = all(in.world_normal == vec3<f32>(0.0));
+    let tint = select(in.world_normal, vec3<f32>(UNTINTED), untinted);
+    let lit = color.rgb * light * tint;
     let dist = distance(view.world_position, in.world_position.xyz);
     let fog = smoothstep(params.fog_start, params.fog_end, dist);
     return vec4<f32>(mix(lit, params.fog_color.rgb, fog), color.a * params.base_alpha);

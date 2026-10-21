@@ -12,8 +12,9 @@ use crate::blocks::{BlockTables, Tables};
 use crate::chat::ChatState;
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
 use crate::inventory::InventoryState;
+use crate::health::Vitals;
 use crate::save::GameMode;
-use crate::state::{AppState, PauseState};
+use crate::state::{AppState, DeathState, PauseState};
 use crate::world::ChunkMap;
 
 pub const HALF_W: f32 = 0.3;
@@ -47,6 +48,14 @@ pub struct Player {
     pub on_ground: bool,
     pub fly: bool,
     pub spawned: bool,
+    /// Health and breath - see `health.rs`.
+    pub vitals: Vitals,
+    /// The highest point reached since last standing on the ground, being in
+    /// water, or flying - what a fall is measured from.
+    fall_peak: f32,
+    /// How far the player fell before the latest landing, waiting for
+    /// `health::tick_vitals` to turn it into damage (and reset it).
+    pub landed_fall: f32,
     accumulator: f32,
 }
 
@@ -60,6 +69,11 @@ impl Default for Player {
             on_ground: false,
             fly: false,
             spawned: false,
+            vitals: Vitals::default(),
+            // Below everything, so the first airborne step starts the fall
+            // from wherever the player actually is (a fresh spawn, a load).
+            fall_peak: f32::NEG_INFINITY,
+            landed_fall: 0.0,
             accumulator: 0.0,
         }
     }
@@ -193,10 +207,29 @@ impl Player {
             self.assist_climb_out(map, tables, wish);
         }
 
+        let was_on_ground = self.on_ground;
         self.on_ground = false;
         self.move_axis(map, tables, 0, self.vel.x * dt);
         self.move_axis(map, tables, 2, self.vel.z * dt);
         self.move_axis(map, tables, 1, self.vel.y * dt);
+        self.track_fall(was_on_ground, in_water);
+    }
+
+    /// Fall distance for damage: water and flying cancel a fall, and landing
+    /// reports the drop from the highest point since the last time either
+    /// (or standing) happened - so jumping up a ledge and back down is
+    /// measured from the top of the jump, like Minecraft.
+    fn track_fall(&mut self, was_on_ground: bool, in_water: bool) {
+        if self.fly || in_water {
+            self.fall_peak = self.pos.y;
+        } else if self.on_ground {
+            if !was_on_ground {
+                self.landed_fall = self.landed_fall.max(self.fall_peak - self.pos.y);
+            }
+            self.fall_peak = self.pos.y;
+        } else {
+            self.fall_peak = self.fall_peak.max(self.pos.y);
+        }
     }
 
     /// While swimming toward a solid wall ahead, looks for an opening within
@@ -252,6 +285,7 @@ impl Player {
                                 (8 + dz) as f32 + 0.5,
                             );
                             self.vel = Vec3::ZERO;
+                            self.fall_peak = f32::NEG_INFINITY;
                             self.spawned = true;
                             return;
                         }
@@ -286,8 +320,13 @@ fn spawn_camera(mut commands: Commands, settings: Res<WorldSettings>) {
 /// `OnEnter(AppState::InGame)`: grabs the mouse immediately (no "click to
 /// play" step) and makes sure a stale pause flag from a previous session
 /// can't leave the game start paused.
-fn enter_game_grab(mut paused: ResMut<PauseState>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+fn enter_game_grab(
+    mut paused: ResMut<PauseState>,
+    mut death: ResMut<DeathState>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
     paused.open = false;
+    death.open = false;
     let Ok(mut window) = windows.single_mut() else { return };
     window.cursor_options.grab_mode = CursorGrabMode::Locked;
     window.cursor_options.visible = false;
@@ -313,18 +352,20 @@ fn exit_game_release_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>
 /// Also carries a click-to-regrab fallback for the rare case the OS steals
 /// the pointer lock (e.g. alt-tab) without going through our own pause flow.
 ///
-/// Skips entirely while chat or the inventory screen is open — those own
-/// cursor grab and Escape in their own state (closing themselves, not
-/// opening the pause menu).
+/// Skips entirely while chat, the inventory screen or the death screen is
+/// open — those own cursor grab and Escape in their own state (closing
+/// themselves, not opening the pause menu; the death screen can only be
+/// closed by respawning).
 fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     chat: Res<ChatState>,
     inventory: Res<InventoryState>,
+    death: Res<DeathState>,
     mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || inventory.open {
+    if chat.open || inventory.open || death.open {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
@@ -377,6 +418,7 @@ fn mouse_look(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn player_update(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -386,6 +428,7 @@ fn player_update(
     chat: Res<ChatState>,
     paused: Res<PauseState>,
     inventory: Res<InventoryState>,
+    death: Res<DeathState>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
     let Some(tables) = tables else { return };
@@ -395,7 +438,8 @@ fn player_update(
     // inventory screen just take over WASD/Space/mouse-look - gravity,
     // buoyancy, and momentum keep simulating underneath them, same as
     // vanilla Minecraft (opening your inventory doesn't stop you falling).
-    if !paused.open {
+    // A dead player's body stays where it fell until they respawn.
+    if !paused.open && !death.open {
         if !player.spawned {
             player.try_spawn(&map, &tables.0);
         } else {
@@ -439,6 +483,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PauseState>()
+            .init_resource::<DeathState>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(AppState::InGame), enter_game_grab)
             .add_systems(OnExit(AppState::InGame), exit_game_release_cursor)
@@ -499,6 +544,57 @@ mod tests {
         }
         assert!(player.on_ground);
         assert!((player.pos.y - 11.0).abs() < 0.01, "y = {}", player.pos.y);
+    }
+
+    #[test]
+    fn landing_reports_the_fall_from_the_highest_point() {
+        let (map, tables) = flat_world();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        let mut player = Player { pos: Vec3::new(8.5, 20.0, 8.5), spawned: true, ..Player::default() };
+        for _ in 0..600 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!((player.landed_fall - 9.0).abs() < 0.05, "fell {}", player.landed_fall);
+
+        // A jump on flat ground lands back where it started: measured from
+        // the top of the jump, about a block and a quarter, harmless.
+        player.landed_fall = 0.0;
+        keys.press(KeyCode::Space);
+        for _ in 0..20 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        keys.release(KeyCode::Space);
+        for _ in 0..240 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!(player.landed_fall > 0.8 && player.landed_fall < 1.6, "a jump fell {}", player.landed_fall);
+    }
+
+    #[test]
+    fn falling_into_water_cancels_the_fall() {
+        let mut reg = crate::blocks::BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        let (stone, water) = (reg.id("stone"), reg.id("water"));
+        let mut blocks = vec![0u16; CS * CS * H];
+        for z in 0..CS {
+            for x in 0..CS {
+                for y in 0..=10 {
+                    blocks[block_index(x, y, z)] = stone;
+                }
+                for y in 11..=13 {
+                    blocks[block_index(x, y, z)] = water;
+                }
+            }
+        }
+        let mut map = ChunkMap::default();
+        map.chunks.insert(IVec2::ZERO, Chunk { blocks: Some(blocks), ..Chunk::default() });
+        let keys = ButtonInput::<KeyCode>::default();
+        let mut player = Player { pos: Vec3::new(8.5, 40.0, 8.5), spawned: true, ..Player::default() };
+        for _ in 0..1200 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!(player.landed_fall < 3.0, "a dive into water counted as a {} block fall", player.landed_fall);
     }
 
     #[test]

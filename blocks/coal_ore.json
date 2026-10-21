@@ -1,4 +1,5 @@
 {
   "id": "coal_ore",
-  "name": "Coal Ore"
+  "name": "Coal Ore",
+  "hardness": 3.0
 }

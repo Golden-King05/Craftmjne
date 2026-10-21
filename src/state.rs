@@ -34,3 +34,13 @@ pub struct ActiveWorld {
 pub struct PauseState {
     pub open: bool,
 }
+
+/// Whether the death screen is up. Like [`PauseState`] it's an overlay, not
+/// an `AppState`: the world keeps rendering behind it, the player's body
+/// stops moving, the cursor is freed, and every other overlay (chat,
+/// inventory, pause) stays shut until "Respawn" closes it. Reset on every
+/// `OnEnter(AppState::InGame)`.
+#[derive(Resource, Default)]
+pub struct DeathState {
+    pub open: bool,
+}

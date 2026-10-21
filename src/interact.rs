@@ -1,20 +1,112 @@
-//! Block targeting (voxel DDA raycast), breaking, placing, block picking,
+//! Block targeting (voxel DDA raycast), mining, placing, block picking,
 //! and hotbar selection.
+//!
+//! Survival mining takes time: hold the left button on a block for
+//! [`mining_seconds`] of its `hardness` and it breaks, dropping whatever its
+//! `drops` says (`items.rs` spawns the item). Cracks spread across it while
+//! you mine (`atlas::destroy_stage_name` tiles on a cube drawn just outside
+//! the block), and looking away or letting go starts it over. A block with
+//! `breakable: false` (bedrock) can't be mined at all, in either mode.
+//! Creative breaks instantly and drops nothing.
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
-use crate::blocks::{BlockRegistry, ItemStack, Rotation, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE};
+use crate::atlas::{destroy_stage_name, DESTROY_STAGES};
+use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemStack, Rotation, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::inventory::InventoryState;
+use crate::items::{SpawnDrop, MINED_PICKUP_DELAY};
+use crate::light::{LightCell, MAX_LIGHT};
 use crate::player::{cursor_grabbed, Player};
+use crate::render::{bucket_to_mesh, ChunkMaterials};
 use crate::save::GameMode;
-use crate::state::{AppState, PauseState};
-use crate::world::{BlockSetEvent, ChunkMap};
+use crate::state::{AppState, DeathState, PauseState};
+use crate::world::{Atlas, BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
 const ACTION_REPEAT: f32 = 0.22; // seconds between repeats while a button is held
+/// Seconds of bare-handed mining per point of a block's `hardness`.
+pub const SECONDS_PER_HARDNESS: f32 = 1.5;
+/// After a block breaks, the next one starts after this pause, so holding
+/// the button on instant blocks (torches) doesn't clear a whole row in a
+/// blink.
+const MINE_COOLDOWN: f32 = 0.15;
+
+/// How long a block of this hardness takes to mine by hand.
+pub fn mining_seconds(hardness: f32) -> f32 {
+    hardness.max(0.0) * SECONDS_PER_HARDNESS
+}
+
+/// The block being mined in Survival, and how far along it is.
+#[derive(Resource, Default)]
+pub struct Mining {
+    /// The cell being mined, and the block that was in it when mining
+    /// started - if either changes, mining starts over.
+    target: Option<(IVec3, BlockId)>,
+    /// Seconds spent on `target` so far.
+    progress: f32,
+    cooldown: f32,
+}
+
+impl Mining {
+    /// Advances mining by `dt` with the button `held` on `target` (`None`
+    /// when not aiming at a breakable block), where the block takes
+    /// `seconds` to mine. Returns `true` on the frame it breaks.
+    pub fn advance(&mut self, target: Option<(IVec3, BlockId)>, held: bool, dt: f32, seconds: f32) -> bool {
+        self.cooldown = (self.cooldown - dt).max(0.0);
+        if !held || target.is_none() {
+            self.target = None;
+            self.progress = 0.0;
+            return false;
+        }
+        if self.target != target {
+            self.target = target;
+            self.progress = 0.0;
+        }
+        if self.cooldown > 0.0 {
+            return false;
+        }
+        self.progress += dt;
+        if self.progress < seconds {
+            return false;
+        }
+        self.target = None;
+        self.progress = 0.0;
+        self.cooldown = MINE_COOLDOWN;
+        true
+    }
+
+    /// Which crack stage to draw (`0..DESTROY_STAGES`), or `None` when
+    /// nothing's being mined.
+    pub fn crack_stage(&self, seconds: f32) -> Option<usize> {
+        self.target?;
+        if seconds <= 0.0 || self.progress <= 0.0 {
+            return None;
+        }
+        let fraction = (self.progress / seconds).clamp(0.0, 1.0);
+        Some(((fraction * DESTROY_STAGES as f32) as usize).min(DESTROY_STAGES - 1))
+    }
+
+    fn cell(&self) -> Option<IVec3> {
+        self.target.map(|(pos, _)| pos)
+    }
+}
+
+/// A mined block's drop pops out of the block's middle with a little hop,
+/// nudged sideways by an amount that depends only on where it was, so it's
+/// deterministic but not the same for every block.
+pub fn mined_drop(pos: IVec3, stack: ItemStack) -> SpawnDrop {
+    let h = (pos.x.wrapping_mul(73_856_093) ^ pos.y.wrapping_mul(19_349_663) ^ pos.z.wrapping_mul(83_492_791)) as u32;
+    let angle = (h % 6283) as f32 / 1000.0;
+    SpawnDrop {
+        pos: pos.as_vec3() + Vec3::splat(0.5),
+        stack,
+        vel: Vec3::new(angle.cos() * 0.8, 3.0, angle.sin() * 0.8),
+        pickup_delay: MINED_PICKUP_DELAY,
+    }
+}
 
 /// Which rotation axis a placement's face normal implies - whichever axis
 /// its single nonzero component lies on. Minecraft log placement: click a
@@ -93,10 +185,23 @@ pub fn raycast_voxel(
     None
 }
 
+pub const HOTBAR_SLOTS: usize = 9;
+
 #[derive(Resource)]
 pub struct Hotbar {
     pub slots: Vec<ItemStack>,
     pub selected: usize,
+}
+
+/// Starts completely empty in both modes (Minecraft-style: nothing is
+/// pre-filled). Survival fills it by picking up what you mine (`items.rs`);
+/// Creative via the inventory screen's block list
+/// (`inventory::handle_creative_click`). `world::enter_world` restores the
+/// world's saved hotbar over this.
+impl Default for Hotbar {
+    fn default() -> Self {
+        Self { slots: vec![ItemStack::EMPTY; HOTBAR_SLOTS], selected: 0 }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -108,14 +213,6 @@ struct ActionTimers {
     place_t: f32,
 }
 
-/// Starts completely empty in both modes (Minecraft-style: you drag/collect
-/// blocks onto the hotbar yourself, nothing is pre-filled). There's no
-/// block-pickup-on-break yet, so Survival can't fill it; Creative fills it
-/// via the inventory screen's block list (`inventory::handle_creative_click`).
-fn setup_hotbar(mut commands: Commands) {
-    commands.insert_resource(Hotbar { slots: vec![ItemStack::EMPTY; 9], selected: 0 });
-}
-
 /// Skips entirely while chat, the pause menu, or the inventory screen is
 /// open, so typing a digit or scrolling doesn't also swap the selected
 /// hotbar slot (or, with the inventory open, scroll its block list instead).
@@ -125,9 +222,10 @@ fn select_slot(
     chat: Res<ChatState>,
     paused: Res<PauseState>,
     inventory: Res<InventoryState>,
+    death: Res<DeathState>,
     mut hotbar: ResMut<Hotbar>,
 ) {
-    if chat.open || paused.open || inventory.open {
+    if chat.open || paused.open || inventory.open || death.open {
         wheel.clear();
         return;
     }
@@ -159,8 +257,10 @@ fn interact(
     mut hotbar: ResMut<Hotbar>,
     mut target: ResMut<Target>,
     mut timers: Local<ActionTimers>,
+    mut mining: ResMut<Mining>,
     players: Query<&Player>,
     mut block_events: EventWriter<BlockSetEvent>,
+    mut drops: EventWriter<SpawnDrop>,
     mut gizmos: Gizmos,
 ) {
     let Ok(player) = players.single() else { return };
@@ -193,19 +293,38 @@ fn interact(
         timers.place_t = 0.0;
     }
     if !cursor_grabbed(windows) {
+        mining.advance(None, false, dt, 0.0);
         return;
     }
-    let Some(hit) = &target.0 else { return };
+    let Some(hit) = &target.0 else {
+        mining.advance(None, false, dt, 0.0);
+        return;
+    };
 
-    // Break (left click / hold).
-    if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
-        let id = map.get_block(hit.pos);
-        if registry.def(id).breakable {
+    // Break (left click / hold). Creative is instant and repeats while
+    // held; Survival mines for a while and drops what the block drops.
+    let aimed = map.get_block(hit.pos);
+    let breakable = registry.def(aimed).breakable;
+    if *mode == GameMode::Creative {
+        if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
+            if breakable {
+                if let Some(prev) = map.set_block(hit.pos, AIR) {
+                    block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev, axis: AXIS_Y });
+                }
+            }
+            timers.break_t = ACTION_REPEAT;
+        }
+    } else {
+        let seconds = mining_seconds(registry.def(aimed).hardness);
+        let mined = breakable.then_some((hit.pos, aimed));
+        if mining.advance(mined, mouse.pressed(MouseButton::Left), dt, seconds) {
             if let Some(prev) = map.set_block(hit.pos, AIR) {
                 block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev, axis: AXIS_Y });
+                if let Some(drop) = registry.drop_of(prev) {
+                    drops.write(mined_drop(hit.pos, ItemStack { id: drop, count: 1 }));
+                }
             }
         }
-        timers.break_t = ACTION_REPEAT;
     }
 
     // Place (right click / hold).
@@ -275,15 +394,93 @@ fn interact(
     }
 }
 
+/// The crack overlay on the block being mined: one cube entity, moved to
+/// whichever block is being mined and given the mesh for the current stage.
+#[derive(Resource, Default)]
+struct CrackOverlay {
+    entity: Option<Entity>,
+    /// One mesh per stage, built the first time it's needed.
+    meshes: Vec<Handle<Mesh>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_crack_overlay(
+    mut commands: Commands,
+    mining: Res<Mining>,
+    map: Res<ChunkMap>,
+    registry: Res<BlockRegistry>,
+    tables: Option<Res<BlockTables>>,
+    atlas: Option<Res<Atlas>>,
+    materials: Option<Res<ChunkMaterials>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut overlay: ResMut<CrackOverlay>,
+    mut cubes: Query<(&mut Transform, &mut Mesh3d, &mut Visibility)>,
+) {
+    let (Some(tables), Some(atlas), Some(materials)) = (tables, atlas, materials) else { return };
+    if overlay.meshes.is_empty() {
+        // Drawn fully lit: the cracks are near-black, so they read as dark
+        // lines in any light, and a dim crack would just disappear.
+        let lit = LightCell { block: [MAX_LIGHT; 3], sky: [MAX_LIGHT; 3] };
+        overlay.meshes = (0..DESTROY_STAGES)
+            .map(|stage| {
+                let tile = atlas.0.indices[&destroy_stage_name(stage)];
+                meshes.add(bucket_to_mesh(crate::mesher::cube_mesh(&tables.0, 1.004, lit, |_| tile)))
+            })
+            .collect();
+    }
+    let shown = mining.cell().and_then(|pos| {
+        let seconds = mining_seconds(registry.def(map.get_block(pos)).hardness);
+        mining.crack_stage(seconds).map(|stage| (pos, stage))
+    });
+    let entity = match overlay.entity {
+        Some(e) => e,
+        None => {
+            let e = commands
+                .spawn((
+                    Mesh3d(overlay.meshes[0].clone()),
+                    MeshMaterial3d(materials.solid.clone()),
+                    Transform::default(),
+                    Visibility::Hidden,
+                ))
+                .id();
+            overlay.entity = Some(e);
+            e
+        }
+    };
+    let Ok((mut transform, mut mesh, mut visibility)) = cubes.get_mut(entity) else { return };
+    match shown {
+        Some((pos, stage)) => {
+            transform.translation = pos.as_vec3() + Vec3::splat(0.5);
+            if mesh.0 != overlay.meshes[stage] {
+                mesh.0 = overlay.meshes[stage].clone();
+            }
+            *visibility = Visibility::Visible;
+        }
+        None => *visibility = Visibility::Hidden,
+    }
+}
+
+fn reset_mining(mut commands: Commands, mut mining: ResMut<Mining>, mut overlay: ResMut<CrackOverlay>) {
+    *mining = Mining::default();
+    if let Some(e) = overlay.entity.take() {
+        commands.entity(e).despawn();
+    }
+}
+
 pub struct InteractPlugin;
 
 impl Plugin for InteractPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Target>()
-            .add_systems(Startup, setup_hotbar)
+            .init_resource::<Hotbar>()
+            .init_resource::<Mining>()
+            .init_resource::<CrackOverlay>()
+            .init_resource::<DeathState>()
+            .add_event::<SpawnDrop>()
+            .add_systems(OnExit(AppState::InGame), reset_mining)
             .add_systems(
                 Update,
-                (select_slot, interact)
+                (select_slot, interact, sync_crack_overlay)
                     .chain()
                     .after(crate::player::PlayerSet)
                     .run_if(in_state(AppState::InGame)),
@@ -318,6 +515,60 @@ mod tests {
         .expect("hit floor");
         assert_eq!(hit.normal, IVec3::Y);
         assert_eq!(hit.pos.y, -1);
+    }
+
+    #[test]
+    fn mining_takes_the_blocks_time_and_restarts_when_interrupted() {
+        let block = Some((IVec3::new(1, 2, 3), 5));
+        let other = Some((IVec3::new(1, 2, 4), 5));
+        let dt = 0.05;
+        let mut m = Mining::default();
+        let secs = mining_seconds(1.5); // stone: 2.25s
+        let mut frames = 0;
+        while !m.advance(block, true, dt, secs) {
+            frames += 1;
+            assert!(frames < 1000);
+        }
+        assert!(((frames + 1) as f32 * dt - secs).abs() < dt + 1e-4, "took {} frames", frames + 1);
+
+        // Halfway, then look at another block: back to zero.
+        let mut m = Mining::default();
+        for _ in 0..20 {
+            assert!(!m.advance(block, true, dt, secs));
+        }
+        assert_eq!(m.crack_stage(secs), Some(4));
+        m.advance(other, true, dt, secs);
+        assert_eq!(m.crack_stage(secs), Some(0), "switching blocks restarts");
+        // Letting go also restarts.
+        m.advance(other, false, dt, secs);
+        assert_eq!(m.crack_stage(secs), None);
+        // And so does the block in the cell changing under you.
+        for _ in 0..20 {
+            m.advance(block, true, dt, secs);
+        }
+        m.advance(Some((IVec3::new(1, 2, 3), 6)), true, dt, secs);
+        assert!(m.crack_stage(secs).unwrap() < 1);
+    }
+
+    #[test]
+    fn instant_blocks_break_at_once_but_not_all_in_one_frame() {
+        let dt = 0.01;
+        let mut m = Mining::default();
+        let mut broken = 0;
+        for i in 0..100 {
+            // A fresh torch in front of you every frame (the last one broke).
+            if m.advance(Some((IVec3::new(i, 0, 0), 9)), true, dt, mining_seconds(0.0)) {
+                broken += 1;
+            }
+        }
+        assert!((5..=8).contains(&broken), "{broken} torches in one second");
+    }
+
+    #[test]
+    fn harder_blocks_take_longer() {
+        assert!(mining_seconds(0.5) < mining_seconds(1.5));
+        assert_eq!(mining_seconds(0.0), 0.0);
+        assert_eq!(mining_seconds(-1.0), 0.0);
     }
 
     #[test]

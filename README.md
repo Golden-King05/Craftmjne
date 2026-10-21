@@ -69,9 +69,10 @@ The mouse locks automatically the moment you enter a world — no click needed.
 | Shift | fly down (Creative only) |
 | Ctrl | sprint |
 | F | toggle fly mode (Creative only) |
-| Left / right click | break / place block |
+| Left / right click | mine (hold, in Survival) / place block |
 | Middle click | pick targeted block (Creative only) |
 | 1–9 / mouse wheel | hotbar selection |
+| Q / Ctrl+Q | drop one of the selected item / the whole stack |
 | E | open/close inventory |
 | T | open chat |
 | / | open chat with `/` already typed (command shortcut) |
@@ -119,27 +120,67 @@ on returning to the menu.
 
 ### Game modes
 
-Chosen once, at world creation (`save::GameMode`, in `meta.json`). For now the
-only behavioral difference is flying: Creative can toggle it with `F`;
-Survival can't, and any stale `fly: true` from an older save is cleared on
-load. More differences (mining speed, hunger, PvP damage, etc.) are natural
-follow-ups — see `player::player_update` for where mode is checked.
+Chosen once, at world creation (`save::GameMode`, in `meta.json`).
+
+- **Survival**: mining takes time and drops items, you have health and
+  breath, and you can die (see "Survival" below). No flying, and any stale
+  `fly: true` from an older save is cleared on load.
+- **Creative**: blocks break instantly and drop nothing, the block grid in
+  the inventory gives you anything, you can fly (`F`), and you take no
+  damage.
 
 The mode can also be changed mid-game with `/mode <survival|creative>` (see
 "Chat and commands" below).
 
+## Survival
+
+### Mining and drops
+
+Hold the left button on a block to mine it (`interact.rs`). How long it
+takes is the block's `hardness` times `SECONDS_PER_HARDNESS` (1.5s) - dirt
+0.75s, stone 2.25s, a log 3s, a torch instantly. Cracks spread across the
+block as you go (ten `destroy_stage_N` tiles; drop a
+`textures/blocks/destroy_stage_N.png` in to replace them). Looking at
+another block or letting go starts over. Blocks with `"breakable": false`
+(bedrock) can't be mined in either mode.
+
+A mined block drops what its `drops` says: itself by default, something
+else (grass drops dirt, stone drops cobblestone), or nothing (leaves, ice,
+glass). Drops are small spinning cubes (`items.rs`) that fall, settle, float
+up in water, merge with nearby stacks of the same block, and are picked up
+when you walk into them: topping up matching stacks first, then empty
+hotbar slots, then storage. They vanish after five minutes, and are saved
+with the world. `Q` throws one of the selected item, `Ctrl+Q` the stack.
+
+### Health
+
+`health.rs`. Ten hearts (20 points) and ten bubbles of breath above the
+hotbar; the bubbles only show while you're short of breath.
+
+- Falling more than 3 blocks costs a point per extra block. Landing in
+  water or flying cancels a fall.
+- Breath lasts 15 seconds with your head underwater, and refills quickly
+  in air. With none left you lose 2 points a second.
+- Health regenerates a point every 4 seconds, starting 5 seconds after you
+  were last hurt. (There's no hunger yet.)
+- At zero you die: everything you carried is dropped where you fell, and
+  **Respawn** puts you back at the world's spawn with full health.
+
+Creative takes no damage. Health, breath, the hotbar and storage are saved
+with the world.
+
 ## Inventory
 
 Press `E` to open/close it (`src/inventory.rs`). The hotbar and the
-inventory screen both start **completely empty** in every mode — nothing is
-pre-filled — matching Minecraft's own behavior.
+inventory screen both start **completely empty** in a new world, in every
+mode — nothing is pre-filled — matching Minecraft's own behavior. Both are
+saved with the world.
 
 - **Survival** shows the hotbar plus three rows of personal storage
   (`inventory::Inventory`, `STORAGE_ROWS` x `STORAGE_ROW_WIDTH` slots —
-  constants, deliberately easy to make configurable later). There's no
-  block-pickup-on-break yet, so Survival currently has no way to fill either
-  the hotbar or storage; that's a natural next step. Middle-click "pick
-  block" is Creative-only for the same reason — Survival has no free items.
+  constants, deliberately easy to make configurable later), filled by
+  picking up what you mine. Middle-click "pick block" is Creative-only —
+  Survival has no free items.
 - **Creative** shows the same hotbar+storage view, or a scrollable grid of
   every registered block — a button above the grid switches between the two
   (`inventory::CreativeTab`). Clicking a block in the grid gives a full
@@ -155,7 +196,7 @@ pre-filled — matching Minecraft's own behavior.
 
 Opening the inventory frees the cursor and takes over WASD/look/hotbar
 shortcuts/block interaction, the same way chat does — all three overlays
-(chat, inventory, pause) are mutually exclusive (only one can be open at a
+(chat, inventory, pause) and the death screen are mutually exclusive (only one can be open at a
 time) and Escape closes whichever one is open before it would open the pause
 menu. Unlike the actual pause menu, chat and the inventory screen don't stop
 the world simulating underneath them: gravity, swimming buoyancy, and
@@ -553,7 +594,9 @@ src/
 ├── sky.rs       # SkyPlugin: day/night clock, sun/moon billboards, sky color + world brightness
 ├── celestial.wgsl # the sun/moon fragment shader (embedded asset)
 ├── player.rs    # PlayerPlugin: AABB physics, swimming, fly mode, pause/cursor, camera
-├── interact.rs  # InteractPlugin: voxel DDA raycast, break/place/pick, hotbar
+├── interact.rs  # InteractPlugin: voxel DDA raycast, mining (time, cracks, drops), place/pick, hotbar
+├── items.rs     # ItemsPlugin: dropped items - physics, pickup, merging, Q to throw, saved with the world
+├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
 ├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
 ├── commands.rs  # chat command dispatcher (/mode, /texture-report, /locate ...) + the cheats-flag rule
@@ -805,7 +848,9 @@ by) is required. Everything else defaults sanely:
 | `solid` | `true` (`false` if `fluid`) | collides with entities |
 | `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |
 | `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
-| `breakable` | `true` | bedrock sets this `false` |
+| `breakable` | `true` | whether it can be mined at all, in either mode; bedrock sets this `false` |
+| `hardness` | `1.0` | how long it takes to mine in Survival: `hardness` x 1.5 seconds by hand. `0` is instant (torch), dirt `0.5`, stone `1.5` |
+| `drops` | `true` | what mining it in Survival gives: `true` itself, `false` nothing, or a block id (`"dirt"` for grass). An unknown id fails at startup |
 | `max_stack` | `124` (`DEFAULT_MAX_STACK`) | how many fit in one inventory/hotbar slot — see "Stacking" above |
 | `item` | `true` | `false` means this block has no inventory item at all — left out of Creative's grid, can't be middle-click picked. `air` is the built-in example; use it for a block that's only ever meant to be obtained via a separate item later (a bucket-of-water instead of a raw water block, say) |
 | `item_model` | `"default"` | `"default"` \| `"face"` \| `"custom"` — see "Item models" below |
@@ -929,7 +974,10 @@ drives the full streaming pipeline through the actual `AppState` machine:
 menu → `InGame` → generation tasks → meshing tasks → chunk entities, plus
 block edits, remeshing, cross-chunk dirty propagation, and a full
 leave-and-relaunch cycle that confirms edits and player position survive a
-save/load round trip.
+save/load round trip. It also drops items through the real schedule and
+picks them up, and checks the inventory, health and items on the ground
+survive a reload, and that a new world doesn't inherit the last one's
+inventory.
 
 ## Roadmap ideas
 
@@ -940,8 +988,8 @@ plugins, day/night cycle (shader uniforms already in place), biome-driven
 generation parameters, audio (enable Bevy's `bevy_audio` feature), more chat
 commands (`commands::execute`'s match is the extension point), an
 achievements system that reads `WorldMeta::cheats` to exclude worlds that
-have had commands used in them, and block-pickup-on-break (to actually let
-Survival fill its inventory).
+have had commands used in them, crafting, tools that mine faster (a tool's
+speed divides `hardness`), and hunger.
 
 Known gaps in the fluid sim (`world.rs`'s `FluidQueue`/`recompute_cell`):
 fluid levels aren't persisted across save/load (a reload snaps flowing water

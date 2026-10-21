@@ -9,6 +9,7 @@
 //! chunks to exist (the mesher gets a 1-block padded shell for seamless
 //! culling and ambient occlusion across chunk borders).
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use std::collections::{HashMap, VecDeque};
@@ -17,15 +18,19 @@ use std::sync::Arc;
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
 use crate::biome;
 use crate::blocks::{
-    BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
+    BlockId, BlockRegistry, BlockTables, ItemStack, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
 };
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
 use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::light::{seed_new_chunk, LightCell, LightQueue};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PaddedChunk};
+use crate::health::Vitals;
+use crate::interact::Hotbar;
+use crate::inventory::{inventory_to_save, restore_inventory, Inventory};
+use crate::items::{DroppedItem, LoadedItems};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
-use crate::save::{BlockEdit, FluidCell, GameMode, PlayerSave, SaveStore, WorldData};
+use crate::save::{BlockEdit, DroppedItemSave, FluidCell, GameMode, InventorySave, PlayerSave, SaveStore, WorldData};
 use crate::sky::{DayNightClock, NEW_WORLD_START_TIME};
 use crate::state::{ActiveWorld, AppState};
 use crate::snapshot::ChunkStore;
@@ -220,6 +225,11 @@ impl ChunkMap {
             }
             None => false,
         }
+    }
+
+    /// Whether the chunk holding `pos`'s column is loaded and generated.
+    pub fn is_loaded(&self, pos: IVec3) -> bool {
+        self.chunks.get(&Self::chunk_coord(pos.x, pos.z)).is_some_and(|c| c.blocks.is_some())
     }
 
     /// Physics-safe solidity: unloaded terrain counts as solid.
@@ -760,6 +770,7 @@ pub fn compile_content(
 /// restores the saved player position if this isn't a brand new world, and
 /// makes the world's game mode available as a resource (read by
 /// `player::player_update` to gate flying).
+#[allow(clippy::too_many_arguments)]
 fn enter_world(
     mut commands: Commands,
     active: Res<ActiveWorld>,
@@ -768,6 +779,8 @@ fn enter_world(
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
     mut players: Query<&mut Player>,
+    mut hotbar: ResMut<Hotbar>,
+    mut inventory: ResMut<Inventory>,
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
@@ -837,6 +850,19 @@ fn enter_world(
     commands.insert_resource(LightQueue::default());
     commands.insert_resource(DayNightClock { elapsed: data.time_of_day, day_count: data.day_count });
 
+    restore_inventory(data.inventory.as_ref(), &mut hotbar, &mut inventory, &registry);
+    let items = data
+        .items
+        .iter()
+        .filter_map(|item| {
+            let id = registry.by_name(&item.block).ok()?;
+            let max = registry.def(id).max_stack.max(1);
+            let stack = ItemStack { id, count: item.count.min(max) };
+            Some((stack, Vec3::new(item.x, item.y, item.z), item.age))
+        })
+        .collect();
+    commands.insert_resource(LoadedItems(items));
+
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
         if let Some(saved) = data.player {
@@ -844,7 +870,16 @@ fn enter_world(
             player.yaw = saved.yaw;
             player.pitch = saved.pitch;
             player.fly = saved.fly && active.meta.mode == GameMode::Creative;
-            player.spawned = true;
+            // Saved mid-death (quit from the death screen): come back alive
+            // at spawn, as the Respawn button would have done. Whatever
+            // was carried was already dropped, and saved, when they died.
+            player.vitals = Vitals::restored(saved.health, saved.air);
+            if player.vitals.is_dead() {
+                player.vitals = Vitals::default();
+                player.pos = Player::default().pos;
+            } else {
+                player.spawned = true;
+            }
         }
     }
 }
@@ -953,6 +988,7 @@ fn write_save(
     original_fluids: &OriginalFluids,
     player: Option<&Player>,
     clock: &DayNightClock,
+    carried: &CarriedState,
     cache: &mut FluidSaveCache,
     background: bool,
 ) {
@@ -997,9 +1033,52 @@ fn write_save(
         yaw: p.yaw,
         pitch: p.pitch,
         fly: p.fly,
+        health: p.vitals.health,
+        air: p.vitals.air,
     });
-    let data = WorldData { player, edits, fluids, time_of_day: clock.elapsed, day_count: clock.day_count };
+    let (inventory, items) = carried.snapshot(registry);
+    let data = WorldData {
+        player,
+        edits,
+        fluids,
+        time_of_day: clock.elapsed,
+        day_count: clock.day_count,
+        inventory: Some(inventory),
+        items,
+    };
     persist(store.clone(), active.slug.clone(), data, background);
+}
+
+/// What the player is carrying and what's lying on the ground - the parts of
+/// a save that live outside the world module (`interact::Hotbar`,
+/// `inventory::Inventory`, `items::DroppedItem`), gathered as one system
+/// parameter so `autosave` and `exit_world` stay under Bevy's parameter
+/// limit.
+#[derive(SystemParam)]
+pub struct CarriedState<'w, 's> {
+    hotbar: Res<'w, Hotbar>,
+    inventory: Res<'w, Inventory>,
+    items: Query<'w, 's, &'static DroppedItem>,
+}
+
+impl CarriedState<'_, '_> {
+    fn snapshot(&self, registry: &BlockRegistry) -> (InventorySave, Vec<DroppedItemSave>) {
+        let inventory = inventory_to_save(&self.hotbar, &self.inventory, registry);
+        let items = self
+            .items
+            .iter()
+            .filter(|item| !item.stack.is_empty())
+            .map(|item| DroppedItemSave {
+                x: item.pos.x,
+                y: item.pos.y,
+                z: item.pos.z,
+                block: registry.def(item.stack.id).id.clone(),
+                count: item.stack.count,
+                age: item.age,
+            })
+            .collect();
+        (inventory, items)
+    }
 }
 
 /// A loaded chunk's fluid state as saved: every fluid cell except sources
@@ -1082,6 +1161,7 @@ fn autosave(
     original_fluids: Res<OriginalFluids>,
     players: Query<&Player>,
     clock: Res<DayNightClock>,
+    carried: CarriedState,
     mut cache: ResMut<FluidSaveCache>,
 ) {
     timer.0 += time.delta_secs();
@@ -1099,6 +1179,7 @@ fn autosave(
         &original_fluids,
         players.single().ok(),
         &clock,
+        &carried,
         &mut cache,
         true,
     );
@@ -1125,6 +1206,7 @@ fn exit_world(
     mut map: ResMut<ChunkMap>,
     tasks: Query<Entity, Or<(With<GenTask>, With<MeshTask>)>>,
     clock: Res<DayNightClock>,
+    carried: CarriedState,
     mut cache: ResMut<FluidSaveCache>,
 ) {
     write_save(
@@ -1137,6 +1219,7 @@ fn exit_world(
         &original_fluids,
         players.single().ok(),
         &clock,
+        &carried,
         &mut cache,
         false,
     );
@@ -1477,6 +1560,11 @@ fn collect_mesh_tasks(
     }
 }
 
+/// `exit_world`, which saves the world on leaving it. Anything that tears
+/// down state the save reads (`items::despawn_items`) runs after this.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorldSaveSet;
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
@@ -1494,6 +1582,9 @@ impl Plugin for WorldPlugin {
             .insert_resource(default_painters())
             .insert_resource(ChunkMap { needs_scan: true, ..ChunkMap::default() })
             .init_resource::<EditLog>()
+            .init_resource::<Hotbar>()
+            .init_resource::<Inventory>()
+            .init_resource::<LoadedItems>()
             .init_resource::<PendingEdits>()
             .init_resource::<PendingFluids>()
             .init_resource::<OriginalFluids>()
@@ -1511,7 +1602,7 @@ impl Plugin for WorldPlugin {
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)
             .add_systems(OnEnter(AppState::InGame), enter_world)
-            .add_systems(OnExit(AppState::InGame), exit_world)
+            .add_systems(OnExit(AppState::InGame), exit_world.in_set(WorldSaveSet))
             .add_systems(
                 Update,
                 (collect_gen_tasks, collect_mesh_tasks)

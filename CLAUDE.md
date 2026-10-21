@@ -133,7 +133,7 @@ etc.) instead of inventing a new approach:
   overlay's open-toggle system must check every *other* overlay's `open`
   flag before firing, and `player.rs`'s `cursor_grab` (Escape → pause) and
   `player_update` (movement freeze) must check all of them too. When adding
-  overlay N+1: `grep -rn "chat.open\|paused.open\|inventory.open"` across
+  overlay N+1: `grep -rn "chat.open\|paused.open\|inventory.open\|death.open"` across
   `player.rs`, `interact.rs`, and every other overlay's toggle system, and
   add the new flag everywhere an existing one appears.
 - **"Blocks input" and "freezes the world" are different things — don't
@@ -1307,9 +1307,18 @@ etc.) instead of inventing a new approach:
   color). Safe for the same reason `ATTRIBUTE_UV_1` was safe: chunks are
   unlit and spawned with a pure-translation `Transform`, so nothing reads
   `world_normal` for real lighting and the identity normal-matrix leaves
-  the smuggled color untouched. `[1.0, 1.0, 1.0]` (a multiply no-op) is
-  baked for every untinted face, so this needed zero changes to any
-  existing block or test. **Which faces get tinted is a property of the
+  the smuggled color's *hue* untouched. **Its length is not untouched**
+  (found later, while drawing dropped items): Bevy's vertex shader
+  normalizes `world_normal` (`mesh_normal_local_to_world`, checked in the
+  vendored `bevy_pbr-0.16.1` source). So the `[1.0, 1.0, 1.0]` baked for
+  untinted faces arrives as `[0.577; 3]` - every untinted surface has
+  always rendered at 58% of the intended brightness - and a grass tint
+  arrives at unit length, so its own brightness is thrown away (the
+  colors tuned by eye were tuned against that). It's been left as is on
+  purpose, because fixing it brightens the whole world by 1.73x and the
+  lighting constants were all chosen looking at the current result; that
+  call belongs to the user. `chunk.wgsl`'s `UNTINTED` constant pins the
+  current look for meshes that send a zero "normal" (below). **Which faces get tinted is a property of the
   (block, face) slot, not the texture name** - `FaceTint`/`Tables::tinted`
   mirror `FaceTextures`/`Tables::tiles`'s exact `[id*6+face]` shape, because
   grass's bottom face reuses `dirt.png` (the very tile plain `dirt` blocks
@@ -2334,3 +2343,56 @@ etc.) instead of inventing a new approach:
     `natural_height`, which a new valley could lower by exactly the
     offset, making the old column identical and rightly unblended. It now
     offsets `effective_height`. Both were re-break-tested.
+- **Mining, drops, health and death: where each rule lives.**
+  - `hardness`/`drops`/`breakable` are block-file data (`blocks.rs`).
+    `BlockRegistry::drop_of` resolves a drop. `compile` refuses an unknown
+    drop name, the same way it refuses a missing texture.
+  - `interact::Mining::advance` is the pure mining rule (time, restart on
+    a new target or a changed block, a short cooldown after each break).
+    `interact` only feeds it input and spawns the drop.
+  - `items::step_item` (physics) and `items::give` (hotbar first, then
+    storage; top up before empty slots) are pure and unit-tested.
+  - `health::Vitals::tick` covers breath, drowning and regen.
+    `health::fall_damage` turns a fall into damage. The fall itself is
+    measured in `Player::step` (`track_fall`), because only the physics
+    knows when you landed.
+  - The death screen is a fourth mutually exclusive overlay
+    (`state::DeathState`). Every toggle that checked `chat.open`/
+    `inventory.open`/`paused.open` now checks it too.
+- **Rotating a mesh drawn through the chunk material breaks the tint
+  trick, so free-standing cubes send a zero "normal".** The tint rides in
+  `ATTRIBUTE_NORMAL` (see the biome-tint entry), and a rotated entity's
+  normal matrix rotates it: a spinning item's `[1, 1, 1]` would turn into a
+  shifting colour. `mesher::cube_mesh` (dropped items, the crack overlay)
+  sends `[0, 0, 0]`, which every transform leaves alone and which Bevy
+  skips normalizing. `chunk.wgsl` reads exact zero as "untinted" and
+  substitutes `UNTINTED` (0.577, what chunks' `[1, 1, 1]` arrives as), so
+  items match the world's brightness. Interpolating three zero vertices
+  gives exactly zero, so the comparison is safe. The shader was checked by
+  parsing and validating it with the vendored `naga` crate in a scratch
+  project with Bevy's imports stubbed out. A deliberately broken copy was
+  rejected, so the check does catch real errors. That's the cheapest way to
+  check a WGSL edit from a session with no GPU.
+- **Hotbar and inventory are resources that outlive a world, so loading
+  has to reset them.** Before inventories were saved, nothing reset them,
+  and a second world in the same session started with the first world's
+  items. `world::enter_world` now calls `inventory::restore_inventory`,
+  which empties both and then applies the save (if any).
+  `a_new_world_does_not_inherit_the_last_worlds_inventory` covers it.
+  `Hotbar`/`Inventory`/`LoadedItems` are `init_resource`d by
+  `WorldPlugin` as well as their own plugins, so the headless app (world
+  and light only) can still save and load them.
+- **A save field the world module doesn't own goes through a
+  `SystemParam`.** `world::CarriedState` bundles the hotbar, inventory and
+  dropped-item query. `autosave`/`exit_world` were already at 13-14
+  parameters, and Bevy's limit is 16. Item entities are despawned on leaving
+  a world by `items::despawn_items`, ordered
+  `.after(world::WorldSaveSet)` so the save still sees them.
+- **`SAVE_FORMAT` went 1 -> 2 with an empty migration step.** Every new
+  field is a serde default, so old worlds load fine. The bump is for the
+  *other* direction: a format-1 build would open a new world and save it
+  back without the inventory.
+- **Headless tests have no player physics plugin, so a test that needs the
+  player on the ground places them** (`stand_on_ground` uses
+  `open_air_run`). The first version waited for the player to land, and
+  timed out, because nothing ever stepped the player.

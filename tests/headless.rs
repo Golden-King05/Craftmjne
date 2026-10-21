@@ -9,7 +9,10 @@ use bevy::state::app::StatesPlugin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use craftmjne::blocks::{BlockRegistry, AXIS_Y};
+use craftmjne::blocks::{BlockRegistry, ItemStack, AXIS_Y};
+use craftmjne::interact::Hotbar;
+use craftmjne::inventory::Inventory;
+use craftmjne::items::{DroppedItem, ItemsPlugin, SpawnDrop};
 use craftmjne::config::{WorldSettings, CHUNK_SIZE};
 use craftmjne::light::{LightPlugin, LightQueue, LEVEL_STEP, MAX_LIGHT};
 use craftmjne::player::Player;
@@ -52,7 +55,7 @@ fn headless_app(temp: &TempSaves) -> App {
         water: Handle::default(),
     });
     app.init_state::<AppState>();
-    app.add_plugins((WorldPlugin, LightPlugin));
+    add_gameplay(&mut app);
     app.world_mut().spawn(Player::default());
 
     let (slug, meta) = app.world().resource::<SaveStore>().create_world("Test World", 7, GameMode::Survival).unwrap();
@@ -76,7 +79,7 @@ fn reload_app(temp: &TempSaves) -> App {
     app.insert_resource(SaveStore::at(temp.0.clone()));
     app.insert_resource(ChunkMaterials { solid: Handle::default(), water: Handle::default() });
     app.init_state::<AppState>();
-    app.add_plugins((WorldPlugin, LightPlugin));
+    add_gameplay(&mut app);
     app.world_mut().spawn(Player::default());
 
     let store = app.world().resource::<SaveStore>();
@@ -86,6 +89,17 @@ fn reload_app(temp: &TempSaves) -> App {
     app.update();
 
     app
+}
+
+/// The world and lighting, plus dropped items, with the resources their
+/// systems read that would otherwise come from plugins this app leaves out
+/// (chat, the inventory screen, input).
+fn add_gameplay(app: &mut App) {
+    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin));
+    app.init_resource::<ButtonInput<KeyCode>>();
+    app.init_resource::<craftmjne::chat::ChatState>();
+    app.init_resource::<craftmjne::inventory::InventoryState>();
+    app.init_resource::<craftmjne::state::PauseState>();
 }
 
 fn run_until(app: &mut App, mut done: impl FnMut(&mut App) -> bool, max_iters: u32) -> bool {
@@ -936,4 +950,138 @@ fn chunks_unloaded_far_away_come_back_exactly_as_they_were() {
     let reloaded = capture(&app2);
     assert!(reloaded.0 == before.0, "blocks changed after a save made while the chunk was unloaded");
     assert!(reloaded.1 == before.1, "fluid changed after a save made while the chunk was unloaded");
+}
+
+/// Stands the player on dry ground with open air to the east (there's no
+/// player physics in this app, so they're placed rather than dropped), and
+/// returns where their feet are.
+fn stand_on_ground(app: &mut App) -> Vec3 {
+    assert!(run_until(app, |app| app.world().resource::<ChunkMap>().stats().0 >= 25, 2000));
+    let cell = open_air_run(app, 6);
+    let feet = cell.as_vec3() + Vec3::new(0.5, 0.0, 0.5);
+    let world = app.world_mut();
+    let mut player = world.query::<&mut Player>().single_mut(world).unwrap();
+    player.pos = feet;
+    player.spawned = true;
+    feet
+}
+
+/// A mined block's drop lands, and walking into it puts it in the hotbar:
+/// the whole item pipeline through the real schedule.
+#[test]
+fn a_dropped_item_falls_and_is_picked_up_into_the_hotbar() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let feet = stand_on_ground(&mut app);
+    let dirt = app.world().resource::<BlockRegistry>().id("dirt");
+
+    // Dropped out of reach first: it should land and wait.
+    let away = feet + Vec3::new(4.0, 2.0, 0.0);
+    app.world_mut().send_event(SpawnDrop {
+        pos: away,
+        stack: ItemStack { id: dirt, count: 3 },
+        vel: Vec3::ZERO,
+        pickup_delay: 0.0,
+    });
+    for _ in 0..30 {
+        app.update();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let item_y = {
+        let world = app.world_mut();
+        let items: Vec<f32> = world.query::<&DroppedItem>().iter(world).map(|i| i.pos.y).collect();
+        assert_eq!(items.len(), 1, "the drop didn't spawn (or was picked up from four blocks away)");
+        items[0]
+    };
+    assert!(item_y < away.y, "the item didn't fall");
+    assert!(app.world().resource::<Hotbar>().slots.iter().all(|s| s.is_empty()));
+
+    // Then right at the player's feet: picked up.
+    app.world_mut().send_event(SpawnDrop {
+        pos: feet + Vec3::Y * 0.5,
+        stack: ItemStack { id: dirt, count: 2 },
+        vel: Vec3::ZERO,
+        pickup_delay: 0.0,
+    });
+    for _ in 0..5 {
+        app.update();
+    }
+    let hotbar = app.world().resource::<Hotbar>();
+    assert_eq!(hotbar.slots[0], ItemStack { id: dirt, count: 2 });
+    let world = app.world_mut();
+    assert_eq!(world.query::<&DroppedItem>().iter(world).count(), 1, "only the far item is left");
+}
+
+/// What the player carries, their health and breath, and items lying on
+/// the ground all come back after leaving and reloading the world.
+#[test]
+fn inventory_health_and_dropped_items_survive_a_reload() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let feet = stand_on_ground(&mut app);
+    let (dirt, log) = {
+        let registry = app.world().resource::<BlockRegistry>();
+        (registry.id("dirt"), registry.id("log"))
+    };
+    {
+        let mut hotbar = app.world_mut().resource_mut::<Hotbar>();
+        hotbar.slots[2] = ItemStack { id: dirt, count: 17 };
+        hotbar.selected = 2;
+    }
+    app.world_mut().resource_mut::<Inventory>().slots[5] = ItemStack { id: log, count: 4 };
+    {
+        let world = app.world_mut();
+        let mut player = world.query::<&mut Player>().single_mut(world).unwrap();
+        player.vitals = craftmjne::health::Vitals::restored(11.0, 6.0);
+    }
+    app.world_mut().send_event(SpawnDrop {
+        pos: feet + Vec3::new(5.0, 1.0, 5.0),
+        stack: ItemStack { id: log, count: 9 },
+        vel: Vec3::ZERO,
+        pickup_delay: 0.0,
+    });
+    app.update();
+
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update(); // `exit_world` saves, then the items are despawned
+    {
+        let world = app.world_mut();
+        assert_eq!(world.query::<&DroppedItem>().iter(world).count(), 0, "items left behind in the menu");
+    }
+
+    let mut app2 = reload_app(&temp);
+    app2.update(); // the loaded items spawn
+    let hotbar = app2.world().resource::<Hotbar>();
+    assert_eq!(hotbar.slots[2], ItemStack { id: dirt, count: 17 });
+    assert_eq!(hotbar.selected, 2);
+    assert_eq!(app2.world().resource::<Inventory>().slots[5], ItemStack { id: log, count: 4 });
+    let world = app2.world_mut();
+    let player = world.query::<&Player>().single(world).unwrap();
+    assert_eq!((player.vitals.health, player.vitals.air), (11.0, 6.0));
+    let items: Vec<(ItemStack, Vec3)> = world.query::<&DroppedItem>().iter(world).map(|i| (i.stack, i.pos)).collect();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, ItemStack { id: log, count: 9 });
+    assert!(items[0].1.distance(feet + Vec3::new(5.0, 1.0, 5.0)) < 1.5, "item moved to {:?}", items[0].1);
+}
+
+/// A new world starts with nothing carried even if the previous world in
+/// the same session had a full inventory - the hotbar and storage are
+/// resources that outlive a world, so loading has to reset them.
+#[test]
+fn a_new_world_does_not_inherit_the_last_worlds_inventory() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let dirt = app.world().resource::<BlockRegistry>().id("dirt");
+    app.world_mut().resource_mut::<Hotbar>().slots[0] = ItemStack { id: dirt, count: 5 };
+    app.world_mut().resource_mut::<Inventory>().slots[0] = ItemStack { id: dirt, count: 5 };
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    let (slug, meta) =
+        app.world().resource::<SaveStore>().create_world("Second", 8, GameMode::Survival).unwrap();
+    app.world_mut().insert_resource(ActiveWorld { slug, meta });
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+    app.update();
+    assert!(app.world().resource::<Hotbar>().slots.iter().all(|s| s.is_empty()));
+    assert!(app.world().resource::<Inventory>().slots.iter().all(|s| s.is_empty()));
 }

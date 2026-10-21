@@ -35,7 +35,7 @@ use std::collections::VecDeque;
 use crate::commands::{CommandContext, CommandRegistry, CommandSuggestion};
 use crate::inventory::InventoryState;
 use crate::save::{GameMode, SaveStore};
-use crate::state::{ActiveWorld, AppState, PauseState};
+use crate::state::{ActiveWorld, AppState, DeathState, PauseState};
 use crate::text_color::{parse_colored_segments, ColoredSegment};
 use crate::texture_report::TextureReport;
 
@@ -172,7 +172,7 @@ fn despawn_chat(mut commands: Commands, roots: Query<Entity, With<ChatRoot>>) {
 /// T opens the box empty; `/` opens it with `/` already typed - the
 /// standard "command hotkey" shortcut (Minecraft does the same) so you
 /// don't have to open chat and type the slash separately. Either way this
-/// requires the pause menu / inventory screen to be closed, and frees the
+/// requires the pause menu / inventory screen / death screen to be closed, and frees the
 /// cursor so it can be clicked into; the prior grab state is remembered so
 /// closing restores it exactly, whether the mouse was locked or already
 /// released.
@@ -180,10 +180,11 @@ fn toggle_chat(
     keys: Res<ButtonInput<KeyCode>>,
     paused: Res<PauseState>,
     inventory: Res<InventoryState>,
+    death: Res<DeathState>,
     mut chat: ResMut<ChatState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || paused.open || inventory.open {
+    if chat.open || paused.open || inventory.open || death.open {
         return;
     }
     let opens_with_slash = keys.just_pressed(KeyCode::Slash);

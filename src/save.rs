@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 1;
+pub const SAVE_FORMAT: u32 = 2;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -97,6 +97,11 @@ fn migrate(data: &mut WorldData, from: u32) {
     for step in from..SAVE_FORMAT {
         // Add an arm per `SAVE_FORMAT` bump: `n => { ...rewrite n -> n+1... }`.
         // Step 0 -> 1 has none, for the reason in the doc comment above.
+        // Step 1 -> 2 (inventory, health and dropped items) has none either:
+        // all three are serde defaults (an empty inventory, full health, no
+        // items). The bump exists for the *other* direction - a format-1
+        // build opening a format-2 world would load it and then save it
+        // back without the player's inventory, so it has to refuse.
         #[allow(clippy::match_single_binding, clippy::single_match)]
         match step {
             _ => {}
@@ -174,6 +179,49 @@ pub struct PlayerSave {
     pub yaw: f32,
     pub pitch: f32,
     pub fly: bool,
+    /// Hit points (`health::MAX_HEALTH` is full). Defaults to full for a
+    /// save from before health existed.
+    #[serde(default = "full_health")]
+    pub health: f32,
+    /// Seconds of breath left underwater (`health::MAX_AIR` is full).
+    #[serde(default = "full_air")]
+    pub air: f32,
+}
+
+fn full_health() -> f32 {
+    crate::health::MAX_HEALTH
+}
+
+fn full_air() -> f32 {
+    crate::health::MAX_AIR
+}
+
+/// One inventory slot, by block *name* like every other saved block. Empty
+/// slots are `None` in the lists that hold these, so a slot keeps its place.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct SlotSave {
+    pub block: String,
+    pub count: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+pub struct InventorySave {
+    pub hotbar: Vec<Option<SlotSave>>,
+    pub storage: Vec<Option<SlotSave>>,
+    pub selected: usize,
+}
+
+/// An item lying in the world (`items::DroppedItem`).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct DroppedItemSave {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub block: String,
+    pub count: u32,
+    /// Seconds it had already lain there, so reloading doesn't reset its
+    /// despawn timer.
+    pub age: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -222,6 +270,12 @@ pub struct WorldData {
     /// for the same reason as `time_of_day`, resuming at a new moon.
     #[serde(default)]
     pub day_count: u32,
+    /// The hotbar and storage. `None` for a world saved before inventories
+    /// were - it loads empty, which is what it was.
+    #[serde(default)]
+    pub inventory: Option<InventorySave>,
+    #[serde(default)]
+    pub items: Vec<DroppedItemSave>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -607,12 +661,29 @@ mod tests {
 
         assert!(store.load_data(&slug).player.is_none()); // fresh world: no save yet
 
+        let inventory = InventorySave {
+            hotbar: vec![Some(SlotSave { block: "dirt".into(), count: 7 }), None],
+            storage: vec![None, Some(SlotSave { block: "log".into(), count: 2 })],
+            selected: 1,
+        };
+        let item = DroppedItemSave { x: 1.5, y: 9.0, z: -2.0, block: "cobblestone".into(), count: 3, age: 12.0 };
         let data = WorldData {
-            player: Some(PlayerSave { x: 1.0, y: 2.0, z: 3.0, yaw: 0.5, pitch: -0.2, fly: true }),
+            player: Some(PlayerSave {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                yaw: 0.5,
+                pitch: -0.2,
+                fly: true,
+                health: 13.0,
+                air: 4.5,
+            }),
             edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0 }],
             fluids: vec![FluidCell { x: 4, y: 5, z: 6, block: "water".into(), level: 2 }],
             time_of_day: 456.0,
             day_count: 12,
+            inventory: Some(inventory.clone()),
+            items: vec![item.clone()],
         };
         store.save_data(&slug, &data).unwrap();
 
@@ -624,6 +695,27 @@ mod tests {
         assert_eq!(loaded.fluids[0].level, 2);
         assert_eq!(loaded.time_of_day, 456.0);
         assert_eq!(loaded.day_count, 12);
+        let player = loaded.player.unwrap();
+        assert_eq!((player.health, player.air), (13.0, 4.5));
+        assert_eq!(loaded.inventory, Some(inventory));
+        assert_eq!(loaded.items, vec![item]);
+    }
+
+    #[test]
+    fn a_save_from_before_survival_loads_with_full_health_and_nothing_carried() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("Old Player", 1, GameMode::Survival).unwrap();
+        fs::write(
+            store.data_path(&slug),
+            r#"{"player":{"x":1,"y":2,"z":3,"yaw":0,"pitch":0,"fly":false},"edits":[]}"#,
+        )
+        .unwrap();
+        let data = store.load_data(&slug);
+        let player = data.player.expect("player still loads");
+        assert_eq!(player.health, crate::health::MAX_HEALTH);
+        assert_eq!(player.air, crate::health::MAX_AIR);
+        assert!(data.inventory.is_none());
+        assert!(data.items.is_empty());
     }
 
     #[test]

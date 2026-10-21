@@ -1,4 +1,6 @@
 {
   "id": "stone",
-  "name": "Stone"
+  "name": "Stone",
+  "hardness": 1.5,
+  "drops": "cobblestone"
 }

@@ -668,7 +668,71 @@ pub fn default_painters() -> Painters {
     p.register("coal_ore", ore([38.0, 38.0, 40.0]));
     p.register("iron_ore", ore([216.0, 175.0, 147.0]));
 
+    for stage in 0..DESTROY_STAGES {
+        p.register(&destroy_stage_name(stage), move |t, _| {
+            let order = crack_order();
+            let shown = crack_pixels_shown(stage, &order);
+            for y in 0..S {
+                for x in 0..S {
+                    let o = order[y as usize][x as usize];
+                    if o != 0 && o <= shown {
+                        // Darker toward the oldest (first-cracked) pixels.
+                        let v = 18.0 + 30.0 * o as f32 / shown.max(1) as f32;
+                        t.px(x, y, [v, v, v]);
+                    }
+                }
+            }
+        });
+    }
+
     p
+}
+
+/// How many crack images a block passes through while being mined.
+pub const DESTROY_STAGES: usize = 10;
+
+/// The atlas name of crack stage `stage` (`0..DESTROY_STAGES`) - the overlay
+/// `interact.rs` draws on a block being mined. Like any tile, a
+/// `textures/blocks/destroy_stage_N.png` replaces the procedural one.
+pub fn destroy_stage_name(stage: usize) -> String {
+    format!("destroy_stage_{stage}")
+}
+
+/// One fixed crack pattern for every stage: each cracked pixel is numbered
+/// in the order the crack reaches it (`0` = never cracks), so a later stage
+/// is always the earlier one plus more - the cracks grow rather than
+/// reshuffling. Branches random-walk outward from near the middle.
+fn crack_order() -> [[u16; 16]; 16] {
+    let mut order = [[0u16; 16]; 16];
+    let mut rng = mulberry32(0x5eed_c4ac);
+    let mut next = 1u16;
+    for branch in 0..6 {
+        let (mut x, mut y) = (6 + (rng() * 4.0) as i32, 6 + (rng() * 4.0) as i32);
+        let angle = branch as f32 * std::f32::consts::TAU / 6.0 + rng() * 0.6;
+        let (dx, dy) = (angle.cos(), angle.sin());
+        for _ in 0..12 {
+            if !(0..S).contains(&x) || !(0..S).contains(&y) {
+                break;
+            }
+            if order[y as usize][x as usize] == 0 {
+                order[y as usize][x as usize] = next;
+                next += 1;
+            }
+            // Mostly along the branch's heading, with a little wander.
+            if rng() < dx.abs() / (dx.abs() + dy.abs()) {
+                x += dx.signum() as i32;
+            } else {
+                y += dy.signum() as i32;
+            }
+        }
+    }
+    order
+}
+
+/// How many of `order`'s numbered pixels stage `stage` shows.
+fn crack_pixels_shown(stage: usize, order: &[[u16; 16]; 16]) -> u16 {
+    let total = order.iter().flatten().copied().max().unwrap_or(0) as usize;
+    ((stage + 1) * total / DESTROY_STAGES) as u16
 }
 
 #[cfg(test)]
@@ -676,11 +740,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cracks_only_ever_grow_from_one_stage_to_the_next() {
+        let order = crack_order();
+        let mut previous = 0;
+        for stage in 0..DESTROY_STAGES {
+            let shown = crack_pixels_shown(stage, &order);
+            assert!(shown > previous, "stage {stage} shows no more than the one before");
+            previous = shown;
+        }
+        let total = order.iter().flatten().filter(|&&o| o != 0).count();
+        assert_eq!(previous as usize, total, "the last stage shows the whole crack");
+        assert!(total > 40, "a crack pattern of only {total} pixels would barely show");
+    }
+
+    #[test]
     fn atlas_builds_deterministically() {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 22);
+        assert_eq!(a.indices.len(), 22 + DESTROY_STAGES);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

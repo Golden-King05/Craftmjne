@@ -251,12 +251,14 @@ pub struct MeshBucket {
     /// fragment stage as `world_normal` for free the moment the attribute
     /// is present - same "insert the attribute, get a free interpolated
     /// varying with no custom vertex shader" trick `sky_gb` already uses
-    /// for `ATTRIBUTE_UV_1`. Safe to treat as raw, untransformed color
-    /// data specifically because chunk entities are spawned with a pure
-    /// translation `Transform` (`world.rs`) - no rotation or non-uniform
-    /// scale, so the normal matrix `mesh_normal_local_to_world` applies is
-    /// the identity, and these three floats survive that transform
-    /// completely unchanged.
+    /// for `ATTRIBUTE_UV_1`. Chunk entities are spawned with a pure
+    /// translation `Transform` (`world.rs`), so the normal matrix is the
+    /// identity and the hue survives - but **not the length**: Bevy's
+    /// `mesh_normal_local_to_world` normalizes it. `[1, 1, 1]` arrives as
+    /// `[0.577; 3]` (which is how bright every untinted surface has always
+    /// rendered, and `chunk.wgsl`'s `UNTINTED` matches it), and a tint
+    /// arrives at unit length whatever its own brightness was. See the
+    /// note in CLAUDE.md before relying on a tint's magnitude.
     pub tint: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 }
@@ -576,11 +578,70 @@ pub fn mesh_chunk(
     ChunkMeshData { solid, water }
 }
 
+/// A free-standing cube centred on the origin, `size` blocks on a side, for
+/// things drawn outside the chunk meshes but through the same chunk
+/// material: dropped items, and the crack overlay on a block being mined. `tile_of`
+/// picks each face's atlas tile (same face order as `Tables::tiles`).
+///
+/// Every vertex takes the one `light` cell given, under the usual per-face
+/// shade; there's no ambient occlusion, since a lone cube has no neighbours
+/// to be occluded by. The caller rebuilds it when that cell's light changes.
+///
+/// Its tint is all zeros, which `chunk.wgsl` reads as "untinted" - unlike
+/// `[1, 1, 1]`, a zero vector survives the vertex shader's normal transform
+/// unchanged under any rotation, so these meshes can spin. (A real tint
+/// would be rotated along with the cube, which is why dropped items are
+/// never tinted.)
+pub fn cube_mesh(tables: &Tables, size: f32, light: LightCell, tile_of: impl Fn(usize) -> u16) -> MeshBucket {
+    let inv = 1.0 / MAX_LIGHT as f32;
+    let block = light.block.map(|v| (v as f32 * inv).max(AMBIENT_LIGHT));
+    let sky = light.sky.map(|v| v as f32 * inv);
+    let mut bucket = MeshBucket::default();
+    for (f, face) in FACES.iter().enumerate() {
+        let tile = tile_of(f) as usize;
+        let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
+        let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
+        let shade = face.shade;
+        let vi = bucket.positions.len() as u32;
+        for c in &face.corners {
+            bucket.positions.push(c.pos.map(|p| (p - 0.5) * size));
+            bucket.uvs.push([
+                tu + tables.uv_pad + c.uv[0] * tables.uv_span,
+                tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span,
+            ]);
+            bucket.colors.push([block[0] * shade, block[1] * shade, block[2] * shade, sky[0] * shade]);
+            bucket.sky_gb.push([sky[1] * shade, sky[2] * shade]);
+            bucket.tint.push([0.0; 3]);
+        }
+        bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
+    }
+    bucket
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::blocks::BlockRegistry;
     use crate::config::block_index;
+
+    #[test]
+    fn a_free_standing_cube_has_six_untinted_faces_lit_by_its_cell() {
+        let (reg, tables) = tables();
+        let stone = reg.id("stone");
+        let mut light = LightCell::DARK;
+        light.sky = [MAX_LIGHT, MAX_LIGHT / 2, 0];
+        let cube = cube_mesh(&tables, 0.25, light, |f| tables.tiles[stone as usize * 6 + f]);
+        assert_eq!(cube.positions.len(), 24);
+        assert_eq!(cube.indices.len(), 36);
+        for p in &cube.positions {
+            assert!(p.iter().all(|c| (c.abs() - 0.125).abs() < 1e-6), "corner {p:?} isn't on a 0.25 cube");
+        }
+        assert!(cube.tint.iter().all(|t| *t == [0.0; 3]));
+        // Top face (shade 1.0): sky as given, block light floored at ambient.
+        let top = &cube.colors[8..12];
+        assert!(top.iter().all(|c| (c[3] - 1.0).abs() < 1e-6 && (c[0] - AMBIENT_LIGHT).abs() < 1e-6));
+        assert!(cube.sky_gb[8..12].iter().all(|gb| (gb[0] - 0.5).abs() < 0.01 && gb[1] == 0.0));
+    }
 
     fn tables() -> (BlockRegistry, std::sync::Arc<Tables>) {
         let mut reg = BlockRegistry::with_defaults();
