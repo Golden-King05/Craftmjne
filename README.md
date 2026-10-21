@@ -145,8 +145,10 @@ another block or letting go starts over. Blocks with `"breakable": false`
 (bedrock) can't be mined in either mode.
 
 A mined block drops what its `drops` says: itself by default, something
-else (grass drops dirt, stone drops cobblestone), or nothing (leaves, ice,
-glass). Drops are small spinning cubes (`items.rs`) that fall, settle, float
+else (grass drops dirt, stone drops cobblestone), sometimes something
+(leaves drop a twig one time in five), or nothing (ice, glass). Drops are
+small spinning cubes, or flat spinning pictures for items that aren't
+blocks, (`items.rs`) that fall, settle, float
 up in water, merge with nearby stacks of the same block, and are picked up
 when you walk into them: topping up matching stacks first, then empty
 hotbar slots, then storage. They vanish after five minutes, and are saved
@@ -188,6 +190,12 @@ saved with the world.
 - **`Inventory` is one resource shared by both modes** — switching modes
   (including mid-session via `/mode`) never resets or duplicates it, so
   whatever's in storage/the hotbar stays exactly where you left it.
+- **Moving items:** click a slot to pick its stack up onto the cursor, and
+  click another to put it down: into an empty slot, onto the same item (as
+  much as fits), or swapping with a different one. **Shift-click** sends a
+  stack straight across, from the hotbar into storage or from storage into
+  the hotbar. Close the screen while holding something and it goes back
+  into your inventory (anything that doesn't fit is dropped).
 - Hovering any occupied slot (in either mode) shows the block's name in a
   cursor-following tooltip, Minecraft-style. Scrolling or pressing a number
   key to change the selected hotbar slot also briefly shows that block's
@@ -202,6 +210,33 @@ menu. Unlike the actual pause menu, chat and the inventory screen don't stop
 the world simulating underneath them: gravity, swimming buoyancy, and
 momentum keep running while either is open (`player::player_update`), so
 you don't, say, freeze mid-fall just because you checked your inventory.
+
+## Crafting
+
+`src/crafting.rs`. No grid: the inventory screen has a **Crafting** panel
+listing what you can make, each recipe with its ingredients (red when
+you're short, greyed out when you can't make it yet). Click a recipe to
+craft one; shift-click to craft as many as you can. Ingredients come out of
+storage before the hotbar, and the result goes in like a pickup.
+
+- **Stations.** A recipe is made by hand (anywhere) or at a station block.
+  Station recipes show while that block is within 4 blocks of you.
+  Right-clicking a station opens the inventory screen to craft at it;
+  shift + right-click places a block against it instead.
+- **Discovery.** A recipe only appears once you've held one of its
+  ingredients (remembered per world). Pick up a log and planks show up.
+
+The first recipes, all by hand:
+
+| Makes | From |
+|---|---|
+| 4 Planks | 1 Log |
+| 1 Stick | 1 Twig (leaves drop these) |
+| 5 Sticks | 2 Planks |
+| Crafting Bench | 3 Planks + 4 Sticks |
+
+The crafting bench is the first station. Nothing needs it yet; it's where
+the next recipes go.
 
 ### Stacking
 
@@ -597,7 +632,9 @@ src/
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, mining (time, cracks, drops), place/pick, hotbar
 ├── items.rs     # ItemsPlugin: dropped items - physics, pickup, merging, Q to throw, saved with the world
 ├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
-├── inventory.rs # InventoryPlugin: hotbar+storage (Survival) or block list (Creative), tooltips
+├── inventory.rs # InventoryPlugin: hotbar+storage, moving items, crafting panel, Creative's item list
+├── item_registry.rs # every holdable item: one per block, plus plain items from items/
+├── crafting.rs  # recipes from recipes/, stations, discovery, the craft rule
 ├── chat.rs      # ChatPlugin: chat box UI + input, routes "/" lines to commands::execute
 ├── commands.rs  # chat command dispatcher (/mode, /texture-report, /locate ...) + the cheats-flag rule
 ├── text_color.rs   # shared ~(#hex)~text~(#hex)~ chat color-marker parser, used by chat + commands
@@ -605,6 +642,10 @@ src/
 └── ui.rs        # UiPlugin: crosshair, hotbar icons, hint, F3 debug panel
 blocks/
 └── *.json                # one block definition per file - see "Add a block" below
+items/
+└── *.json                # items that aren't blocks (twig, stick) - see "Add an item" below
+recipes/
+└── *.json                # one recipe per file - see "Add a recipe" below
 textures/blocks/
 └── *.png                 # optional hand-supplied art overriding a procedural tile - see "Use real texture files" below
 textures/sky/
@@ -898,6 +939,37 @@ Blocks can also still be registered straight from Rust (useful for a mod
 that wants to generate variants programmatically) via
 `BlockRegistry::register(BlockDef { .. })` in a plugin's `build()` — same
 struct, same fields, just constructed in code instead of parsed from JSON.
+
+### Add an item
+
+Every block with `"item": true` is already an item under its own id. For
+something you can hold that isn't a block, drop a file in `items/`:
+
+```json
+{ "id": "stick", "name": "Stick", "max_stack": 124, "texture": "stick" }
+```
+
+Only `id` is required; `texture` defaults to `id` and works like a block
+face's (a procedural painter in `atlas.rs`, a `textures/blocks/<name>.png`,
+or the checkerboard placeholder). An item id can't also be a block id.
+Blocks can drop it with `"drops": "stick"` or
+`"drops": {"item": "stick", "chance": 0.2, "count": 1}`.
+
+### Add a recipe
+
+One file per recipe in `recipes/` (the file name is the recipe's id):
+
+```json
+{
+  "station": "hand",
+  "inputs": [{ "item": "planks", "count": 3 }, { "item": "stick", "count": 4 }],
+  "output": { "item": "crafting_bench", "count": 1 }
+}
+```
+
+`station` is `"hand"` (the default) or a block id, which makes that block a
+crafting station. `count` defaults to 1. An unknown item or station fails at
+startup with the file named.
 
 ### Use real texture files instead of procedural art
 

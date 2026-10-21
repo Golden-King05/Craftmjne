@@ -24,9 +24,12 @@ use crate::config::{block_index, WorldSettings, CHUNK_SIZE, CS, H, WORLD_HEIGHT}
 use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::light::{seed_new_chunk, LightCell, LightQueue};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PaddedChunk};
+use crate::crafting::RecipeBook;
 use crate::health::Vitals;
+use crate::item_registry::ItemRegistry;
 use crate::interact::Hotbar;
-use crate::inventory::{inventory_to_save, restore_inventory, Inventory};
+use crate::crafting::KnownItems;
+use crate::inventory::{inventory_to_save, restore_inventory, HeldStack, Inventory};
 use crate::items::{DroppedItem, LoadedItems};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
@@ -735,10 +738,17 @@ pub fn compile_content(
     // names explicitly) that nobody registered a procedural painter for
     // gets the "missing texture" placeholder instead of `compile()`
     // panicking - see `Painters::ensure_registered`.
+    let mut items = ItemRegistry::with_defaults(&registry);
     for name in registry.texture_names().collect::<std::collections::HashSet<_>>() {
         painters.ensure_registered(&name);
     }
+    for name in items.texture_names() {
+        painters.ensure_registered(name);
+    }
     let mut atlas = build_atlas(&painters);
+    items.resolve_tiles(&atlas.indices);
+    commands.insert_resource(RecipeBook::with_defaults(&registry, &items));
+    commands.insert_resource(items);
 
     // Contrast-stretch every texture a block actually tints (directly, or
     // as an overlay decal) so hand-supplied grayscale mask art that didn't
@@ -781,6 +791,9 @@ fn enter_world(
     mut players: Query<&mut Player>,
     mut hotbar: ResMut<Hotbar>,
     mut inventory: ResMut<Inventory>,
+    mut held: ResMut<HeldStack>,
+    mut known: ResMut<KnownItems>,
+    items: Res<ItemRegistry>,
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
@@ -850,18 +863,18 @@ fn enter_world(
     commands.insert_resource(LightQueue::default());
     commands.insert_resource(DayNightClock { elapsed: data.time_of_day, day_count: data.day_count });
 
-    restore_inventory(data.inventory.as_ref(), &mut hotbar, &mut inventory, &registry);
-    let items = data
+    restore_inventory(data.inventory.as_ref(), &mut hotbar, &mut inventory, &mut held, &items);
+    known.0 = data.known_items.iter().filter_map(|name| items.by_name(name)).collect();
+    let dropped = data
         .items
         .iter()
         .filter_map(|item| {
-            let id = registry.by_name(&item.block).ok()?;
-            let max = registry.def(id).max_stack.max(1);
-            let stack = ItemStack { id, count: item.count.min(max) };
+            let id = items.by_name(&item.block)?;
+            let stack = ItemStack { id, count: item.count.min(items.max_stack(id)) };
             Some((stack, Vec3::new(item.x, item.y, item.z), item.age))
         })
         .collect();
-    commands.insert_resource(LoadedItems(items));
+    commands.insert_resource(LoadedItems(dropped));
 
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
@@ -1036,7 +1049,7 @@ fn write_save(
         health: p.vitals.health,
         air: p.vitals.air,
     });
-    let (inventory, items) = carried.snapshot(registry);
+    let (inventory, items, known_items) = carried.snapshot();
     let data = WorldData {
         player,
         edits,
@@ -1045,6 +1058,7 @@ fn write_save(
         day_count: clock.day_count,
         inventory: Some(inventory),
         items,
+        known_items,
     };
     persist(store.clone(), active.slug.clone(), data, background);
 }
@@ -1058,12 +1072,18 @@ fn write_save(
 pub struct CarriedState<'w, 's> {
     hotbar: Res<'w, Hotbar>,
     inventory: Res<'w, Inventory>,
+    held: Res<'w, HeldStack>,
+    known: Res<'w, KnownItems>,
+    registry: Res<'w, ItemRegistry>,
     items: Query<'w, 's, &'static DroppedItem>,
 }
 
 impl CarriedState<'_, '_> {
-    fn snapshot(&self, registry: &BlockRegistry) -> (InventorySave, Vec<DroppedItemSave>) {
-        let inventory = inventory_to_save(&self.hotbar, &self.inventory, registry);
+    fn snapshot(&self) -> (InventorySave, Vec<DroppedItemSave>, Vec<String>) {
+        let registry = &*self.registry;
+        let inventory = inventory_to_save(&self.hotbar, &self.inventory, &self.held, registry);
+        let mut known: Vec<String> = self.known.0.iter().map(|&id| registry.def(id).id.clone()).collect();
+        known.sort();
         let items = self
             .items
             .iter()
@@ -1077,7 +1097,7 @@ impl CarriedState<'_, '_> {
                 age: item.age,
             })
             .collect();
-        (inventory, items)
+        (inventory, items, known)
     }
 }
 
@@ -1584,6 +1604,8 @@ impl Plugin for WorldPlugin {
             .init_resource::<EditLog>()
             .init_resource::<Hotbar>()
             .init_resource::<Inventory>()
+            .init_resource::<HeldStack>()
+            .init_resource::<KnownItems>()
             .init_resource::<LoadedItems>()
             .init_resource::<PendingEdits>()
             .init_resource::<PendingFluids>()

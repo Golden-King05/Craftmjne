@@ -2400,3 +2400,55 @@ etc.) instead of inventing a new approach:
   player on the ground places them** (`stand_on_ground` uses
   `open_air_run`). The first version waited for the player to land, and
   timed out, because nothing ever stepped the player.
+- **Items are their own id space, separate from blocks.** `ItemStack.id`
+  is an `item_registry::ItemId`. Every block with `item: true` gets an item
+  with the same id string, and plain items (twig, stick) come from
+  `items/*.json`. Because both are `u16`, the compiler did *not* catch places
+  still treating an item id as a block id after the switch. They were found
+  by grepping `registry.def(`/`tiles[`/`max_stack` across every file that
+  touches `ItemStack`; the dropped-item mesher and the merge/pickup stack
+  sizes were the misses. Item ids only line up with block ids by accident
+  (every block before them has an item), so tests must look up items via
+  `ItemRegistry`, never `BlockRegistry`. Saves store id strings, so nothing
+  had to be migrated.
+  - Placing goes `item -> ItemRegistry::block_of`; a plain item places
+    nothing. This also fixed an old bug where right-clicking with an *empty*
+    hand next to water "placed air" over it.
+  - Icons go through `ui::ItemIcons` (a `SystemParam`), which falls back to
+    `block_icon` for block items and a flat atlas crop for plain ones.
+- **Crafting is data plus pure functions.** Recipes are `recipes/*.json`
+  (`crafting::RecipeBook`). `times_craftable`/`craft` (storage first, then
+  hotbar; overflow returned for dropping) and `RecipeBook::visible`
+  (station in reach + an ingredient known) are what the tests exercise. The
+  UI just calls them. A block is a station because some recipe names it,
+  not because of a flag on the block. `KnownItems` is learned by
+  `crafting::learn_items` (run from `ItemsPlugin`, so headless tests get
+  it) and saved as `WorldData::known_items`.
+- **Inventory moves are `click_slot`/`quick_move` on plain slices.** The
+  stack on the cursor is `inventory::HeldStack`. It's saved
+  (`InventorySave::held`), returned to the inventory when the screen
+  closes (`return_held_stack`), and dropped on death. Any new way of
+  closing the screen gets that for free, since it's keyed on `!inv.open`
+  rather than on a particular close action.
+- **Startup content has to exist before a world loads.** `ItemRegistry`
+  and `RecipeBook` are built in `world::compile_content` (`Startup`). The
+  headless harness used to switch to `InGame` before the first frame,
+  which runs `OnEnter` *before* `Startup`, and `enter_world` failed on the
+  missing resource. The real game always passes through the menu first.
+  The harness now runs one menu frame first too, so the tests match.
+- **A break-test helper that restores a file with `cp file.bak; ...; mv
+  file.bak file` leaves cargo running the stale broken build.** The
+  restored file's mtime is the time of the `cp`, older than the build of the
+  broken version, so cargo sees nothing to rebuild. The next test run
+  "fails" against the correct code. Found when a correct test kept failing
+  after restore. `touch` the restored file, or rebuild, before trusting a
+  post-restore result.
+- **Discovery re-learns from the inventory, so a test of its persistence
+  has to use an item that isn't held any more.** The first reload test
+  passed with `known_items` not saved at all, because the reloaded hotbar
+  taught the same items back. It now adds a twig to `KnownItems` without
+  holding one.
+- **Disk fills up in this environment:** `target/` reached 28 GB (debug +
+  release) and the linker died with `signal 7 [Bus error]`, not an
+  out-of-space message. `rm -rf target/release target/debug/incremental`
+  freed enough. Check `df -h .` first when the linker crashes.

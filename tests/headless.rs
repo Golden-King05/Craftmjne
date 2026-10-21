@@ -57,6 +57,9 @@ fn headless_app(temp: &TempSaves) -> App {
     app.init_state::<AppState>();
     add_gameplay(&mut app);
     app.world_mut().spawn(Player::default());
+    // One frame in the menu first, like the real game: startup builds the
+    // atlas, items and recipes that loading a world needs.
+    app.update();
 
     let (slug, meta) = app.world().resource::<SaveStore>().create_world("Test World", 7, GameMode::Survival).unwrap();
     app.world_mut().insert_resource(ActiveWorld { slug, meta });
@@ -81,6 +84,9 @@ fn reload_app(temp: &TempSaves) -> App {
     app.init_state::<AppState>();
     add_gameplay(&mut app);
     app.world_mut().spawn(Player::default());
+    // One frame in the menu first, like the real game: startup builds the
+    // atlas, items and recipes that loading a world needs.
+    app.update();
 
     let store = app.world().resource::<SaveStore>();
     let (slug, meta) = store.list_worlds().into_iter().next().expect("world was saved");
@@ -96,6 +102,7 @@ fn reload_app(temp: &TempSaves) -> App {
 /// (chat, the inventory screen, input).
 fn add_gameplay(app: &mut App) {
     app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin));
+    app.init_resource::<craftmjne::crafting::NearbyStations>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.init_resource::<craftmjne::chat::ChatState>();
     app.init_resource::<craftmjne::inventory::InventoryState>();
@@ -252,6 +259,7 @@ fn leaving_and_reentering_a_world_persists_edits_and_player_pose() {
     app2.init_state::<AppState>();
     app2.add_plugins(WorldPlugin);
     app2.world_mut().spawn(Player::default());
+    app2.update(); // a frame in the menu, as in `headless_app`
 
     let store = app2.world().resource::<SaveStore>();
     let (slug, meta) = store.list_worlds().into_iter().next().expect("world was saved");
@@ -973,7 +981,7 @@ fn a_dropped_item_falls_and_is_picked_up_into_the_hotbar() {
     let temp = temp_saves();
     let mut app = headless_app(&temp);
     let feet = stand_on_ground(&mut app);
-    let dirt = app.world().resource::<BlockRegistry>().id("dirt");
+    let dirt = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("dirt");
 
     // Dropped out of reach first: it should land and wait.
     let away = feet + Vec3::new(4.0, 2.0, 0.0);
@@ -1020,7 +1028,7 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
     let mut app = headless_app(&temp);
     let feet = stand_on_ground(&mut app);
     let (dirt, log) = {
-        let registry = app.world().resource::<BlockRegistry>();
+        let registry = app.world().resource::<craftmjne::item_registry::ItemRegistry>();
         (registry.id("dirt"), registry.id("log"))
     };
     {
@@ -1029,6 +1037,11 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
         hotbar.selected = 2;
     }
     app.world_mut().resource_mut::<Inventory>().slots[5] = ItemStack { id: log, count: 4 };
+    let stick = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("stick");
+    app.world_mut().resource_mut::<craftmjne::inventory::HeldStack>().0 = ItemStack { id: stick, count: 3 };
+    // Discovered earlier but no longer carried: only the save remembers it.
+    let twig = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("twig");
+    app.world_mut().resource_mut::<craftmjne::crafting::KnownItems>().0.insert(twig);
     {
         let world = app.world_mut();
         let mut player = world.query::<&mut Player>().single_mut(world).unwrap();
@@ -1055,6 +1068,13 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
     assert_eq!(hotbar.slots[2], ItemStack { id: dirt, count: 17 });
     assert_eq!(hotbar.selected, 2);
     assert_eq!(app2.world().resource::<Inventory>().slots[5], ItemStack { id: log, count: 4 });
+    // The stick on the cursor went back into the hotbar's first free slot,
+    // and everything held was remembered as discovered.
+    assert_eq!(app2.world().resource::<Hotbar>().slots[0], ItemStack { id: stick, count: 3 });
+    let known = &app2.world().resource::<craftmjne::crafting::KnownItems>().0;
+    assert!(known.contains(&dirt) && known.contains(&log) && known.contains(&stick), "{known:?}");
+    let twig = app2.world().resource::<craftmjne::item_registry::ItemRegistry>().id("twig");
+    assert!(app2.world().resource::<craftmjne::crafting::KnownItems>().0.contains(&twig), "forgot the twig");
     let world = app2.world_mut();
     let player = world.query::<&Player>().single(world).unwrap();
     assert_eq!((player.vitals.health, player.vitals.air), (11.0, 6.0));
@@ -1071,7 +1091,7 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
 fn a_new_world_does_not_inherit_the_last_worlds_inventory() {
     let temp = temp_saves();
     let mut app = headless_app(&temp);
-    let dirt = app.world().resource::<BlockRegistry>().id("dirt");
+    let dirt = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("dirt");
     app.world_mut().resource_mut::<Hotbar>().slots[0] = ItemStack { id: dirt, count: 5 };
     app.world_mut().resource_mut::<Inventory>().slots[0] = ItemStack { id: dirt, count: 5 };
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);

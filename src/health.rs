@@ -25,7 +25,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::blocks::{BlockTables, ItemStack};
 use crate::chat::ChatState;
 use crate::interact::Hotbar;
-use crate::inventory::{Inventory, InventoryState};
+use crate::inventory::{HeldStack, Inventory, InventoryState};
 use crate::items::{SpawnDrop, THROWN_PICKUP_DELAY};
 use crate::player::{Player, PlayerSet};
 use crate::save::GameMode;
@@ -153,6 +153,7 @@ fn tick_vitals(
     mut inventory_screen: ResMut<InventoryState>,
     mut hotbar: ResMut<Hotbar>,
     mut inventory: ResMut<Inventory>,
+    mut held: ResMut<HeldStack>,
     mut players: Query<&mut Player>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut drops: EventWriter<SpawnDrop>,
@@ -181,11 +182,13 @@ fn tick_vitals(
     death.open = true;
     chat.open = false;
     inventory_screen.open = false;
-    for drop in death_drops(player.pos, hotbar.slots.iter().chain(inventory.slots.iter()).copied()) {
+    let carried = hotbar.slots.iter().chain(inventory.slots.iter()).chain(std::iter::once(&held.0)).copied();
+    for drop in death_drops(player.pos, carried) {
         drops.write(drop);
     }
     hotbar.slots.fill(ItemStack::EMPTY);
     inventory.slots.fill(ItemStack::EMPTY);
+    held.0 = ItemStack::EMPTY;
     if let Ok(mut window) = windows.single_mut() {
         window.cursor_options.grab_mode = CursorGrabMode::None;
         window.cursor_options.visible = true;

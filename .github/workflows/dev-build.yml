@@ -78,6 +78,8 @@ jobs:
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/craftmjne${{ runner.os == 'Windows' && '.exe' || '' }}" "$stage/"
           cp -r blocks "$stage/blocks"
+          cp -r items "$stage/items"
+          cp -r recipes "$stage/recipes"
           cp -r textures "$stage/textures"
 
       - name: Package (Linux/macOS)

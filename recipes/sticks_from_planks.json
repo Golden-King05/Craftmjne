@@ -1,0 +1,5 @@
+{
+  "station": "hand",
+  "inputs": [{ "item": "planks", "count": 2 }],
+  "output": { "item": "stick", "count": 5 }
+}

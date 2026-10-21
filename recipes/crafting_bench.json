@@ -1,0 +1,8 @@
+{
+  "station": "hand",
+  "inputs": [
+    { "item": "planks", "count": 3 },
+    { "item": "stick", "count": 4 }
+  ],
+  "output": { "item": "crafting_bench", "count": 1 }
+}

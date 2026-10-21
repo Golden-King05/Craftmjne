@@ -6,7 +6,10 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use bevy::ecs::system::SystemParam;
+
 use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemModel};
+use crate::item_registry::{ItemId, ItemRegistry, NO_ITEM};
 use crate::config::ATLAS_TILES;
 use crate::interact::Hotbar;
 use crate::player::{cursor_grabbed, Player};
@@ -85,6 +88,46 @@ pub(crate) fn block_icon(
     }
     let tile = tables.0.tiles[id as usize * 6];
     ImageNode { image: atlas.0.clone(), rect: Some(tile_rect(tile, tables.0.tile_size)), ..default() }
+}
+
+/// Everything needed to draw an item's icon, as one system parameter.
+/// `icon` is `None` until the atlas has been built, and for the empty item.
+#[derive(SystemParam)]
+pub struct ItemIcons<'w> {
+    pub blocks: Res<'w, BlockRegistry>,
+    pub items: Res<'w, ItemRegistry>,
+    tables: Option<Res<'w, BlockTables>>,
+    atlas: Option<Res<'w, AtlasImage>>,
+    icon_atlas: Option<Res<'w, IconAtlasImage>>,
+}
+
+impl ItemIcons<'_> {
+    pub fn ready(&self) -> bool {
+        self.tables.is_some() && self.atlas.is_some() && self.icon_atlas.is_some()
+    }
+
+    /// A block item's icon is its block's (`block_icon`); a plain item's is
+    /// its texture, flat.
+    pub fn icon(&self, item: ItemId) -> Option<ImageNode> {
+        let (Some(tables), Some(atlas), Some(icon_atlas)) = (&self.tables, &self.atlas, &self.icon_atlas) else {
+            return None;
+        };
+        if item == NO_ITEM {
+            return None;
+        }
+        Some(match self.items.block_of(item) {
+            Some(block) => block_icon(block, &self.blocks, tables, atlas, icon_atlas),
+            None => ImageNode {
+                image: atlas.0.clone(),
+                rect: Some(tile_rect(self.items.tile(item), tables.0.tile_size)),
+                ..default()
+            },
+        })
+    }
+
+    pub fn name(&self, item: ItemId) -> &str {
+        &self.items.def(item).name
+    }
 }
 
 fn setup_hud(mut commands: Commands) {
@@ -201,25 +244,23 @@ fn despawn_hud(mut commands: Commands, roots: Query<Entity, With<HudRoot>>) {
 }
 
 /// Rebuilds hotbar slots whenever the hotbar changes (selection or contents).
-#[allow(clippy::too_many_arguments)]
 fn rebuild_hotbar(
     mut commands: Commands,
     hotbar: Res<Hotbar>,
-    registry: Option<Res<BlockRegistry>>,
-    tables: Option<Res<BlockTables>>,
-    atlas: Option<Res<AtlasImage>>,
-    icon_atlas: Option<Res<IconAtlasImage>>,
+    icons: ItemIcons,
     roots: Query<Entity, With<HotbarRoot>>,
+    mut built: Local<bool>,
 ) {
-    let (Some(registry), Some(tables), Some(atlas), Some(icon_atlas)) =
-        (registry, tables, atlas, icon_atlas)
-    else {
+    if !icons.ready() {
         return;
-    };
-    if !hotbar.is_changed() {
+    }
+    // Once more the first frame the atlas is ready, in case the hotbar was
+    // restored from a save before there were icons to draw it with.
+    if !hotbar.is_changed() && *built {
         return;
     }
     let Ok(root) = roots.single() else { return };
+    *built = true;
     commands.entity(root).despawn_related::<Children>();
 
     for (i, &stack) in hotbar.slots.iter().enumerate() {
@@ -242,9 +283,9 @@ fn rebuild_hotbar(
                 }),
             ))
             .with_children(|parent| {
-                if !stack.is_empty() {
+                if let Some(icon) = (!stack.is_empty()).then(|| icons.icon(stack.id)).flatten() {
                     parent.spawn((
-                        block_icon(stack.id, &registry, &tables, &atlas, &icon_atlas),
+                        icon,
                         Node {
                             width: Val::Px(34.0),
                             height: Val::Px(34.0),
@@ -277,7 +318,7 @@ fn rebuild_hotbar(
 fn hotbar_label(
     time: Res<Time>,
     hotbar: Res<Hotbar>,
-    registry: Res<BlockRegistry>,
+    registry: Res<ItemRegistry>,
     mut state: ResMut<HotbarLabelState>,
     mut labels: Query<(&mut Text, &mut Visibility), With<HotbarLabel>>,
 ) {

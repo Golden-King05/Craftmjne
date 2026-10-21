@@ -582,6 +582,28 @@ pub fn mesh_chunk(
     ChunkMeshData { solid, water }
 }
 
+/// A plain item's dropped look: one upright square of its texture,
+/// `size` blocks on a side, centred on the origin and facing +z (the chunk
+/// material draws both sides). Lit like `cube_mesh`, untinted the same way.
+pub fn sprite_mesh(tables: &Tables, size: f32, light: LightCell, tile: u16) -> MeshBucket {
+    let inv = 1.0 / MAX_LIGHT as f32;
+    let block = light.block.map(|v| (v as f32 * inv).max(AMBIENT_LIGHT));
+    let sky = light.sky.map(|v| v as f32 * inv);
+    let tu = (tile as usize % ATLAS_TILES) as f32 * UV_TILE;
+    let tv = (tile as usize / ATLAS_TILES) as f32 * UV_TILE;
+    let mut bucket = MeshBucket::default();
+    let h = size / 2.0;
+    for (x, y, u, v) in [(-h, -h, 0.0, 0.0), (h, -h, 1.0, 0.0), (-h, h, 0.0, 1.0), (h, h, 1.0, 1.0)] {
+        bucket.positions.push([x, y, 0.0]);
+        bucket.uvs.push([tu + tables.uv_pad + u * tables.uv_span, tv + tables.uv_pad + (1.0 - v) * tables.uv_span]);
+        bucket.colors.push([block[0], block[1], block[2], sky[0]]);
+        bucket.sky_gb.push([sky[1], sky[2]]);
+        bucket.tint.push([0.0; 3]);
+    }
+    bucket.indices.extend([0, 1, 2, 2, 1, 3]);
+    bucket
+}
+
 /// How bright a tint is relative to white: `|tint| / |[1, 1, 1]|`. The
 /// vertex shader normalizes the tint attribute, losing this, so the mesher
 /// multiplies it into the vertex light instead; `chunk.wgsl` multiplies

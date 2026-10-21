@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 2;
+pub const SAVE_FORMAT: u32 = 3;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +102,9 @@ fn migrate(data: &mut WorldData, from: u32) {
         // items). The bump exists for the *other* direction - a format-1
         // build opening a format-2 world would load it and then save it
         // back without the player's inventory, so it has to refuse.
+        // Step 2 -> 3 (plain items like sticks, the item on the cursor, and
+        // discovered recipes) is the same: defaults only, bumped because a
+        // format-2 build doesn't know plain items and would empty those slots.
         #[allow(clippy::match_single_binding, clippy::single_match)]
         match step {
             _ => {}
@@ -196,7 +199,8 @@ fn full_air() -> f32 {
     crate::health::MAX_AIR
 }
 
-/// One inventory slot, by block *name* like every other saved block. Empty
+/// One inventory slot, by item *id string* (a block's item has the block's
+/// id, so saves from before plain items existed read the same). Empty
 /// slots are `None` in the lists that hold these, so a slot keeps its place.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SlotSave {
@@ -209,6 +213,9 @@ pub struct InventorySave {
     pub hotbar: Vec<Option<SlotSave>>,
     pub storage: Vec<Option<SlotSave>>,
     pub selected: usize,
+    /// The stack picked up on the cursor with the inventory screen open.
+    #[serde(default)]
+    pub held: Option<SlotSave>,
 }
 
 /// An item lying in the world (`items::DroppedItem`).
@@ -276,6 +283,10 @@ pub struct WorldData {
     pub inventory: Option<InventorySave>,
     #[serde(default)]
     pub items: Vec<DroppedItemSave>,
+    /// Every item the player has held, by id - which recipes they've
+    /// discovered (`crafting::KnownItems`).
+    #[serde(default)]
+    pub known_items: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -665,6 +676,7 @@ mod tests {
             hotbar: vec![Some(SlotSave { block: "dirt".into(), count: 7 }), None],
             storage: vec![None, Some(SlotSave { block: "log".into(), count: 2 })],
             selected: 1,
+            held: Some(SlotSave { block: "stick".into(), count: 3 }),
         };
         let item = DroppedItemSave { x: 1.5, y: 9.0, z: -2.0, block: "cobblestone".into(), count: 3, age: 12.0 };
         let data = WorldData {
@@ -684,6 +696,7 @@ mod tests {
             day_count: 12,
             inventory: Some(inventory.clone()),
             items: vec![item.clone()],
+            known_items: vec!["log".into(), "twig".into()],
         };
         store.save_data(&slug, &data).unwrap();
 
@@ -699,6 +712,7 @@ mod tests {
         assert_eq!((player.health, player.air), (13.0, 4.5));
         assert_eq!(loaded.inventory, Some(inventory));
         assert_eq!(loaded.items, vec![item]);
+        assert_eq!(loaded.known_items, vec!["log".to_string(), "twig".to_string()]);
     }
 
     #[test]

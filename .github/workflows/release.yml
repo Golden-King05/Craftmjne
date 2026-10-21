@@ -80,6 +80,10 @@ jobs:
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/craftmjne${{ runner.os == 'Windows' && '.exe' || '' }}" "$stage/"
           cp -r blocks "$stage/blocks"
+          # The game refuses to start without these either (item_registry.rs,
+          # crafting.rs).
+          cp -r items "$stage/items"
+          cp -r recipes "$stage/recipes"
           # The whole directories, not just their READMEs - a past version of
           # this step copied only textures/blocks/README.md, which silently
           # shipped every released build with the procedural placeholder art

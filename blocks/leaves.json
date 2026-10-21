@@ -8,5 +8,8 @@
     0.5
   ],
   "hardness": 0.2,
-  "drops": false
+  "drops": {
+    "item": "twig",
+    "chance": 0.2
+  }
 }

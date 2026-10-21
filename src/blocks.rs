@@ -64,10 +64,12 @@
 //!   divide it by its own speed instead of every block listing a time per
 //!   tool.
 //! - `drops` is what breaking this block in Survival gives you: `true` (the
-//!   default) drops the block itself, `false` drops nothing (leaves, ice),
-//!   and a block id string drops that block instead (grass drops `"dirt"`).
-//!   A named block that doesn't exist fails at startup, the same as a
-//!   missing texture painter would; one with `item: false` drops nothing.
+//!   default) drops the block itself, `false` drops nothing (ice, glass),
+//!   an item id drops that item instead (grass drops `"dirt"`), and
+//!   `{"item": "twig", "chance": 0.2, "count": 1}` drops it only sometimes
+//!   (leaves). Items are blocks or plain items from `items/` - see
+//!   `item_registry.rs`. An item that doesn't exist fails at startup, the
+//!   same as a missing texture painter would.
 //! - `max_stack` is how many of this block a single inventory/hotbar slot
 //!   can hold (see [`ItemStack`]); defaults to [`DEFAULT_MAX_STACK`] (124)
 //!   if omitted — set it per-block for anything that should stack
@@ -165,22 +167,7 @@ use crate::light::{MAX_LEVEL, MAX_LIGHT};
 
 pub type BlockId = u16;
 
-/// A slot's contents: which block and how many. `id == AIR` (or `count ==
-/// 0`) means empty — `is_empty()` treats either as the same thing, so
-/// callers don't need to keep both fields in sync by hand.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub struct ItemStack {
-    pub id: BlockId,
-    pub count: u32,
-}
-
-impl ItemStack {
-    pub const EMPTY: ItemStack = ItemStack { id: AIR, count: 0 };
-
-    pub fn is_empty(&self) -> bool {
-        self.id == AIR || self.count == 0
-    }
-}
+pub use crate::item_registry::ItemStack;
 
 /// How many of a block a single slot holds unless a block file overrides it
 /// with `max_stack`.
@@ -189,25 +176,43 @@ pub const DEFAULT_MAX_STACK: u32 = 124;
 /// A block file's `hardness` when it doesn't give one.
 pub const DEFAULT_HARDNESS: f32 = 1.0;
 
-/// What breaking a block in Survival gives the player. Resolved to an id by
-/// [`BlockRegistry::drop_of`].
+/// What breaking a block in Survival gives the player. Resolved by
+/// `item_registry::ItemRegistry::drop_of`, which also refuses to start
+/// with a drop naming an item that doesn't exist.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub enum Drops {
     /// The block itself - what almost everything wants.
     #[default]
     Itself,
-    /// Nothing at all (leaves, ice).
+    /// Nothing at all (ice, glass).
     Nothing,
-    /// A different block, by registry id (grass drops dirt).
-    Block(String),
+    /// An item by id - another block's (grass drops dirt) or a plain item
+    /// (leaves drop twigs) - `count` of them, with probability `chance`.
+    Item { item: String, chance: f32, count: u32 },
 }
 
-/// `drops` as written in a block file: `true`/`false`, or a block id.
+/// `drops` as written in a block file: `true`/`false`, an item id, or
+/// `{ "item": "...", "chance": 0.2, "count": 1 }`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum DropsFile {
     Flag(bool),
-    Block(String),
+    Item(String),
+    Detailed {
+        item: String,
+        #[serde(default = "always")]
+        chance: f32,
+        #[serde(default = "one")]
+        count: u32,
+    },
+}
+
+fn always() -> f32 {
+    1.0
+}
+
+fn one() -> u32 {
+    1
 }
 
 impl Default for DropsFile {
@@ -221,7 +226,10 @@ impl From<DropsFile> for Drops {
         match file {
             DropsFile::Flag(true) => Drops::Itself,
             DropsFile::Flag(false) => Drops::Nothing,
-            DropsFile::Block(name) => Drops::Block(name),
+            DropsFile::Item(item) => Drops::Item { item, chance: 1.0, count: 1 },
+            DropsFile::Detailed { item, chance, count } => {
+                Drops::Item { item, chance: chance.clamp(0.0, 1.0), count: count.max(1) }
+            }
         }
     }
 }
@@ -715,7 +723,7 @@ impl Default for BlockDef {
 
 /// "coal_ore" -> "Coal Ore". Used as the default `name` for a block file
 /// that doesn't specify one.
-fn title_case(id: &str) -> String {
+pub(crate) fn title_case(id: &str) -> String {
     id.split('_')
         .map(|w| {
             let mut chars = w.chars();
@@ -908,15 +916,22 @@ pub struct BlockRegistry {
 /// working directory (how `cargo run`/`cargo test` find the one at the repo
 /// root - Cargo runs both with the package root as cwd).
 fn find_blocks_dir() -> PathBuf {
+    find_data_dir("blocks")
+}
+
+/// A shipped data folder (`blocks`, `items`, `recipes`): next to the running
+/// executable if it's there, otherwise relative to the working directory -
+/// see `find_blocks_dir`.
+pub(crate) fn find_data_dir(name: &str) -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("blocks");
+            let candidate = dir.join(name);
             if candidate.is_dir() {
                 return candidate;
             }
         }
     }
-    PathBuf::from("blocks")
+    PathBuf::from(name)
 }
 
 impl BlockRegistry {
@@ -1006,20 +1021,6 @@ impl BlockRegistry {
         &self.defs[id as usize]
     }
 
-    /// The item breaking block `id` gives in Survival, or `None` for nothing,
-    /// including when the block it would drop has no item (`item: false`).
-    /// A `Drops::Block` naming an unknown block also gives `None` here, but
-    /// `compile` refuses to start with one, so that never happens in a
-    /// running game.
-    pub fn drop_of(&self, id: BlockId) -> Option<BlockId> {
-        let drop = match &self.def(id).drops {
-            Drops::Itself => id,
-            Drops::Nothing => return None,
-            Drops::Block(name) => self.by_name(name).ok()?,
-        };
-        (drop != AIR && self.def(drop).item).then_some(drop)
-    }
-
     /// Every distinct texture name any registered block's six faces resolve
     /// to (explicit `textures` overrides and `texture_scheme`-derived names
     /// alike, plus any `overlay` names) - what `world::compile_content`
@@ -1085,15 +1086,6 @@ impl BlockRegistry {
             uv_pad,
             uv_span: uv_tile - 2.0 * uv_pad,
         };
-        for def in self.defs.iter().skip(1) {
-            if let Drops::Block(name) = &def.drops {
-                assert!(
-                    self.by_name.contains_key(name),
-                    "block {:?}: drops unknown block {name:?}",
-                    def.id
-                );
-            }
-        }
         for (id, def) in self.defs.iter().enumerate().skip(1) {
             tables.solid[id] = def.solid;
             tables.opaque[id] = def.transparency == Transparency::No;
@@ -1325,51 +1317,23 @@ mod tests {
         assert_eq!(def.drops, Drops::Itself);
         assert!(def.breakable);
 
-        let def = serde_json::from_str::<BlockFile>(r#"{"id": "leaves", "hardness": 0.2, "drops": false}"#)
+        let def = serde_json::from_str::<BlockFile>(r#"{"id": "ice", "hardness": 0.5, "drops": false}"#)
             .unwrap()
             .into_def();
-        assert_eq!(def.hardness, 0.2);
+        assert_eq!(def.hardness, 0.5);
         assert_eq!(def.drops, Drops::Nothing);
 
         let def = serde_json::from_str::<BlockFile>(r#"{"id": "grass", "drops": "dirt"}"#).unwrap().into_def();
-        assert_eq!(def.drops, Drops::Block("dirt".into()));
+        assert_eq!(def.drops, Drops::Item { item: "dirt".into(), chance: 1.0, count: 1 });
+
+        let def = serde_json::from_str::<BlockFile>(r#"{"id": "leaves", "drops": {"item": "twig", "chance": 0.2}}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(def.drops, Drops::Item { item: "twig".into(), chance: 0.2, count: 1 });
 
         // A negative hardness can't make mining take negative time.
         let def = serde_json::from_str::<BlockFile>(r#"{"id": "odd", "hardness": -2}"#).unwrap().into_def();
         assert_eq!(def.hardness, 0.0);
-    }
-
-    #[test]
-    fn shipped_blocks_drop_what_they_should() {
-        let reg = BlockRegistry::with_defaults();
-        let id = |n| reg.id(n);
-        assert_eq!(reg.drop_of(id("stone")), Some(id("cobblestone")));
-        assert_eq!(reg.drop_of(id("grass")), Some(id("dirt")));
-        assert_eq!(reg.drop_of(id("dirt")), Some(id("dirt")));
-        assert_eq!(reg.drop_of(id("leaves")), None);
-        assert_eq!(reg.drop_of(id("ice")), None);
-        assert_eq!(reg.drop_of(AIR), None, "air has no item, so it can never drop");
-        assert!(!reg.def(id("bedrock")).breakable);
-        // Every shipped block's drop names something real.
-        for (i, def) in reg.defs.iter().enumerate().skip(1) {
-            if let Drops::Block(name) = &def.drops {
-                assert!(reg.by_name(name).is_ok(), "{} drops unknown {name}", def.id);
-            }
-            assert!(def.hardness >= 0.0, "block {i}");
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "drops unknown block")]
-    fn a_drop_naming_an_unknown_block_fails_at_startup() {
-        let mut reg = BlockRegistry::with_defaults();
-        reg.register(BlockDef { id: "ruby".into(), drops: Drops::Block("rubyy".into()), ..BlockDef::default() });
-        let mut painters = crate::atlas::default_painters();
-        for name in reg.texture_names() {
-            painters.ensure_registered(&name);
-        }
-        let atlas = crate::atlas::build_atlas(&painters);
-        reg.compile(&atlas.indices, atlas.tile_size);
     }
 
     #[test]

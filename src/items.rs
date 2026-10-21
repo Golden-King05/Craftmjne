@@ -16,7 +16,8 @@
 
 use bevy::prelude::*;
 
-use crate::blocks::{BlockRegistry, BlockTables, ItemStack, Tables};
+use crate::blocks::{BlockTables, ItemStack, Tables};
+use crate::item_registry::ItemRegistry;
 use crate::chat::ChatState;
 use crate::interact::Hotbar;
 use crate::inventory::{Inventory, InventoryState};
@@ -28,6 +29,9 @@ use crate::world::ChunkMap;
 
 /// Side length of the drawn cube, in blocks.
 pub const ITEM_SIZE: f32 = 0.25;
+/// Side of a plain item's flat picture - bigger than a block item's cube,
+/// since it's only one pixel thick.
+const SPRITE_SIZE: f32 = 0.45;
 /// Half the collision box's side. The box is the drawn cube, so an item
 /// rests with its cube sitting on the ground.
 const HALF: f32 = ITEM_SIZE / 2.0;
@@ -282,7 +286,7 @@ fn merge_items(
     mut commands: Commands,
     time: Res<Time>,
     mut timer: Local<f32>,
-    registry: Res<BlockRegistry>,
+    registry: Res<ItemRegistry>,
     mut items: Query<(Entity, &mut DroppedItem)>,
 ) {
     *timer += time.delta_secs();
@@ -297,7 +301,7 @@ fn merge_items(
             if a.1.is_empty() || b.1.is_empty() || a.1.id != b.1.id || a.2.distance(b.2) > MERGE_RADIUS {
                 continue;
             }
-            let max = registry.def(a.1.id).max_stack.max(1);
+            let max = registry.max_stack(a.1.id);
             let moved = b.1.count.min(max.saturating_sub(a.1.count));
             if moved == 0 {
                 continue;
@@ -320,7 +324,7 @@ fn merge_items(
 #[allow(clippy::too_many_arguments)]
 fn pick_up_items(
     mut commands: Commands,
-    registry: Res<BlockRegistry>,
+    registry: Res<ItemRegistry>,
     death: Res<DeathState>,
     mut hotbar: ResMut<Hotbar>,
     mut inventory: ResMut<Inventory>,
@@ -335,7 +339,7 @@ fn pick_up_items(
         if item.pickup_delay > 0.0 || !in_pickup_range(player.pos, item.pos) {
             continue;
         }
-        let max = registry.def(item.stack.id).max_stack;
+        let max = registry.max_stack(item.stack.id);
         let left = give(&mut hotbar.slots, &mut inventory.slots, item.stack, max);
         if left == 0 {
             commands.entity(entity).despawn();
@@ -391,6 +395,7 @@ fn refresh_item_meshes(
     time: Res<Time>,
     map: Res<ChunkMap>,
     tables: Option<Res<BlockTables>>,
+    registry: Res<ItemRegistry>,
     materials: Option<Res<ChunkMaterials>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut items: Query<(Entity, &mut DroppedItem, &mut Transform)>,
@@ -400,8 +405,14 @@ fn refresh_item_meshes(
     for (entity, mut item, mut transform) in &mut items {
         let light = map.get_light(item.pos.floor().as_ivec3());
         if item.lit != Some(light) || item.mesh.is_none() {
-            let id = item.stack.id;
-            let bucket = crate::mesher::cube_mesh(&tables.0, ITEM_SIZE, light, |f| tables.0.tiles[id as usize * 6 + f]);
+            // A block item is a little cube of the block; a plain item (a
+            // stick) is its flat picture, spinning like a card.
+            let bucket = match registry.block_of(item.stack.id) {
+                Some(block) => {
+                    crate::mesher::cube_mesh(&tables.0, ITEM_SIZE, light, |f| tables.0.tiles[block as usize * 6 + f])
+                }
+                None => crate::mesher::sprite_mesh(&tables.0, SPRITE_SIZE, light, registry.tile(item.stack.id)),
+            };
             let mesh = bucket_to_mesh(bucket);
             match &item.mesh {
                 Some(handle) => {
@@ -440,10 +451,20 @@ impl Plugin for ItemsPlugin {
             .init_resource::<DeathState>()
             .init_resource::<Hotbar>()
             .init_resource::<Inventory>()
+            .init_resource::<crate::inventory::HeldStack>()
+            .init_resource::<crate::crafting::KnownItems>()
             .add_systems(OnExit(AppState::InGame), despawn_items.after(crate::world::WorldSaveSet))
             .add_systems(
                 Update,
-                (spawn_drops, throw_selected, simulate_items, merge_items, pick_up_items, refresh_item_meshes)
+                (
+                    spawn_drops,
+                    throw_selected,
+                    simulate_items,
+                    merge_items,
+                    pick_up_items,
+                    crate::crafting::learn_items,
+                    refresh_item_meshes,
+                )
                     .chain()
                     .after(crate::player::PlayerSet)
                     .run_if(in_state(AppState::InGame)),

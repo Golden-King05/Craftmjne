@@ -668,6 +668,79 @@ pub fn default_painters() -> Painters {
     p.register("coal_ore", ore([38.0, 38.0, 40.0]));
     p.register("iron_ore", ore([216.0, 175.0, 147.0]));
 
+    // A short forked twig on a transparent background: a plain item, drawn
+    // flat in the inventory and as a sprite when dropped.
+    p.register("twig", |t, rng| {
+        let bark = |rng: &mut dyn FnMut() -> f32| {
+            let j = (rng() - 0.5) * 18.0;
+            [112.0 + j, 82.0 + j, 50.0 + j]
+        };
+        for i in 3..13 {
+            t.px(i, 15 - i, bark(rng)); // the main stem, bottom-left to top-right
+        }
+        for i in 0..4 {
+            t.px(7 - i, 7 - i, bark(rng)); // a fork off its middle
+        }
+        t.px(12, 2, [96.0, 140.0, 58.0]); // a last leaf clinging on
+        t.px(13, 2, [84.0, 128.0, 50.0]);
+        t.px(4, 3, [96.0, 140.0, 58.0]);
+    });
+
+    // A straight, peeled stick: lighter and cleaner than a twig.
+    p.register("stick", |t, rng| {
+        for i in 2..15 {
+            let j = (rng() - 0.5) * 14.0;
+            t.px(i, 16 - i, [150.0 + j, 112.0 + j, 66.0 + j]);
+            t.px(i - 1, 16 - i, [118.0 + j, 86.0 + j, 50.0 + j]); // shaded edge
+        }
+    });
+
+    // The bench top: planks with a lighter worn square and a few tools
+    // scratched in; the sides: planks over a dark gap with legs.
+    p.register("crafting_bench_top", |t, rng| {
+        t.noisy_fill(rng, [176.0, 142.0, 88.0], 14.0);
+        for i in 0..16 {
+            for edge in [0, 15] {
+                t.px(i, edge, [112.0, 84.0, 50.0]);
+                t.px(edge, i, [112.0, 84.0, 50.0]);
+            }
+        }
+        for y in 4..12 {
+            for x in 4..12 {
+                let j = (rng() - 0.5) * 10.0;
+                t.px(x, y, [196.0 + j, 164.0 + j, 108.0 + j]);
+            }
+        }
+        for i in 5..11 {
+            t.px(i, 6, [92.0, 92.0, 96.0]); // a saw blade
+        }
+        for i in 6..11 {
+            t.px(10, i, [96.0, 66.0, 38.0]); // a mallet handle
+        }
+        t.px(9, 6, [120.0, 120.0, 124.0]);
+    });
+    p.register("crafting_bench_side", |t, rng| {
+        for y in 0..16 {
+            for x in 0..16 {
+                let j = (rng() - 0.5) * 14.0;
+                let leg = x < 3 || x > 12;
+                let c = if y < 4 {
+                    [176.0 + j, 142.0 + j, 88.0 + j] // the top's edge
+                } else if y == 4 {
+                    [112.0, 84.0, 50.0]
+                } else if leg {
+                    [150.0 + j, 116.0 + j, 70.0 + j]
+                } else {
+                    [58.0 + j * 0.5, 44.0 + j * 0.5, 30.0 + j * 0.5] // the dark gap
+                };
+                t.px(x, y, c);
+            }
+        }
+        for x in 3..13 {
+            t.px(x, 11, [132.0, 100.0, 60.0]); // a shelf rail
+        }
+    });
+
     for stage in 0..DESTROY_STAGES {
         p.register(&destroy_stage_name(stage), move |t, _| {
             let order = crack_order();
@@ -758,7 +831,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 22 + DESTROY_STAGES);
+        assert_eq!(a.indices.len(), 26 + DESTROY_STAGES);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

@@ -16,7 +16,10 @@ use crate::atlas::{destroy_stage_name, DESTROY_STAGES};
 use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemStack, Rotation, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
-use crate::inventory::InventoryState;
+use crate::crafting::RecipeBook;
+use crate::inventory::{open_inventory, InventoryState};
+use crate::item_registry::ItemRegistry;
+use bevy::ecs::system::SystemParam;
 use crate::items::{SpawnDrop, MINED_PICKUP_DELAY};
 use crate::light::{LightCell, MAX_LIGHT};
 use crate::player::{cursor_grabbed, Player};
@@ -211,6 +214,8 @@ pub struct Target(pub Option<RayHit>);
 struct ActionTimers {
     break_t: f32,
     place_t: f32,
+    /// Blocks broken this session, mixed into each drop's random roll.
+    breaks: u32,
 }
 
 /// Skips entirely while chat, the pause menu, or the inventory screen is
@@ -251,8 +256,9 @@ fn interact(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut map: ResMut<ChunkMap>,
-    registry: Res<BlockRegistry>,
+    content: Content,
     mode: Res<GameMode>,
     mut hotbar: ResMut<Hotbar>,
     mut target: ResMut<Target>,
@@ -264,6 +270,7 @@ fn interact(
     mut gizmos: Gizmos,
 ) {
     let Ok(player) = players.single() else { return };
+    let registry = &content.blocks;
 
     // Crosshair target.
     target.0 = if player.spawned {
@@ -320,18 +327,26 @@ fn interact(
         if mining.advance(mined, mouse.pressed(MouseButton::Left), dt, seconds) {
             if let Some(prev) = map.set_block(hit.pos, AIR) {
                 block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev, axis: AXIS_Y });
-                if let Some(drop) = registry.drop_of(prev) {
-                    drops.write(mined_drop(hit.pos, ItemStack { id: drop, count: 1 }));
+                timers.breaks = timers.breaks.wrapping_add(1);
+                if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
+                    drops.write(mined_drop(hit.pos, stack));
                 }
             }
         }
     }
 
     // Place (right click / hold).
-    if mouse.pressed(MouseButton::Right) && timers.place_t <= 0.0 {
+    // Right-clicking a crafting station opens it instead (`open_station`);
+    // hold shift to place a block against one.
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let on_station = content.book.is_station(aimed) && !shift;
+    if mouse.pressed(MouseButton::Right) && timers.place_t <= 0.0 && !on_station {
         let place_pos = hit.pos + hit.normal;
-        let id = hotbar.slots[hotbar.selected].id;
-        if place_pos.y >= 0 && place_pos.y < WORLD_HEIGHT {
+        // An empty hand, or an item that isn't a block (a stick), places
+        // nothing.
+        let held = hotbar.slots[hotbar.selected];
+        let block = (!held.is_empty()).then(|| content.items.block_of(held.id)).flatten();
+        if let Some(id) = block.filter(|_| place_pos.y >= 0 && place_pos.y < WORLD_HEIGHT) {
             let existing = map.get_block(place_pos);
             let replaceable = existing == AIR || registry.def(existing).replaceable;
             let blocked = registry.def(id).solid && player.intersects_block(place_pos);
@@ -358,11 +373,8 @@ fn interact(
                     // Survival consumes from the stack (clearing the slot
                     // once it's empty); Creative's stacks never deplete -
                     // its "free items" already come from being able to
-                    // refill a slot from the block list at will. `id != AIR`
-                    // guards against an empty selected slot "placing air"
-                    // onto a replaceable block (water, say) - nothing to
-                    // decrement from a slot that was already empty.
-                    if *mode == GameMode::Survival && id != AIR {
+                    // refill a slot from the block list at will.
+                    if *mode == GameMode::Survival {
                         let selected = hotbar.selected;
                         let stack = &mut hotbar.slots[selected];
                         stack.count -= 1;
@@ -382,16 +394,60 @@ fn interact(
     // `item: false` blocks (air, and anything similarly hidden) can't be
     // picked either - there's nothing to hold.
     if *mode == GameMode::Creative && mouse.just_pressed(MouseButton::Middle) {
-        let id = map.get_block(hit.pos);
-        if id != AIR && registry.def(id).item {
-            if let Some(existing) = hotbar.slots.iter().position(|s| s.id == id) {
+        if let Some(id) = content.items.of_block(map.get_block(hit.pos)) {
+            if let Some(existing) = hotbar.slots.iter().position(|s| !s.is_empty() && s.id == id) {
                 hotbar.selected = existing;
             } else {
                 let sel = hotbar.selected;
-                hotbar.slots[sel] = ItemStack { id, count: registry.def(id).max_stack };
+                hotbar.slots[sel] = ItemStack { id, count: content.items.max_stack(id) };
             }
         }
     }
+}
+
+/// The block, item and recipe lists, as one system parameter.
+#[derive(SystemParam)]
+pub struct Content<'w> {
+    pub blocks: Res<'w, BlockRegistry>,
+    pub items: Res<'w, ItemRegistry>,
+    pub book: Res<'w, RecipeBook>,
+}
+
+/// A number in `0..1` for a block's drop chance, different for every break
+/// (`breaks` counts them) yet reproducible in tests.
+fn drop_roll(pos: IVec3, breaks: u32) -> f32 {
+    let seed = (pos.x.wrapping_mul(73_856_093) ^ pos.y.wrapping_mul(19_349_663) ^ pos.z.wrapping_mul(83_492_791))
+        as u32
+        ^ breaks.wrapping_mul(0x9E37_79B9);
+    crate::noise::mulberry32(seed)()
+}
+
+/// Right-clicking a crafting station (without shift) opens the inventory
+/// screen, where its recipes are listed while it's within reach.
+#[allow(clippy::too_many_arguments)]
+fn open_station(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    target: Res<Target>,
+    map: Res<ChunkMap>,
+    book: Res<RecipeBook>,
+    death: Res<DeathState>,
+    mut inv: ResMut<InventoryState>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if !mouse.just_pressed(MouseButton::Right) || shift || inv.open || death.open {
+        return;
+    }
+    let Some(hit) = &target.0 else { return };
+    if !book.is_station(map.get_block(hit.pos)) {
+        return;
+    }
+    let Ok(mut window) = windows.single_mut() else { return };
+    if window.cursor_options.grab_mode == bevy::window::CursorGrabMode::None {
+        return; // another overlay has the cursor
+    }
+    open_inventory(&mut inv, &mut window);
 }
 
 /// The crack overlay on the block being mined: one cube entity, moved to
@@ -480,7 +536,7 @@ impl Plugin for InteractPlugin {
             .add_systems(OnExit(AppState::InGame), reset_mining)
             .add_systems(
                 Update,
-                (select_slot, interact, sync_crack_overlay)
+                (select_slot, interact, open_station, sync_crack_overlay)
                     .chain()
                     .after(crate::player::PlayerSet)
                     .run_if(in_state(AppState::InGame)),

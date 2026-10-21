@@ -1,0 +1,10 @@
+{
+  "id": "crafting_bench",
+  "name": "Crafting Bench",
+  "hardness": 2.5,
+  "textures": {
+    "top": "crafting_bench_top",
+    "bottom": "planks",
+    "side": "crafting_bench_side"
+  }
+}
