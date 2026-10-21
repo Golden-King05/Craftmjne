@@ -254,11 +254,10 @@ pub struct MeshBucket {
     /// for `ATTRIBUTE_UV_1`. Chunk entities are spawned with a pure
     /// translation `Transform` (`world.rs`), so the normal matrix is the
     /// identity and the hue survives - but **not the length**: Bevy's
-    /// `mesh_normal_local_to_world` normalizes it. `[1, 1, 1]` arrives as
-    /// `[0.577; 3]` (which is how bright every untinted surface has always
-    /// rendered, and `chunk.wgsl`'s `UNTINTED` matches it), and a tint
-    /// arrives at unit length whatever its own brightness was. See the
-    /// note in CLAUDE.md before relying on a tint's magnitude.
+    /// `mesh_normal_local_to_world` normalizes it. So the shader rescales
+    /// the unit vector by `sqrt(3)` (making `[1, 1, 1]` a true no-op), and
+    /// the mesher carries a tint's own brightness in the light values
+    /// instead (`tint_brightness`).
     pub tint: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 }
@@ -533,6 +532,11 @@ pub fn mesh_chunk(
                         let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
                         let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
                         let vi = bucket.positions.len() as u32;
+                        // The vertex shader normalizes the tint (see
+                        // `MeshBucket::tint`), so its brightness rides in
+                        // the light values instead, which the shader
+                        // multiplies by in the same product.
+                        let m = tint_brightness(tint);
                         for (ci, c) in face.corners.iter().enumerate() {
                             bucket.positions.push([
                                 corner_pos[ci][0] - quad_bias * face.dir[0],
@@ -543,8 +547,8 @@ pub fn mesh_chunk(
                                 tu + tables.uv_pad + c.uv[0] * tables.uv_span,
                                 tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span,
                             ]);
-                            bucket.colors.push(corner_color[ci]);
-                            bucket.sky_gb.push(corner_skygb[ci]);
+                            bucket.colors.push(corner_color[ci].map(|v| v * m));
+                            bucket.sky_gb.push(corner_skygb[ci].map(|v| v * m));
                             // See `MeshBucket::tint` - rides in ATTRIBUTE_NORMAL.
                             bucket.tint.push(tint);
                         }
@@ -576,6 +580,18 @@ pub fn mesh_chunk(
     }
 
     ChunkMeshData { solid, water }
+}
+
+/// How bright a tint is relative to white: `|tint| / |[1, 1, 1]|`. The
+/// vertex shader normalizes the tint attribute, losing this, so the mesher
+/// multiplies it into the vertex light instead; `chunk.wgsl` multiplies
+/// light and tint together, so the product comes out the same. Exactly `1.0`
+/// for white, so untinted faces are untouched.
+fn tint_brightness(tint: [f32; 3]) -> f32 {
+    if tint == [1.0; 3] {
+        return 1.0;
+    }
+    (tint[0] * tint[0] + tint[1] * tint[1] + tint[2] * tint[2]).sqrt() / 3f32.sqrt()
 }
 
 /// A free-standing cube centred on the origin, `size` blocks on a side, for
@@ -623,6 +639,20 @@ mod tests {
     use super::*;
     use crate::blocks::BlockRegistry;
     use crate::config::block_index;
+
+    #[test]
+    fn a_tints_brightness_rides_in_the_light_because_the_shader_normalizes_it() {
+        assert_eq!(tint_brightness([1.0; 3]), 1.0);
+        // What the shader computes: light * normalize(tint) * sqrt(3). With
+        // the light scaled by tint_brightness, that's light * tint exactly.
+        for tint in [[0.296f32, 0.917, 0.266], [0.1, 0.2, 0.05], [0.9, 0.9, 0.9]] {
+            let len = (tint.iter().map(|c| c * c).sum::<f32>()).sqrt();
+            for c in 0..3 {
+                let shown = tint_brightness(tint) * tint[c] / len * 3f32.sqrt();
+                assert!((shown - tint[c]).abs() < 1e-5, "{tint:?} channel {c}: {shown}");
+            }
+        }
+    }
 
     #[test]
     fn a_free_standing_cube_has_six_untinted_faces_lit_by_its_cell() {

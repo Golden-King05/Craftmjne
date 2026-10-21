@@ -1314,11 +1314,16 @@ etc.) instead of inventing a new approach:
   untinted faces arrives as `[0.577; 3]` - every untinted surface has
   always rendered at 58% of the intended brightness - and a grass tint
   arrives at unit length, so its own brightness is thrown away (the
-  colors tuned by eye were tuned against that). It's been left as is on
-  purpose, because fixing it brightens the whole world by 1.73x and the
-  lighting constants were all chosen looking at the current result; that
-  call belongs to the user. `chunk.wgsl`'s `UNTINTED` constant pins the
-  current look for meshes that send a zero "normal" (below). **Which faces get tinted is a property of the
+  colors tuned by eye were tuned against that). **Fixed at the user's
+  request:** `chunk.wgsl` multiplies the normalized tint by `sqrt(3)`
+  (so `[1, 1, 1]` is white again), and the mesher folds a tint's own
+  brightness into the vertex light (`mesher::tint_brightness`), which the
+  shader multiplies in the same product. Everything untinted got 1.73x
+  brighter, i.e. textures now show their true colors at noon; `EXPOSURE`
+  in `chunk.wgsl` is the one knob if that reads too bright. The grass
+  constants (`biome::DRY`/`LUSH`/`COOL`) were rewritten to the normalized
+  values that had actually been on screen, so the approved grass color
+  didn't move. **Which faces get tinted is a property of the
   (block, face) slot, not the texture name** - `FaceTint`/`Tables::tinted`
   mirror `FaceTextures`/`Tables::tiles`'s exact `[id*6+face]` shape, because
   grass's bottom face reuses `dirt.png` (the very tile plain `dirt` blocks
@@ -2366,8 +2371,7 @@ etc.) instead of inventing a new approach:
   shifting colour. `mesher::cube_mesh` (dropped items, the crack overlay)
   sends `[0, 0, 0]`, which every transform leaves alone and which Bevy
   skips normalizing. `chunk.wgsl` reads exact zero as "untinted" and
-  substitutes `UNTINTED` (0.577, what chunks' `[1, 1, 1]` arrives as), so
-  items match the world's brightness. Interpolating three zero vertices
+  substitutes white, so items match the world's brightness. Interpolating three zero vertices
   gives exactly zero, so the comparison is safe. The shader was checked by
   parsing and validating it with the vendored `naga` crate in a scratch
   project with Bevy's imports stubbed out. A deliberately broken copy was

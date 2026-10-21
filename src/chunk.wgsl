@@ -43,8 +43,10 @@ struct ChunkParams {
     alpha_cutoff: f32,
 }
 
-// 1/sqrt(3): what an untinted chunk face's [1, 1, 1] arrives as.
-const UNTINTED: f32 = 0.57735027;
+const SQRT_3: f32 = 1.7320508;
+// Overall brightness. 1.0 shows a texture at its true colors in full
+// daylight; lower it to dim the whole world in one place.
+const EXPOSURE: f32 = 1.0;
 
 @group(2) @binding(0) var atlas_texture: texture_2d<f32>;
 @group(2) @binding(1) var atlas_sampler: sampler;
@@ -58,14 +60,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let sky = vec3<f32>(in.color.a, in.uv_b.x, in.uv_b.y) * params.sky_light.rgb;
     let light = max(in.color.rgb, sky);
-    // A zero "normal" means untinted (`mesher::cube_mesh` - dropped items
-    // and the crack overlay, which rotate, and a rotated [1, 1, 1] would no
-    // longer be grey). Chunk meshes send [1, 1, 1] for untinted faces, which
-    // Bevy's vertex shader normalizes to length 1 on the way here, so
-    // UNTINTED is that same value: both kinds of mesh come out equally lit.
+    // Bevy's vertex shader normalizes world_normal, so a tint arrives at
+    // unit length: scaling by sqrt(3) turns an untinted face's [1, 1, 1]
+    // back into exactly white. A tint's own brightness was folded into the
+    // vertex light by the mesher (`mesher::tint_brightness`), so the product
+    // below is the full tint either way. A zero "normal" also means
+    // untinted (`mesher::cube_mesh` - dropped items and the crack overlay,
+    // which rotate, and a rotated [1, 1, 1] would no longer be grey).
     let untinted = all(in.world_normal == vec3<f32>(0.0));
-    let tint = select(in.world_normal, vec3<f32>(UNTINTED), untinted);
-    let lit = color.rgb * light * tint;
+    let tint = select(normalize(in.world_normal) * SQRT_3, vec3<f32>(1.0), untinted);
+    let lit = color.rgb * light * tint * EXPOSURE;
     let dist = distance(view.world_position, in.world_position.xyz);
     let fog = smoothstep(params.fog_start, params.fog_end, dist);
     return vec4<f32>(mix(lit, params.fog_color.rgb, fog), color.a * params.base_alpha);

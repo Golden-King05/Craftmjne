@@ -78,16 +78,21 @@ pub const COLD: f32 = -0.3;
 pub const COLD_SEA: f32 = -0.2;
 pub const WARM_SEA: f32 = 0.3;
 
+// These are the colors grass has actually been showing. Until the
+// tint-normalization fix, the renderer scaled every tint to unit length, so
+// the hand-tuned values ([0.48, 0.52, 0.14], [0.20, 0.62, 0.18],
+// [0.14, 0.50, 0.32]) reached the screen as these. Now that a tint's
+// brightness is kept, they're written out as what was approved.
 /// Grass color where it's dry (humidity near `-1`).
-const DRY: [f32; 3] = [0.48, 0.52, 0.14];
+const DRY: [f32; 3] = [0.665, 0.721, 0.194];
 /// An ordinary plains green. Deliberately saturated and on the dark side (a
 /// "health bar" green, not a pastel one) - the grayscale mask this
 /// multiplies onto (brightened toward white by `atlas::
 /// normalize_tint_mask_tile`) is itself quite bright, so a pale tint here
 /// reads as washed-out once combined with it.
-const LUSH: [f32; 3] = [0.20, 0.62, 0.18];
+const LUSH: [f32; 3] = [0.296, 0.917, 0.266];
 /// Grass color where it's cold.
-const COOL: [f32; 3] = [0.14, 0.50, 0.32];
+const COOL: [f32; 3] = [0.230, 0.820, 0.525];
 
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
