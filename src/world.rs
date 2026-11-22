@@ -230,14 +230,11 @@ impl ChunkMap {
         }
     }
 
-    /// Whether `pos` counts as underwater for swimming and floating: a
-    /// fluid cell, or a floor block (a pebble) lying on a bed with fluid
-    /// directly above it - the pebble sits in what is otherwise a water
-    /// cell, so the water shouldn't stop at it.
+    /// Whether `pos` counts as underwater for swimming and floating. A
+    /// waterlogged block (`pebble@water`) is a fluid cell like any other,
+    /// so this is just the fluid flag.
     pub fn is_wet(&self, tables: &Tables, pos: IVec3) -> bool {
-        let id = self.get_block(pos);
-        tables.fluid[id as usize]
-            || (tables.floor[id as usize] && tables.fluid[self.get_block(pos + IVec3::Y) as usize])
+        tables.fluid[self.get_block(pos) as usize]
     }
 
     /// Whether the chunk holding `pos`'s column is loaded and generated.
@@ -626,15 +623,19 @@ fn process_fluid_updates(
 /// A fluid can only occupy air, a `replaceable` block, or itself — anything
 /// else blocks it outright, matching the existing placement rule in
 /// `interact.rs`.
-/// Whether a fluid may flow into a cell holding block `id`: air, or a
-/// `replaceable` block - except a floor block (a pebble), which water flows
-/// around rather than washing away. Pebbles are generated on river, lake and
-/// sea beds with water all around and above them, and any nearby edit
-/// recomputes those cells; if water could overwrite them they'd silently
-/// vanish the first time anything was dug. (Placing a block there still
-/// replaces the pebble - that's `replaceable`'s other meaning.)
-pub fn fluid_can_enter(tables: &Tables, id: BlockId) -> bool {
-    id == AIR || (tables.replaceable[id as usize] && !tables.floor[id as usize])
+/// What a cell holding block `id` becomes once fluid `kind` fills it, or
+/// `None` if it can't be filled. A waterloggable block keeps itself and
+/// gains the fluid as its second tag (`pebble` -> `pebble@water`); air and
+/// other `replaceable` blocks are simply overwritten; a cell already
+/// holding that fluid stays as it is; anything else blocks the flow.
+pub fn fluid_host(tables: &Tables, id: BlockId, kind: BlockId) -> Option<BlockId> {
+    if tables.fluid_kind[id as usize] == kind {
+        return Some(id);
+    }
+    if let Some(&variant) = tables.variants.get(&(id, kind)) {
+        return Some(variant);
+    }
+    (id == AIR || tables.replaceable[id as usize]).then_some(kind)
 }
 
 fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut VecDeque<IVec3>) {
@@ -647,9 +648,12 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
         return; // permanent source
     }
 
+    // Everything below compares the fluid a cell holds (`fluid_kind`), not
+    // its block id: a waterlogged pebble holds water just as a water block
+    // does, and it's the water that spreads, falls and dries.
     let above_id = map.get_block(pos + IVec3::Y);
     let mut candidate: Option<(BlockId, u8)> =
-        tables.fluid[above_id as usize].then_some((above_id, FLUID_FALLING));
+        tables.fluid[above_id as usize].then_some((tables.fluid_kind[above_id as usize], FLUID_FALLING));
 
     if candidate.is_none() {
         for d in FLUID_SIDES {
@@ -659,6 +663,7 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
                 continue;
             }
             let nlevel = map.get_fluid_level(npos);
+            let kind = tables.fluid_kind[nid as usize];
             if nlevel == FLUID_FALLING {
                 // A waterfall segment only spreads sideways once it lands
                 // (the cell below it is blocked). While it still has open
@@ -668,7 +673,7 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
                 let below = npos.y - 1;
                 let below_open = below >= 0 && {
                     let below_id = map.get_block(IVec3::new(npos.x, below, npos.z));
-                    fluid_can_enter(tables, below_id)
+                    fluid_host(tables, below_id, kind).is_some()
                 };
                 if below_open {
                     continue;
@@ -681,7 +686,7 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
             }
             let level = eff + 1;
             if candidate.as_ref().is_none_or(|&(_, best)| level < best) {
-                candidate = Some((nid, level));
+                candidate = Some((kind, level));
             }
         }
     }
@@ -689,24 +694,25 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
     // "Infinite water": 2+ side neighbours that are already permanent
     // sources of the same fluid upgrade this cell straight to a source too,
     // regardless of whether it got here via falling or lateral spread.
-    if let Some((cid, clevel)) = candidate {
+    if let Some((kind, clevel)) = candidate {
         if clevel != FLUID_SOURCE {
             let source_sides = FLUID_SIDES
                 .iter()
                 .filter(|&&d| {
                     let npos = pos + d;
-                    map.get_block(npos) == cid && map.get_fluid_level(npos) == FLUID_SOURCE
+                    tables.fluid_kind[map.get_block(npos) as usize] == kind
+                        && map.get_fluid_level(npos) == FLUID_SOURCE
                 })
                 .count();
             if source_sides >= 2 {
-                candidate = Some((cid, FLUID_SOURCE));
+                candidate = Some((kind, FLUID_SOURCE));
             }
         }
     }
 
     match candidate {
-        Some((cid, clevel)) => {
-            if id == cid {
+        Some((kind, clevel)) => {
+            if tables.fluid_kind[id as usize] == kind {
                 let cur_rank = fluid_rank(map.get_fluid_level(pos));
                 let cand_rank = fluid_rank(clevel);
                 if cand_rank == cur_rank {
@@ -723,22 +729,21 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
                     // monotonic — a cell only ever dries once — and any
                     // neighbour with a genuinely still-valid path simply
                     // re-floods it on a later recompute.
-                    if map.set_fluid_cell(pos, AIR, FLUID_SOURCE) {
+                    if map.set_fluid_cell(pos, tables.dried[id as usize], FLUID_SOURCE) {
                         queue.extend(FLUID_NEIGHBORS.iter().map(|&d| pos + d));
                     }
                     return;
                 }
             }
-            let can_host = fluid_can_enter(tables, id) || id == cid;
-            if !can_host {
+            let Some(host) = fluid_host(tables, id, kind) else {
                 return; // obstructed
-            }
-            if map.set_fluid_cell(pos, cid, clevel) {
+            };
+            if map.set_fluid_cell(pos, host, clevel) {
                 queue.extend(FLUID_NEIGHBORS.iter().map(|&d| pos + d));
             }
         }
         None => {
-            if is_fluid_here && map.set_fluid_cell(pos, AIR, FLUID_SOURCE) {
+            if is_fluid_here && map.set_fluid_cell(pos, tables.dried[id as usize], FLUID_SOURCE) {
                 queue.extend(FLUID_NEIGHBORS.iter().map(|&d| pos + d));
             }
         }
@@ -948,19 +953,17 @@ fn record_edits(mut events: EventReader<BlockSetEvent>, mut log: ResMut<EditLog>
 fn freeze_exposed_water(
     mut params: ParamSet<(EventReader<BlockSetEvent>, EventWriter<BlockSetEvent>)>,
     mut map: ResMut<ChunkMap>,
-    registry: Res<BlockRegistry>,
+    tables: Res<BlockTables>,
     world_gen: Res<WorldGen>,
 ) {
-    let water = registry.id("water");
-    let ice = registry.id("ice");
     let mut candidates = Vec::new();
     for e in params.p0().read() {
         candidates.push(e.pos);
         candidates.push(e.pos - IVec3::Y);
     }
     for pos in candidates {
-        if let Some(prev) = try_freeze_cell(&mut map, pos, water, ice, |x, z| world_gen.0.biome_at(x, z)) {
-            params.p1().write(BlockSetEvent { pos, id: ice, prev, axis: crate::blocks::AXIS_Y });
+        if let Some((prev, frozen)) = try_freeze_cell(&mut map, &tables.0, pos, |x, z| world_gen.0.biome_at(x, z)) {
+            params.p1().write(BlockSetEvent { pos, id: frozen, prev, axis: crate::blocks::AXIS_Y });
         }
     }
 }
@@ -974,13 +977,16 @@ fn freeze_exposed_water(
 /// this cell froze, `None` if it didn't qualify.
 fn try_freeze_cell(
     map: &mut ChunkMap,
+    tables: &Tables,
     pos: IVec3,
-    water: BlockId,
-    ice: BlockId,
     biome_at: impl Fn(i32, i32) -> biome::Biome,
-) -> Option<BlockId> {
-    if map.get_block(pos) != water || map.get_fluid_level(pos) != FLUID_SOURCE {
-        return None; // not a still water source at all
+) -> Option<(BlockId, BlockId)> {
+    // Only a fluid with something to freeze into (`freezes_to`), and a still
+    // source of it: the cell's own `frozen` entry is `ice` for plain water
+    // and `pebble@ice` for a waterlogged pebble.
+    let frozen = tables.frozen[map.get_block(pos) as usize];
+    if frozen == AIR || map.get_fluid_level(pos) != FLUID_SOURCE {
+        return None;
     }
     if map.get_block(pos + IVec3::Y) != AIR {
         return None; // not exposed to air
@@ -988,7 +994,7 @@ fn try_freeze_cell(
     if !biome_at(pos.x, pos.z).freezes_water() {
         return None;
     }
-    map.set_block(pos, ice)
+    map.set_block(pos, frozen).map(|prev| (prev, frozen))
 }
 
 /// Serializes the current `EditLog` + exact fluid state + player pose and
@@ -1735,10 +1741,15 @@ mod tests {
         BlockRegistry::with_defaults().id("pebble")
     }
 
+    fn variant(tables: &Tables, block: BlockId, layer: BlockId) -> BlockId {
+        *tables.variants.get(&(block, layer)).expect("no such variant")
+    }
+
     #[test]
-    fn water_flows_around_a_pebble_instead_of_washing_it_away() {
+    fn water_flowing_into_a_pebble_waterlogs_it_instead_of_washing_it_away() {
         let (water, stone, tables, mut map) = setup();
         let pebble = pebble_id();
+        let wet = variant(&tables, pebble, water);
         fill_floor(&mut map, 9, stone);
         let source = IVec3::new(4, 10, 4);
         let at = IVec3::new(5, 10, 4);
@@ -1746,45 +1757,95 @@ mod tests {
         map.set_block(at, pebble);
 
         drain(&mut map, &tables, at);
-        assert_eq!(map.get_block(at), pebble, "water overwrote the pebble");
-        // ...and it still spreads past it, around the side: (5, 10, 5) is
-        // only reachable through (4, 10, 5), since the pebble blocks the
-        // direct way.
-        drain(&mut map, &tables, IVec3::new(4, 10, 5));
-        assert_eq!(map.get_block(IVec3::new(5, 10, 5)), water, "water never got around the pebble");
-        assert_eq!(map.get_block(at), pebble, "and the pebble is still there");
+        // One cell, two tags: still a pebble, now also holding water.
+        assert_eq!(map.get_block(at), wet, "the pebble should have been waterlogged");
+        assert_eq!(tables.base_of[wet as usize], pebble);
+        assert_eq!(tables.layer_of[wet as usize], water);
+        assert_eq!(map.get_fluid_level(at), 1);
+        // The water carries on past it like any other water cell.
+        drain(&mut map, &tables, IVec3::new(6, 10, 4));
+        assert_eq!(map.get_block(IVec3::new(6, 10, 4)), water, "water never got past the waterlogged pebble");
     }
 
     #[test]
-    fn a_waterfall_landing_on_a_pebble_still_spreads_sideways() {
+    fn a_waterlogged_pebble_dries_back_to_a_bare_pebble() {
         let (water, stone, tables, mut map) = setup();
         let pebble = pebble_id();
+        let wet = variant(&tables, pebble, water);
+        fill_floor(&mut map, 9, stone);
+        let source = IVec3::new(4, 10, 4);
+        let at = IVec3::new(5, 10, 4);
+        map.set_fluid_cell(source, water, FLUID_SOURCE);
+        map.set_block(at, pebble);
+        drain(&mut map, &tables, at);
+        assert_eq!(map.get_block(at), wet);
+
+        map.set_fluid_cell(source, AIR, FLUID_SOURCE);
+        drain(&mut map, &tables, at);
+        assert_eq!(map.get_block(at), pebble, "the pebble should survive its water drying up");
+    }
+
+    #[test]
+    fn only_waterloggable_blocks_hold_water_everything_else_is_overwritten_or_blocks_it() {
+        let (water, stone, tables, _map) = setup();
+        let reg = BlockRegistry::with_defaults();
+        assert_eq!(fluid_host(&tables, reg.id("pebble"), water), Some(variant(&tables, reg.id("pebble"), water)));
+        assert_eq!(fluid_host(&tables, reg.id("twig"), water), Some(variant(&tables, reg.id("twig"), water)));
+        assert_eq!(fluid_host(&tables, AIR, water), Some(water));
+        assert_eq!(fluid_host(&tables, stone, water), None, "water can't enter stone");
+        // Not a fluid cell holding water: a frozen pebble blocks it.
+        let frozen = variant(&tables, reg.id("pebble"), reg.id("ice"));
+        assert_eq!(fluid_host(&tables, frozen, water), None);
+        assert!(!tables.fluid[frozen as usize], "ice isn't a fluid");
+    }
+
+    #[test]
+    fn a_waterfall_landing_on_a_pebble_waterlogs_it_and_spreads_from_it() {
+        let (water, stone, tables, mut map) = setup();
+        let pebble = pebble_id();
+        let wet = variant(&tables, pebble, water);
         fill_floor(&mut map, 9, stone);
         map.set_block(IVec3::new(8, 10, 8), pebble);
         for y in 11..14 {
             map.set_fluid_cell(IVec3::new(8, y, 8), water, FLUID_FALLING);
         }
         map.set_fluid_cell(IVec3::new(8, 14, 8), water, FLUID_SOURCE);
-        // Neighbours of the lowest falling cell: with the pebble reading as
-        // "open space below", the fall would neither land nor spread.
-        drain(&mut map, &tables, IVec3::new(9, 11, 8));
-        assert_eq!(map.get_block(IVec3::new(9, 11, 8)), water, "it never spread off the pebble");
+        drain(&mut map, &tables, IVec3::new(8, 10, 8));
+        drain(&mut map, &tables, IVec3::new(9, 10, 8));
+        assert_eq!(map.get_block(IVec3::new(8, 10, 8)), wet, "the fall should land in the pebble's cell");
+        assert_eq!(map.get_block(IVec3::new(9, 10, 8)), water, "it never spread off the waterlogged pebble");
+        assert_eq!(map.get_block(IVec3::new(9, 11, 8)), AIR, "mid-fall must stay dry");
     }
 
     #[test]
-    fn a_pebble_under_water_is_wet_and_one_under_air_is_not() {
+    fn a_waterlogged_block_is_wet_and_a_dry_one_is_not() {
         let (water, stone, tables, mut map) = setup();
         let pebble = pebble_id();
         fill_floor(&mut map, 9, stone);
         let under = IVec3::new(4, 10, 4);
         let dry = IVec3::new(8, 10, 8);
-        map.set_block(under, pebble);
-        map.set_block(under + IVec3::Y, water);
+        map.set_block(under, variant(&tables, pebble, water));
         map.set_block(dry, pebble);
-        assert!(map.is_wet(&tables, under), "a pebble under water should swim like water");
-        assert!(map.is_wet(&tables, under + IVec3::Y));
+        assert!(map.is_wet(&tables, under), "a waterlogged pebble should swim like water");
         assert!(!map.is_wet(&tables, dry), "a pebble on dry ground isn't underwater");
         assert!(!map.is_wet(&tables, IVec3::new(2, 10, 2)));
+    }
+
+    #[test]
+    fn a_waterlogged_pebble_source_freezes_into_a_frozen_pebble() {
+        let noise = biome::ClimateMaps::for_seed(1);
+        let pos = find_biome_column(&noise, biome::Biome::Snow);
+        let (water, ice, _stone, tables, mut map) = freeze_setup(pos);
+        let pebble = pebble_id();
+        let (wet, frozen) = (variant(&tables, pebble, water), variant(&tables, pebble, ice));
+        map.set_fluid_cell(pos, wet, FLUID_SOURCE);
+
+        let result = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
+
+        assert_eq!(result, Some((wet, frozen)));
+        assert_eq!(map.get_block(pos), frozen);
+        assert_eq!(tables.base_of[frozen as usize], pebble, "still a pebble");
+        assert_eq!(tables.layer_of[frozen as usize], ice, "now held in ice");
     }
 
     #[test]
@@ -1858,8 +1919,10 @@ mod tests {
         assert_eq!(map.get_block(next), AIR);
     }
 
-    fn freeze_setup(pos: IVec3) -> (BlockId, BlockId, BlockId, ChunkMap) {
-        let reg = BlockRegistry::with_defaults();
+    fn freeze_setup(pos: IVec3) -> (BlockId, BlockId, BlockId, Arc<Tables>, ChunkMap) {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
         let water = reg.id("water");
         let ice = reg.id("ice");
         let stone = reg.id("stone");
@@ -1870,7 +1933,7 @@ mod tests {
         // the way the fluid tests' `setup()` gets away with.
         let coord = IVec2::new(pos.x.div_euclid(CHUNK_SIZE), pos.z.div_euclid(CHUNK_SIZE));
         let map = ChunkMap { chunks: HashMap::from([(coord, empty_chunk())]), ..ChunkMap::default() };
-        (water, ice, stone, map)
+        (water, ice, stone, tables, map)
     }
 
     /// Finds a real `(x, z)` column that classifies as `want` for this
@@ -1894,14 +1957,14 @@ mod tests {
     fn try_freeze_cell_converts_an_exposed_source_to_ice_in_a_freezing_biome() {
         let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
-        let (water, ice, _stone, mut map) = freeze_setup(pos);
+        let (water, ice, _stone, tables, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
         // Nothing placed above `pos` in a fresh chunk, so it's already
         // exposed to air.
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
+        let prev = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
 
-        assert_eq!(prev, Some(water));
+        assert_eq!(prev, Some((water, ice)));
         assert_eq!(map.get_block(pos), ice);
     }
 
@@ -1909,10 +1972,10 @@ mod tests {
     fn try_freeze_cell_leaves_plains_water_as_water() {
         let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Plains);
-        let (water, ice, _stone, mut map) = freeze_setup(pos);
+        let (water, ice, _stone, tables, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
+        let prev = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);
@@ -1922,10 +1985,10 @@ mod tests {
     fn try_freeze_cell_leaves_flowing_water_alone_even_in_a_freezing_biome() {
         let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
-        let (water, ice, _stone, mut map) = freeze_setup(pos);
+        let (water, ice, _stone, tables, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, 3); // flowing, not a source
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
+        let prev = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);
@@ -1935,11 +1998,11 @@ mod tests {
     fn try_freeze_cell_leaves_covered_water_alone_even_in_a_freezing_biome() {
         let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
-        let (water, ice, stone, mut map) = freeze_setup(pos);
+        let (water, ice, stone, tables, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, FLUID_SOURCE);
         map.set_block(pos + IVec3::Y, stone); // covered, not exposed to air
 
-        let prev = try_freeze_cell(&mut map, pos, water, ice, |x, z| biome::region_biome_at(&noise, x, z));
+        let prev = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
 
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);

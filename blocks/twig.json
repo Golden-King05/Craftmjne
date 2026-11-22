@@ -2,5 +2,6 @@
   "id": "twig",
   "name": "Twig",
   "shape": "floor",
-  "hardness": 0
+  "hardness": 0,
+  "waterloggable": true
 }

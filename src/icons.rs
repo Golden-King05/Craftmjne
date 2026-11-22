@@ -144,7 +144,7 @@ pub fn build_icon_atlas(registry: &BlockRegistry, atlas: &AtlasData) -> IconAtla
 
     let mut next = 0u16;
     for (id, def) in registry.defs.iter().enumerate().skip(1) {
-        if def.item_model != ItemModel::Default {
+        if def.item_model != ItemModel::Default || def.layered.is_some() {
             continue;
         }
         let top_name = def.texture_name(2);

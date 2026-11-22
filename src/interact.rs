@@ -320,8 +320,9 @@ fn interact(
     if *mode == GameMode::Creative {
         if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
             if breakable {
-                if let Some(prev) = map.set_block(hit.pos, AIR) {
-                    block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev, axis: AXIS_Y });
+                let after = registry.left_behind(aimed);
+                if let Some(prev) = map.set_block(hit.pos, after) {
+                    block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
                 }
             }
             timers.break_t = ACTION_REPEAT;
@@ -330,8 +331,11 @@ fn interact(
         let seconds = mining_seconds(registry.def(aimed).hardness);
         let mined = breakable.then_some((hit.pos, aimed));
         if mining.advance(mined, mouse.pressed(MouseButton::Left), dt, seconds) {
-            if let Some(prev) = map.set_block(hit.pos, AIR) {
-                block_events.write(BlockSetEvent { pos: hit.pos, id: AIR, prev, axis: AXIS_Y });
+            // Mining a waterlogged pebble takes the pebble and leaves the
+            // water (or the ice) it was sitting in.
+            let after = registry.left_behind(aimed);
+            if let Some(prev) = map.set_block(hit.pos, after) {
+                block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
                 timers.breaks = timers.breaks.wrapping_add(1);
                 if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
                     drops.write(mined_drop(hit.pos, stack));
@@ -354,13 +358,18 @@ fn interact(
         if let Some(id) = block.filter(|_| place_pos.y >= 0 && place_pos.y < WORLD_HEIGHT) {
             let existing = map.get_block(place_pos);
             let replaceable = existing == AIR || registry.def(existing).replaceable;
+            // A waterloggable block set down in a fluid takes the fluid in
+            // with it, as a `block@fluid` variant, instead of displacing it.
+            let held_fluid = registry.def(existing).fluid.then(|| registry.def(existing).layered.map_or(existing, |l| l.layer));
+            let waterlogged = held_fluid.and_then(|fluid| registry.variant(id, fluid));
+            let id = waterlogged.unwrap_or(id);
             let blocked = registry.def(id).solid && player.intersects_block(place_pos);
             // Something that lies on the ground needs ground under it.
             let unsupported = registry.def(id).shape == Shape::Floor
                 && !registry.def(map.get_block(place_pos - IVec3::Y)).solid;
             if replaceable && !blocked && !unsupported {
                 if let Some(prev) = map.set_block(place_pos, id) {
-                    if registry.def(id).fluid {
+                    if registry.def(id).fluid && waterlogged.is_none() {
                         // A player-placed fluid always starts as a
                         // permanent source, not whatever level that cell's
                         // fluid array last held (e.g. a dried flowing cell).
@@ -425,8 +434,9 @@ fn pop_unsupported(
     let changed: Vec<IVec3> = events.p0().read().map(|e| e.pos).collect();
     for pos in changed {
         let above = pos + IVec3::Y;
-        if let Some(prev) = unsupported_floor(&map, &content.blocks, above).and_then(|_| map.set_block(above, AIR)) {
-            events.p1().write(BlockSetEvent { pos: above, id: AIR, prev, axis: AXIS_Y });
+        let after = content.blocks.left_behind(map.get_block(above));
+        if let Some(prev) = unsupported_floor(&map, &content.blocks, above).and_then(|_| map.set_block(above, after)) {
+            events.p1().write(BlockSetEvent { pos: above, id: after, prev, axis: AXIS_Y });
             if let Some(stack) = content.items.drop_of(&content.blocks, prev, 0.0) {
                 drops.write(mined_drop(above, stack));
             }

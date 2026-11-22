@@ -4,5 +4,10 @@
   "transparent": "full",
   "fluid": true,
   "flow_distance": 7,
-  "transmission": [0.65, 0.86, 0.95]
+  "transmission": [
+    0.65,
+    0.86,
+    0.95
+  ],
+  "freezes_to": "ice"
 }

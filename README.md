@@ -158,13 +158,13 @@ with the world. `Q` throws one of the selected item, `Ctrl+Q` the stack.
 
 The first things to pick up. **Pebbles** lie scattered on dry, open ground
 (about one column in a hundred) and on river, lake and sea beds (about one
-in fifty where the water is at least two blocks deep), and **twigs** lie under trees, within two
+in fifty columns of still water, at any depth), and **twigs** lie under trees, within two
 blocks of a trunk (about two per tree), on top of the ones leaves drop.
 Both are blocks lying flat on the ground (`"shape": "floor"`): no collision,
 instant to pick up, and placeable again, but only on top of something solid.
-Mine the block under one and it drops as an item. Water flows around a
-pebble rather than washing it away, and you swim past one on a bed as if it
-were water. They're the first step
+Mine the block under one and it drops as an item. Both are
+[waterloggable](#waterlogging): water that reaches one fills the rest of its
+cell, and you swim past it as if it were water. They're the first step
 toward the first tools.
 
 ### Health
@@ -722,6 +722,34 @@ draws a partial "step" wall between same-fluid neighbours at different
 levels instead of culling that face outright, so adjacent flow heights never
 show a gap. See the "Known gaps" note in Roadmap ideas for what's simplified.
 
+### Waterlogging
+
+A block with `"waterloggable": true` (pebbles and twigs today) can share its
+cell with a fluid, or with what the fluid freezes into. Every such cell has
+**two tags**: the main block and the layer it holds, with the fluid tagged
+just as if it were a block inside the main block's waterlogged slot. The
+registry derives one real block id per pair - `pebble@water`, `pebble@ice` -
+so each is `{ block: pebble, layer: water }` in `BlockDef::layered` and
+`Tables::base_of`/`layer_of`. Nothing else needed to learn about two-part
+cells: saves, snapshots and the edit log record the variant by name, light
+multiplies the two halves' `transmission`, and a variant is otherwise its
+main block (same textures, drops, hardness, floor-ness; no item of its own).
+
+- **Holding water.** The fluid sim compares *which fluid a cell holds*
+  (`Tables::fluid_kind`), not its block id. Water flowing into a pebble turns
+  it into `pebble@water` at the water's level instead of overwriting it
+  (`world::fluid_host`), spreads on from it like any water cell, and when it
+  dries the pebble is left behind (`Tables::dried`).
+- **Freezing.** A fluid with `"freezes_to": "ice"` freezes its exposed still
+  sources in cold biomes; the cell's own `Tables::frozen` entry says into
+  what, so water becomes `ice` and `pebble@water` becomes `pebble@ice`.
+- **Placing and mining.** Setting a waterloggable block down in water keeps
+  the water; mining one takes the block and leaves the layer
+  (`BlockRegistry::left_behind`) - the water, or the ice it was frozen in.
+- **Drawing.** The mesher draws each half of a two-part cell as its own part
+  against neighbours seen as that half, so the pebble is a pebble and the
+  water around it is just more water, with no hole in the surface.
+
 **Reloading never re-simulates fluid — it's saved exactly, like any other
 block.** Every fluid cell (source, flowing, falling — not just the source a
 player placed) is written to disk as a `save::FluidCell {x, y, z, block,
@@ -898,6 +926,8 @@ by) is required. Everything else defaults sanely:
 | `name` | title-cased `id` | display name, shown in inventory tooltips |
 | `transparent` | `"no"` | `"no"` \| `"partial"` \| `"full"` — see below |
 | `fluid` | `false` | swimmable liquid with a lowered top surface (water) that spreads/dries via the fluid sim |
+| `waterloggable` | `false` | can share its cell with a fluid or what one freezes into - see [Waterlogging](#waterlogging) |
+| `freezes_to` | none | on a fluid: the block its exposed still sources freeze into (`"ice"`); that block becomes a layer every waterloggable block gets a variant for |
 | `flow_distance` | `0` | how far (in blocks) this fluid spreads from a source before drying up; also controls the slope — long distances step down gently, short ones drop off steeply |
 | `solid` | `true` (`false` if `fluid`) | collides with entities |
 | `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |

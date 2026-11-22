@@ -2475,23 +2475,40 @@ etc.) instead of inventing a new approach:
   7): pebbles on ~1% of dry columns, twigs on ~6% of forest columns.
   `pebbles_lie_about_and_twigs_lie_under_trees` goes red if twigs ignore
   the trees.
-- **A pebble on a river, lake or sea bed lives in what is otherwise a water
-  cell, and three systems each had to be told.** One block per cell means
-  the cell holds the pebble *instead of* water, so:
-  - **The fluid sim** treated a pebble as `replaceable` and would have
-    overwritten it the first time any nearby edit recomputed that cell.
-    `world::fluid_can_enter` (air, or replaceable and not a floor block)
-    replaces both places that asked, including the "is there open space
-    below" check - without that one, a waterfall landing on a pebble
-    neither fell nor spread. Water now flows around pebbles, on land too.
-  - **The mesher** drew a wall of the surrounding water's faces around the
-    pebble's cell. A floor block with the same fluid directly above it now
-    counts as that fluid when deciding what to cull.
-  - **Swimming, floating items and breath** all asked "is this cell a fluid
-    block". `ChunkMap::is_wet` (a fluid, or a floor block with fluid above)
-    is the one definition they share.
-  Bed pebbles need at least two blocks of water so the pebble is never the
-  top layer, which would leave a hole in the water's own surface. Measured
-  on seed 7: 1.9% of deep-water columns. Each of the three rules has a test
-  that goes red without it. Lighting needed nothing: the pebble is clear to
-  light in both the generator's fill and `light.rs`, so they still agree.
+- **A block that has to share a cell with water is two tags, not a special
+  case in every system that touches water.** Pebbles on river/lake/sea beds
+  first lived in a water cell *instead of* the water, and three systems
+  (fluid sim, mesher culling, swimming) each needed a patch to pretend the
+  cell was still wet - and the bed-pebble rule had to stay at two blocks deep
+  so one in the top layer wouldn't leave a hole in the surface. The fix was a
+  real second tag. `"waterloggable": true` makes the registry derive
+  `block@layer` variants (`pebble@water`, `pebble@ice`) whose
+  `BlockDef::layered` is `{block, layer}`, so the cell is one block id with
+  two tags and every per-id mechanism (saves by name, snapshots, edit log,
+  light `transmission`, floor-ness, drops via `of_block[variant] =
+  of_block[base]`) works untouched. What did have to change, each guarded by a
+  test that goes red without it:
+  - **The sim compares the fluid a cell holds, not its id.**
+    `Tables::fluid_kind` (water for both `water` and `pebble@water`),
+    `fluid_host(id, kind)` (what a cell becomes when the fluid fills it:
+    the variant, an overwrite, or nothing) and `Tables::dried` (what's left
+    when it dries: the bare pebble, not air). Anything that wrote
+    `id == cid` or `AIR` for "no fluid" was wrong for a two-tag cell.
+  - **Freezing is a table, not a pair of ids.** `try_freeze_cell` reads
+    `Tables::frozen[id]` (`water -> ice`, `pebble@water -> pebble@ice`, built
+    from `freezes_to`), so a new fluid or waterloggable block needs no code.
+  - **The mesher draws each half as its own part, against neighbours viewed
+    as that half.** The first attempt resolved a layered neighbour by the
+    *current cell's* side, so a plain water cell saw `pebble@water` as a
+    pebble and walled it in - the part view has to prefer whichever half is
+    the same block as the part being drawn (`part_at`), and only fall back to
+    the part's own side for unrelated neighbours.
+  - **Break leaves the layer** (`BlockRegistry::left_behind`), so mining a
+    waterlogged pebble leaves water and mining one frozen in ice leaves ice,
+    on all three paths that remove a block (Creative break, Survival mine,
+    unsupported pop). Placing it into water picks the variant instead of
+    displacing the fluid.
+  - Variants share the main block's atlas slots by *copying* them at
+    `compile` time - their derived texture name (`pebble@ice`) has no painter.
+  - `SAVE_FORMAT` 3 -> 4: an older build would read the variant names as
+    missing blocks and drop the pebbles on save.

@@ -53,6 +53,13 @@
 //!   controls how far the fluid spreads from a source before drying up (see
 //!   `world.rs`'s `FluidQueue`/`recompute_cell` for the spread sim and
 //!   `mesher.rs`'s `fluid_height` for the resulting slope).
+//! - `waterloggable: true` lets the block share its cell with a fluid (or
+//!   what a fluid freezes into). The registry derives `block@layer` variants
+//!   (`pebble@water`, `pebble@ice`) at load: real block ids whose
+//!   `BlockDef::layered` names the two tags (main block and layer) and which
+//!   otherwise inherit the main block. `freezes_to: "ice"` on a fluid names
+//!   what its exposed still sources freeze into, and makes that block a
+//!   layer too. See `world::fluid_host` and the README's Waterlogging section.
 //! - `breakable` is whether a player can mine this block at all, in either
 //!   game mode (default `true`; `blocks/bedrock.json` is the one built-in
 //!   `false`).
@@ -598,6 +605,17 @@ impl FaceTint {
     }
 }
 
+/// The two halves of a waterlogged (or frozen-in) cell: the block itself
+/// and the layer it's holding. Only ever set on the variants the registry
+/// derives (`pebble@water`), never in a block file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Layered {
+    /// The main block (`pebble`).
+    pub block: BlockId,
+    /// What fills the rest of the cell (`water`, or `ice` once frozen).
+    pub layer: BlockId,
+}
+
 #[derive(Clone)]
 pub struct BlockDef {
     /// Stable, no-spaces registry key (also what saves reference block
@@ -688,6 +706,14 @@ pub struct BlockDef {
     /// separate mechanism from `tinted` - defaults to no overlay on any
     /// face, which is every block except grass's sides.
     pub overlay: FaceTextures,
+    /// May hold a fluid (or the ice it freezes into) in the same cell as
+    /// itself. See the module docs' `waterloggable` section.
+    pub waterloggable: bool,
+    /// What this fluid becomes when it freezes (`water` -> `ice`). A block
+    /// named here is a "layer" every waterloggable block gets a variant for.
+    pub freezes_to: Option<String>,
+    /// `Some` on a derived `block@layer` variant only.
+    pub layered: Option<Layered>,
 }
 
 impl BlockDef {
@@ -740,6 +766,9 @@ impl Default for BlockDef {
             textures: FaceTextures::default(),
             tinted: FaceTint::default(),
             overlay: FaceTextures::default(),
+            waterloggable: false,
+            freezes_to: None,
+            layered: None,
         }
     }
 }
@@ -803,6 +832,9 @@ struct BlockFile {
     tinted: FaceTint,
     #[serde(default)]
     overlay: FaceTextures,
+    #[serde(default)]
+    waterloggable: bool,
+    freezes_to: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -857,6 +889,9 @@ impl BlockFile {
             textures: self.textures,
             tinted: self.tinted,
             overlay: self.overlay,
+            waterloggable: self.waterloggable,
+            freezes_to: self.freezes_to,
+            layered: None,
         }
     }
 }
@@ -920,6 +955,24 @@ pub struct Tables {
     /// rotating block's overlay (none exist yet) would always show its
     /// configured face regardless of physical orientation.
     pub overlay_tile: Vec<u16>,
+    /// A cell's main block: itself for an ordinary block, `pebble` for
+    /// `pebble@water`. See `BlockDef::layered`.
+    pub base_of: Vec<BlockId>,
+    /// A cell's layer: `AIR` for an ordinary block, `water` for
+    /// `pebble@water`.
+    pub layer_of: Vec<BlockId>,
+    /// Which fluid a cell holds: the block itself for plain water, the
+    /// layer for `pebble@water`, `AIR` for anything that holds none.
+    /// Everything the fluid sim compares is this, never the raw id.
+    pub fluid_kind: Vec<BlockId>,
+    /// What a fluid-holding cell becomes when it dries: `AIR` for plain
+    /// water, the bare block for `pebble@water`.
+    pub dried: Vec<BlockId>,
+    /// What a still fluid source in this cell freezes into (`AIR` = never):
+    /// `ice` for water, `pebble@ice` for `pebble@water`.
+    pub frozen: Vec<BlockId>,
+    /// `(block, layer)` -> the derived `block@layer` id.
+    pub variants: HashMap<(BlockId, BlockId), BlockId>,
     /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
     /// tile_size` at compile time) - one of `atlas::ALLOWED_TILE_SIZES`.
     pub tile_size: usize,
@@ -940,6 +993,8 @@ pub struct BlockTables(pub Arc<Tables>);
 pub struct BlockRegistry {
     pub defs: Vec<BlockDef>,
     by_name: HashMap<String, BlockId>,
+    /// `(block, layer)` -> `block@layer`, filled by `add_layered_variants`.
+    variants: HashMap<(BlockId, BlockId), BlockId>,
     compiled: bool,
 }
 
@@ -989,6 +1044,7 @@ impl BlockRegistry {
         let mut reg = Self {
             defs: vec![air],
             by_name: HashMap::from([("air".into(), 0)]),
+            variants: HashMap::new(),
             compiled: false,
         };
 
@@ -1021,7 +1077,92 @@ impl BlockRegistry {
             reg.register(file.into_def());
         }
 
+        reg.add_layered_variants();
         reg
+    }
+
+    /// Every block a cell can hold alongside a waterloggable block: each
+    /// fluid, plus whatever a fluid freezes into. Panics on a `freezes_to`
+    /// naming an unknown block - startup content.
+    fn layers(&self) -> Vec<BlockId> {
+        let mut layers = Vec::new();
+        for (id, def) in self.defs.iter().enumerate().skip(1) {
+            if def.layered.is_some() {
+                continue;
+            }
+            if def.fluid && !layers.contains(&(id as BlockId)) {
+                layers.push(id as BlockId);
+            }
+            if let Some(name) = &def.freezes_to {
+                let target = self
+                    .by_name(name)
+                    .unwrap_or_else(|_| panic!("block {:?}: freezes_to names unknown block {name:?}", def.id));
+                if !layers.contains(&target) {
+                    layers.push(target);
+                }
+            }
+        }
+        layers.sort_unstable();
+        layers
+    }
+
+    /// Derives `block@layer` for every waterloggable block and every layer
+    /// (`pebble@water`, `pebble@ice`). Each is a real block id with two
+    /// tags - `BlockDef::layered` names the main block and the layer - and
+    /// otherwise inherits the main block's data, so saves, snapshots, the
+    /// edit log and the lookup tables need no special case for a cell that
+    /// holds two things. Idempotent; runs at the end of `load_from_dir`, and
+    /// again from `compile` for a registry assembled by hand.
+    pub fn add_layered_variants(&mut self) {
+        let layers = self.layers();
+        let bases: Vec<BlockId> = (1..self.defs.len() as BlockId)
+            .filter(|&id| self.defs[id as usize].waterloggable && self.defs[id as usize].layered.is_none())
+            .collect();
+        for &block in &bases {
+            for &layer in &layers {
+                if self.variants.contains_key(&(block, layer)) {
+                    continue;
+                }
+                let (base, over) = (self.defs[block as usize].clone(), &self.defs[layer as usize]);
+                let rank = |t: Transparency| match t {
+                    Transparency::No => 2,
+                    Transparency::Partial => 1,
+                    Transparency::Full => 0,
+                };
+                let clear = |d: &BlockDef| if d.transparency == Transparency::No { [0; 3] } else { d.transmission.to_fixed() };
+                let (a, b) = (clear(&base), clear(over));
+                let through = [0, 1, 2].map(|c| (a[c] as u32 * b[c] as u32 / 255) as f32 / 255.0);
+                let variant = BlockDef {
+                    id: format!("{}@{}", base.id, over.id),
+                    item: false,
+                    layered: Some(Layered { block, layer }),
+                    waterloggable: false,
+                    freezes_to: None,
+                    solid: base.solid || over.solid,
+                    transparency: if rank(over.transparency) > rank(base.transparency) { over.transparency } else { base.transparency },
+                    fluid: over.fluid,
+                    flow_distance: over.flow_distance,
+                    replaceable: base.replaceable && over.replaceable,
+                    transmission: Transmission::PerChannel(through),
+                    ..base
+                };
+                let id = self.register(variant);
+                self.variants.insert((block, layer), id);
+            }
+        }
+    }
+
+    /// What's left in a cell when its main block is removed: the layer it
+    /// was holding (`water` from `pebble@water`, `ice` from `pebble@ice`),
+    /// or `AIR` for an ordinary block.
+    pub fn left_behind(&self, id: BlockId) -> BlockId {
+        self.def(id).layered.map_or(AIR, |l| l.layer)
+    }
+
+    /// The `block@layer` id, if `block` is waterloggable and `layer` is a
+    /// fluid or something one freezes into.
+    pub fn variant(&self, block: BlockId, layer: BlockId) -> Option<BlockId> {
+        self.variants.get(&(block, layer)).copied()
     }
 
     pub fn register(&mut self, def: BlockDef) -> BlockId {
@@ -1064,6 +1205,7 @@ impl BlockRegistry {
         self.defs
             .iter()
             .skip(1) // AIR has no texture
+            .filter(|def| def.layered.is_none()) // a variant shows its main block's textures
             .flat_map(|def| (0..6).flat_map(|face| [Some(def.texture_name(face)), def.overlay_name(face)]))
             .flatten()
     }
@@ -1080,6 +1222,7 @@ impl BlockRegistry {
         self.defs
             .iter()
             .skip(1)
+            .filter(|def| def.layered.is_none())
             .flat_map(|def| {
                 (0..6).flat_map(|face| {
                     let direct = def.tinted.tinted(face).then(|| def.texture_name(face));
@@ -1095,6 +1238,7 @@ impl BlockRegistry {
     /// (`atlas::AtlasData::tile_size`), used to derive the UV inset that
     /// keeps neighbouring tiles from bleeding into each other.
     pub fn compile(&mut self, atlas_index: &HashMap<String, u16>, tile_size: usize) -> Arc<Tables> {
+        self.add_layered_variants();
         let n = self.defs.len();
         let uv_tile = 1.0 / crate::config::ATLAS_TILES as f32;
         let uv_pad = 0.5 / (crate::config::ATLAS_TILES * tile_size) as f32;
@@ -1115,6 +1259,12 @@ impl BlockRegistry {
             tinted: vec![false; n * 6],
             has_overlay: vec![false; n * 6],
             overlay_tile: vec![0; n * 6],
+            base_of: (0..n as BlockId).collect(),
+            layer_of: vec![AIR; n],
+            fluid_kind: vec![AIR; n],
+            dried: vec![AIR; n],
+            frozen: vec![AIR; n],
+            variants: self.variants.clone(),
             tile_size,
             uv_pad,
             uv_span: uv_tile - 2.0 * uv_pad,
@@ -1129,11 +1279,31 @@ impl BlockRegistry {
             tables.rotates[id] = def.rotation != Rotation::None;
             tables.floor[id] = def.shape == Shape::Floor;
             tables.light[id] = def.light.emission();
+            if let Some(l) = def.layered {
+                tables.base_of[id] = l.block;
+                tables.layer_of[id] = l.layer;
+            }
+            if def.fluid {
+                tables.fluid_kind[id] = def.layered.map_or(id as BlockId, |l| l.layer);
+                tables.dried[id] = def.layered.map_or(AIR, |l| l.block);
+            }
             // An opaque block stops light whatever its `transmission` says,
             // so that's resolved once here rather than re-checked at every
             // propagation step.
             tables.transmission[id] =
                 if tables.opaque[id] { [0; 3] } else { def.transmission.to_fixed() };
+            if let Some(l) = def.layered {
+                // A variant looks like its main block (the layer is drawn
+                // as its own part by the mesher), so it shares every slot.
+                for face in 0..6 {
+                    let (from, to) = (l.block as usize * 6 + face, id * 6 + face);
+                    tables.tiles[to] = tables.tiles[from];
+                    tables.tinted[to] = tables.tinted[from];
+                    tables.has_overlay[to] = tables.has_overlay[from];
+                    tables.overlay_tile[to] = tables.overlay_tile[from];
+                }
+                continue;
+            }
             for face in 0..6 {
                 let tex = def.texture_name(face);
                 let tile = atlas_index.get(&tex).unwrap_or_else(|| {
@@ -1147,6 +1317,19 @@ impl BlockRegistry {
                     });
                     tables.has_overlay[id * 6 + face] = true;
                     tables.overlay_tile[id * 6 + face] = *overlay;
+                }
+            }
+        }
+        // What freezes into what: plain water -> ice, and the variants
+        // follow (`pebble@water` -> `pebble@ice`).
+        for (id, def) in self.defs.iter().enumerate().skip(1) {
+            let Some(target) = def.freezes_to.as_deref().and_then(|n| self.by_name.get(n).copied()) else { continue };
+            tables.frozen[id] = target;
+            for (&(block, layer), &variant) in &self.variants {
+                if layer == id as BlockId {
+                    if let Some(&frozen) = self.variants.get(&(block, target)) {
+                        tables.frozen[variant as usize] = frozen;
+                    }
                 }
             }
         }
@@ -1520,5 +1703,91 @@ mod tests {
         let stone = reg.id("stone");
         assert!(tables.rotates[log as usize]);
         assert!(!tables.rotates[stone as usize]);
+    }
+
+    fn compiled() -> (BlockRegistry, Arc<Tables>) {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        (reg, tables)
+    }
+
+    #[test]
+    fn a_waterloggable_block_gets_a_variant_per_fluid_and_per_thing_one_freezes_into() {
+        let reg = BlockRegistry::with_defaults();
+        let (pebble, water, ice) = (reg.id("pebble"), reg.id("water"), reg.id("ice"));
+        for layer in [water, ice] {
+            let v = reg.variant(pebble, layer).expect("missing variant");
+            assert_eq!(reg.def(v).layered, Some(Layered { block: pebble, layer }));
+            assert_eq!(reg.def(v).id, format!("pebble@{}", reg.def(layer).id));
+            assert_eq!(reg.by_name(&reg.def(v).id).ok(), Some(v), "saves look variants up by name");
+        }
+        // Stone isn't waterloggable, so it gets none; neither does a variant.
+        assert_eq!(reg.variant(reg.id("stone"), water), None);
+        assert!(reg.by_name("pebble@water@water").is_err());
+        assert!(reg.by_name("stone@water").is_err());
+    }
+
+    #[test]
+    fn a_variant_carries_two_tags_and_inherits_the_main_blocks_data() {
+        let (reg, tables) = compiled();
+        let (pebble, water, ice) = (reg.id("pebble"), reg.id("water"), reg.id("ice"));
+        let wet = reg.variant(pebble, water).unwrap() as usize;
+        let frozen = reg.variant(pebble, ice).unwrap() as usize;
+        assert_eq!((tables.base_of[wet], tables.layer_of[wet]), (pebble, water));
+        assert_eq!((tables.base_of[frozen], tables.layer_of[frozen]), (pebble, ice));
+        // Ordinary blocks are their own base with no layer.
+        let stone = reg.id("stone") as usize;
+        assert_eq!((tables.base_of[stone], tables.layer_of[stone]), (stone as BlockId, AIR));
+        // The pebble's own look, drops and mining.
+        for f in 0..6 {
+            assert_eq!(tables.tiles[wet * 6 + f], tables.tiles[pebble as usize * 6 + f]);
+        }
+        assert!(!reg.def(wet as BlockId).item, "only the bare pebble is an item");
+        assert_eq!(reg.def(wet as BlockId).drops, reg.def(pebble).drops);
+        assert_eq!(reg.def(wet as BlockId).hardness, reg.def(pebble).hardness);
+        assert!(tables.floor[wet], "still a floor block, so it still needs ground");
+        assert_eq!(reg.left_behind(wet as BlockId), water, "mining it leaves the water");
+        assert_eq!(reg.left_behind(frozen as BlockId), ice);
+        assert_eq!(reg.left_behind(pebble), AIR);
+    }
+
+    #[test]
+    fn a_waterlogged_block_is_a_fluid_cell_and_a_frozen_one_is_not() {
+        let (reg, tables) = compiled();
+        let (pebble, water, ice) = (reg.id("pebble"), reg.id("water"), reg.id("ice"));
+        let wet = reg.variant(pebble, water).unwrap() as usize;
+        let frozen = reg.variant(pebble, ice).unwrap() as usize;
+        assert!(tables.fluid[wet] && !tables.fluid[frozen] && !tables.fluid[pebble as usize]);
+        assert_eq!(tables.fluid_kind[wet], water, "it holds water");
+        assert_eq!(tables.fluid_kind[water as usize], water);
+        assert_eq!(tables.fluid_kind[frozen], AIR);
+        assert_eq!(tables.dried[wet], pebble, "drying leaves the pebble");
+        assert_eq!(tables.dried[water as usize], AIR);
+        assert_eq!(tables.flow_distance[wet], tables.flow_distance[water as usize]);
+        assert_eq!(tables.frozen[water as usize], ice);
+        assert_eq!(tables.frozen[wet], frozen as BlockId, "freezing keeps the pebble");
+        assert_eq!(tables.frozen[pebble as usize], AIR);
+    }
+
+    #[test]
+    fn a_waterlogged_blocks_light_passes_through_both_halves() {
+        let (reg, tables) = compiled();
+        let (pebble, water) = (reg.id("pebble"), reg.id("water"));
+        let wet = reg.variant(pebble, water).unwrap() as usize;
+        let (a, b) = (tables.transmission[pebble as usize], tables.transmission[water as usize]);
+        for c in 0..3 {
+            let expect = (a[c] as u32 * b[c] as u32 / 255) as u8;
+            assert!(tables.transmission[wet][c].abs_diff(expect) <= 1, "channel {c}");
+        }
+        assert!(tables.transmission[wet][2] > tables.transmission[wet][0], "it still tints toward blue like water");
+    }
+
+    #[test]
+    #[should_panic(expected = "freezes_to names unknown block")]
+    fn a_freezes_to_naming_an_unknown_block_fails_at_startup() {
+        let mut reg = BlockRegistry::with_defaults();
+        reg.register(BlockDef { id: "lava".into(), fluid: true, freezes_to: Some("obsidiann".into()), ..BlockDef::default() });
+        reg.add_layered_variants();
     }
 }

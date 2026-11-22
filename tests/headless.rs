@@ -418,6 +418,56 @@ fn water_restores_exactly_after_leaving_and_reentering_a_world() {
     );
 }
 
+/// A pebble the water reaches is waterlogged (`pebble@water`): one cell, two
+/// tags. It's saved by that variant's name like any other block, so a reload
+/// brings the same waterlogged pebble back - and it never turns into plain
+/// water or a plain pebble along the way.
+#[test]
+fn a_waterlogged_pebble_survives_leaving_and_reentering_a_world() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+
+    let (water, pebble, wet) = {
+        let reg = app.world().resource::<BlockRegistry>();
+        (reg.id("water"), reg.id("pebble"), reg.id("pebble@water"))
+    };
+    let edit = |app: &mut App, pos: IVec3, id: u16| {
+        let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(pos, id);
+        if let Some(prev) = prev {
+            app.world_mut().send_event(BlockSetEvent { pos, id, prev, axis: AXIS_Y });
+        }
+    };
+    let surface = {
+        let map = app.world().resource::<ChunkMap>();
+        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().clone();
+        map.surface_y(&tables.0, 8, 8).unwrap()
+    };
+    let y = surface + 1;
+    let (src, at) = (IVec3::new(8, y, 8), IVec3::new(9, y, 8));
+    for dz in -1..=1 {
+        for dx in -1..=2 {
+            edit(&mut app, IVec3::new(8 + dx, y, 8 + dz), 0);
+        }
+    }
+    edit(&mut app, at, pebble);
+    edit(&mut app, src, water);
+
+    assert!(
+        run_until(&mut app, |app| app.world().resource::<ChunkMap>().get_block(at) == wet, 500),
+        "the pebble was never waterlogged by the water beside it"
+    );
+
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update(); // exit_world writes the save
+
+    let mut app2 = reload_app(&temp);
+    assert!(
+        run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(at) == wet, 200),
+        "the waterlogged pebble didn't come back as a waterlogged pebble"
+    );
+}
+
 /// `EditLog` used to reset to empty on every `enter_world` and `write_save`
 /// only ever serialized *it* - so an edit whose chunk the player didn't
 /// happen to revisit this session (its data lived only in `PendingEdits`,

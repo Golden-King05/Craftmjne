@@ -380,12 +380,42 @@ pub fn mesh_chunk(
         for x in 0..CHUNK_SIZE {
             let mut idx = padded_index(x, 0, z);
             for y in 0..WORLD_HEIGHT {
-                let id = padded.blocks[idx];
+                let raw = padded.blocks[idx];
                 idx += 1; // SY == 1: next Y
-                if id == 0 {
+                if raw == 0 {
                     continue;
                 }
                 let cell = idx - 1;
+
+                // A cell holding two things (`pebble@water`) is drawn as
+                // each of them in turn - the main block, then the layer -
+                // each against neighbours seen as *its* half, so the water
+                // around a waterlogged pebble is just more water to cull
+                // against, and the pebble just a pebble.
+                let layer_id = tables.layer_of[raw as usize];
+                let parts: &[(BlockId, bool)] =
+                    if layer_id == 0 { &[(raw, false)] } else { &[(tables.base_of[raw as usize], false), (layer_id, true)] };
+                for &(id, is_layer) in parts {
+                // What a cell is, as far as this part is concerned: a
+                // two-part neighbour counts as whichever of its halves is
+                // the same block as this part (so water sees `pebble@water`
+                // as water, a pebble sees it as a pebble), and otherwise
+                // as the half on this part's own side.
+                let part_at = |i: usize| -> BlockId {
+                    let r = padded.blocks[i];
+                    let l = tables.layer_of[r as usize];
+                    if l == 0 {
+                        return r;
+                    }
+                    let b = tables.base_of[r as usize];
+                    if l == id {
+                        l
+                    } else if b == id || !is_layer {
+                        b
+                    } else {
+                        l
+                    }
+                };
 
                 if tables.floor[id as usize] {
                     push_floor(&mut solid, padded, tables, [x as f32, y as f32, z as f32], cell, id);
@@ -406,7 +436,7 @@ pub fn mesh_chunk(
                 // Covered by more of the same fluid above -> render full
                 // height (it's not this stack's exposed surface).
                 let cap = if is_fluid {
-                    if padded.blocks[cell + SY as usize] == id {
+                    if part_at(cell + SY as usize) == id {
                         1.0
                     } else {
                         fluid_height(level, flow_dist)
@@ -417,17 +447,7 @@ pub fn mesh_chunk(
 
                 for (f, face) in FACES.iter().enumerate() {
                     let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
-                    let mut nid = padded.blocks[n_cell];
-                    // A floor block (a pebble) on a bed with fluid above it
-                    // is, to the water around it, one more cell of that
-                    // water - otherwise every pebble would be walled in by
-                    // a hole in the water's own surface faces.
-                    if tables.floor[nid as usize] {
-                        let over = padded.blocks[n_cell + SY as usize];
-                        if tables.fluid[over as usize] {
-                            nid = over;
-                        }
-                    }
+                    let nid = part_at(n_cell);
                     let is_side = matches!(f, 0 | 1 | 4 | 5);
                     let mut bottom = 0.0f32;
                     let mut stepped = false;
@@ -443,7 +463,7 @@ pub fn mesh_chunk(
                                 // outright (a flat cull would leave a visible
                                 // gap between two different-height cells).
                                 let n_level = padded.fluid[n_cell];
-                                let n_cap = if padded.blocks[n_cell + SY as usize] == id {
+                                let n_cap = if part_at(n_cell + SY as usize) == id {
                                     1.0
                                 } else {
                                     fluid_height(n_level, flow_dist)
@@ -481,7 +501,7 @@ pub fn mesh_chunk(
                         && level == FLUID_FALLING
                         && !stepped
                         && FALLING_WATER_STYLE == FallingWaterStyle::Sloped
-                        && padded.blocks[cell - SY as usize] != id
+                        && part_at(cell - SY as usize) != id
                     {
                         bottom = 1.0 / BASE_TILE_SIZE as f32;
                     }
@@ -618,7 +638,7 @@ pub fn mesh_chunk(
                         push_quad(overlay_tile, overlay_tint, bias - OVERLAY_DECAL_BIAS);
                     }
                 }
-
+                }
             }
         }
     }
@@ -726,24 +746,49 @@ mod tests {
     /// Whether the water cell at (4, 11, 5) draws its +x face (the plane at
     /// x = 5, biased inward when it faces a different non-opaque block) into
     /// the pebble cell next to it.
-    fn draws_wall_toward_pebble(water_above_pebble: bool) -> bool {
+    fn draws_wall_toward_pebble(waterlogged: bool) -> bool {
         let (reg, tables) = tables();
         let (stone, pebble, water) = (reg.id("stone"), reg.id("pebble"), reg.id("water"));
         let mut padded = lit_padded();
         padded.blocks[padded_index(5, 10, 5)] = stone;
-        padded.blocks[padded_index(5, 11, 5)] = pebble;
+        padded.blocks[padded_index(5, 11, 5)] = if waterlogged { reg.id("pebble@water") } else { pebble };
         padded.blocks[padded_index(4, 11, 5)] = water;
-        if water_above_pebble {
-            padded.blocks[padded_index(5, 12, 5)] = water;
-        }
         let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         mesh.water.positions.iter().any(|p| (p[0] - (5.0 - COINCIDENT_FACE_BIAS)).abs() < 1e-6)
     }
 
     #[test]
-    fn water_has_no_wall_against_a_pebble_that_is_under_water() {
+    fn water_has_no_wall_against_a_waterlogged_pebble() {
         assert!(draws_wall_toward_pebble(false), "a pebble on dry ground is a real edge of the water");
-        assert!(!draws_wall_toward_pebble(true), "a pebble under water is walled in by a hole in the water");
+        assert!(!draws_wall_toward_pebble(true), "a waterlogged pebble is more water, not an edge of it");
+    }
+
+    #[test]
+    fn a_waterlogged_pebble_draws_both_its_pebble_and_its_water() {
+        let (reg, tables) = tables();
+        let (stone, wet) = (reg.id("stone"), reg.id("pebble@water"));
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone;
+        padded.blocks[padded_index(5, 11, 5)] = wet;
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        // The pebble's low quad lands in the solid bucket, on top of the
+        // stone's own six faces...
+        assert_eq!(mesh.solid.positions.len(), 6 * 4 + 4, "the stone's faces and the pebble's quad");
+        assert!(mesh.solid.positions.iter().any(|p| (p[1] - (11.0 + FLOOR_HEIGHT)).abs() < 1e-6));
+        // ...and the water around it is drawn into the blended bucket as a
+        // cell of water: five exposed faces (the stone hides the bottom).
+        assert_eq!(mesh.water.positions.len(), 5 * 4, "the water layer's faces");
+    }
+
+    #[test]
+    fn a_pebble_with_no_water_draws_no_water() {
+        let (reg, tables) = tables();
+        let (stone, pebble) = (reg.id("stone"), reg.id("pebble"));
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone;
+        padded.blocks[padded_index(5, 11, 5)] = pebble;
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        assert!(mesh.water.positions.is_empty());
     }
 
     #[test]

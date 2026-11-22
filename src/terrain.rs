@@ -557,6 +557,8 @@ struct TerrainIds {
     salt: BlockId,
     pebble: BlockId,
     twig: BlockId,
+    /// A pebble sitting in a water cell: one block, tagged as both.
+    pebble_water: BlockId,
 }
 
 pub struct TerrainGenerator {
@@ -632,6 +634,7 @@ impl TerrainGenerator {
                 mud: reg.id("mud"),
                 salt: reg.id("salt"),
                 pebble: reg.id("pebble"),
+                pebble_water: reg.id("pebble@water"),
                 twig: reg.id("twig"),
             },
             terrain: SimplexNoise::new(seed),
@@ -1696,16 +1699,17 @@ impl TerrainGenerator {
                 }
                 let base = block_index(x as usize, 0, z as usize);
                 let (ground, above) = (blocks[base + h as usize], base + h as usize + 1);
-                // On a river, lake or sea bed: at least two blocks of water,
-                // so the pebble's cell is wholly under the surface (the
-                // water's own faces, swimming and the fluid sim all treat
-                // it as water - see `ChunkMap::is_wet`, `fluid_can_enter`).
+                // On a river, lake or sea bed: the pebble waterlogs its cell
+                // (`pebble@water`, a pebble that also holds the water that
+                // was there), so it can sit under any depth - even the top
+                // layer - without a hole in the water. Only still sources:
+                // a flowing level belongs to the water's own surface.
                 if blocks[above] == ids.water {
-                    if blocks[above + 1] == ids.water
+                    if fluid[above] == FLUID_SOURCE
                         && [ids.sand, ids.gravel, ids.dirt, ids.mud, ids.stone].contains(&ground)
                         && hash2(wx, wz, seed ^ 0x2b7d) < BED_PEBBLE_CHANCE
                     {
-                        blocks[above] = ids.pebble;
+                        blocks[above] = ids.pebble_water;
                     }
                     continue;
                 }
@@ -3329,8 +3333,8 @@ mod tests {
     fn pebbles_also_lie_on_river_lake_and_sea_beds() {
         let reg = BlockRegistry::with_defaults();
         let gen = TerrainGenerator::new(7, &reg);
-        let (pebble, water) = (reg.id("pebble"), reg.id("water"));
-        let (mut deep, mut bed_pebbles, mut shallow_pebbles) = (0usize, 0usize, 0usize);
+        let (pebble, water) = (reg.id("pebble@water"), reg.id("water"));
+        let (mut deep, mut bed_pebbles, mut top_pebbles) = (0usize, 0usize, 0usize);
         for i in 0..16 {
             for j in 0..16 {
                 let chunk = gen.generate(i * 7 - 60, j * 7 - 60);
@@ -3342,15 +3346,18 @@ mod tests {
                         }
                         let at = |dy: usize| chunk.blocks[block_index(x, ground + dy, z)];
                         if at(1) == pebble {
-                            // Always whole-cell under water, on something solid.
+                            // Always on something solid, holding still water, and
+                            // a pebble in the top layer is fine - it carries its
+                            // own water, so the surface has no hole.
                             assert!(reg.def(chunk.blocks[block_index(x, ground, z)]).solid);
-                            assert_eq!(at(2), water, "a pebble on a bed has water directly above it");
+                            assert_eq!(chunk.fluid[block_index(x, ground + 1, z)], FLUID_SOURCE);
                             bed_pebbles += 1;
+                            if at(2) != water && at(2) != pebble {
+                                top_pebbles += 1;
+                            }
                         }
-                        if at(1) == water && at(2) == water {
+                        if at(1) == water {
                             deep += 1;
-                        } else if at(1) == pebble && at(2) != water {
-                            shallow_pebbles += 1;
                         }
                     }
                 }
@@ -3358,9 +3365,10 @@ mod tests {
         }
         let rate = bed_pebbles as f64 / (deep + bed_pebbles).max(1) as f64;
         eprintln!("bed pebbles {bed_pebbles} of {} deep-water columns ({:.2}%)", deep + bed_pebbles, rate * 100.0);
+        eprintln!("{top_pebbles} of them in the top layer of water");
         assert!(bed_pebbles > 50, "only {bed_pebbles} pebbles under water");
+        assert!(top_pebbles > 0, "no pebble ever sat in the top layer: the old 2-deep limit is still in effect");
         assert!((0.008..0.04).contains(&rate), "pebbles on {:.2}% of deep beds", rate * 100.0);
-        assert_eq!(shallow_pebbles, 0, "a pebble in the top layer of water would leave a hole in its surface");
     }
 
     #[test]

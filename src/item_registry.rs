@@ -141,6 +141,13 @@ impl ItemRegistry {
             });
             reg.of_block[block] = id;
         }
+        // A `pebble@water` is still a pebble: breaking it drops (and
+        // picking it gives) the pebble's item.
+        for (block, def) in blocks.defs.iter().enumerate() {
+            if let Some(l) = def.layered {
+                reg.of_block[block] = reg.of_block[l.block as usize];
+            }
+        }
         for def in plain {
             assert!(!def.id.contains(char::is_whitespace), "item id {:?} must not contain spaces", def.id);
             assert!(blocks.by_name(&def.id).is_err(), "item {:?} has the same id as a block", def.id);
@@ -250,6 +257,9 @@ mod tests {
     fn every_block_with_an_item_gets_one_under_the_same_name() {
         let (blocks, items) = shipped();
         for (block, def) in blocks.defs.iter().enumerate().skip(1) {
+            if def.layered.is_some() {
+                continue; // `pebble@water` shares the pebble's item; covered below
+            }
             match items.of_block(block as BlockId) {
                 Some(item) => {
                     assert!(def.item);

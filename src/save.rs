@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 3;
+pub const SAVE_FORMAT: u32 = 4;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +105,9 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 2 -> 3 (plain items like sticks, the item on the cursor, and
         // discovered recipes) is the same: defaults only, bumped because a
         // format-2 build doesn't know plain items and would empty those slots.
+        // Step 3 -> 4 (waterlogged blocks, saved by the name of their
+        // `pebble@water` variant) is defaults only too: a format-3 build
+        // doesn't know those names and would read them as missing blocks.
         #[allow(clippy::match_single_binding, clippy::single_match)]
         match step {
             _ => {}
