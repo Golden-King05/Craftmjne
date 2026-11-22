@@ -408,6 +408,13 @@ fn refresh_item_meshes(
             // A block item is a little cube of the block; a plain item (a
             // stick) is its flat picture, spinning like a card.
             let bucket = match registry.block_of(item.stack.id) {
+                // Something that lies flat (a pebble) drops as its picture.
+                Some(block) if tables.0.floor[block as usize] => crate::mesher::sprite_mesh(
+                    &tables.0,
+                    SPRITE_SIZE,
+                    light,
+                    tables.0.tiles[block as usize * 6 + 2],
+                ),
                 Some(block) => {
                     crate::mesher::cube_mesh(&tables.0, ITEM_SIZE, light, |f| tables.0.tiles[block as usize * 6 + f])
                 }

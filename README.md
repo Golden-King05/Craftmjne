@@ -154,6 +154,16 @@ when you walk into them: topping up matching stacks first, then empty
 hotbar slots, then storage. They vanish after five minutes, and are saved
 with the world. `Q` throws one of the selected item, `Ctrl+Q` the stack.
 
+### Pebbles and twigs
+
+The first things to pick up. **Pebbles** lie scattered on dry, open ground
+(about one column in a hundred), and **twigs** lie under trees, within two
+blocks of a trunk (about two per tree), on top of the ones leaves drop.
+Both are blocks lying flat on the ground (`"shape": "floor"`): no collision,
+instant to pick up, and placeable again, but only on top of something solid.
+Mine the block under one and it drops as an item. They're the first step
+toward the first tools.
+
 ### Health
 
 `health.rs`. Ten hearts (20 points) and ten bubbles of breath above the
@@ -231,7 +241,7 @@ The first recipes, all by hand:
 | Makes | From |
 |---|---|
 | 4 Planks | 1 Log |
-| 1 Stick | 1 Twig (leaves drop these) |
+| 1 Stick | 1 Twig (found under trees; leaves drop them too) |
 | 5 Sticks | 2 Planks |
 | Crafting Bench | 3 Planks + 4 Sticks |
 
@@ -889,6 +899,7 @@ by) is required. Everything else defaults sanely:
 | `solid` | `true` (`false` if `fluid`) | collides with entities |
 | `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |
 | `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
+| `shape` | `"cube"` | `"floor"` lies flat on the block below (pebbles, twigs): only its top texture is drawn, a hair above the ground. Defaults to no collision, see-through, replaceable, a flat icon, and needs something solid under it |
 | `breakable` | `true` | whether it can be mined at all, in either mode; bedrock sets this `false` |
 | `hardness` | `1.0` | how long it takes to mine in Survival: `hardness` x 1.5 seconds by hand. `0` is instant (torch), dirt `0.5`, stone `1.5` |
 | `drops` | `true` | what mining it in Survival gives: `true` itself, `false` nothing, or a block id (`"dirt"` for grass). An unknown id fails at startup |

@@ -328,6 +328,35 @@ fn vertex_light(padded: &PaddedChunk, tables: &Tables, cells: [usize; 4]) -> ([f
     (block_sum.map(|v| v as f32 * inv), sky_sum.map(|v| v as f32 * inv))
 }
 
+/// How far above the block below a floor-shaped block (`blocks::Shape::
+/// Floor`) is drawn - enough to never z-fight with the ground's own top
+/// face, too little to see a gap.
+const FLOOR_HEIGHT: f32 = 1.0 / 32.0;
+
+/// A floor-shaped block (a pebble, a twig): its top texture as one flat
+/// quad just above the ground, lit by its own cell's light. The chunk
+/// material draws both sides, so it's visible from below too.
+fn push_floor(bucket: &mut MeshBucket, padded: &PaddedChunk, tables: &Tables, at: [f32; 3], cell: usize, id: BlockId) {
+    let (block_rgb, sky_rgb) = vertex_light(padded, tables, [cell; 4]);
+    let tile = tables.tiles[id as usize * 6 + 2] as usize;
+    let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
+    let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
+    let vi = bucket.positions.len() as u32;
+    for c in &FACES[2].corners {
+        bucket.positions.push([at[0] + c.pos[0], at[1] + FLOOR_HEIGHT, at[2] + c.pos[2]]);
+        bucket.uvs.push([tu + tables.uv_pad + c.uv[0] * tables.uv_span, tv + tables.uv_pad + (1.0 - c.uv[1]) * tables.uv_span]);
+        bucket.colors.push([
+            block_rgb[0].max(AMBIENT_LIGHT),
+            block_rgb[1].max(AMBIENT_LIGHT),
+            block_rgb[2].max(AMBIENT_LIGHT),
+            sky_rgb[0],
+        ]);
+        bucket.sky_gb.push([sky_rgb[1], sky_rgb[2]]);
+        bucket.tint.push([1.0; 3]);
+    }
+    bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
+}
+
 /// `chunk_origin` is this chunk's world-space `(x, z)` (block coordinates
 /// of its `(0, 0)` corner) - the only reason `biome::grass_tint` needs it
 /// is to convert the mesher's chunk-local `x`/`z` loop variables into the
@@ -357,6 +386,11 @@ pub fn mesh_chunk(
                     continue;
                 }
                 let cell = idx - 1;
+
+                if tables.floor[id as usize] {
+                    push_floor(&mut solid, padded, tables, [x as f32, y as f32, z as f32], cell, id);
+                    continue;
+                }
 
                 // Bucket routing follows the rendering mode (`transparency:
                 // full` -> alpha-blended); the lowered top surface follows
@@ -661,6 +695,23 @@ mod tests {
     use super::*;
     use crate::blocks::BlockRegistry;
     use crate::config::block_index;
+
+    #[test]
+    fn a_floor_block_is_one_low_quad_on_the_ground_and_hides_nothing() {
+        let (reg, tables) = tables();
+        let stone = reg.id("stone");
+        let pebble = reg.id("pebble");
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone;
+        padded.blocks[padded_index(5, 11, 5)] = pebble;
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        let pebble_quad: Vec<_> = mesh.solid.positions.iter().filter(|p| (p[1] - (11.0 + FLOOR_HEIGHT)).abs() < 1e-6).collect();
+        assert_eq!(pebble_quad.len(), 4, "one quad just above the stone");
+        assert!(pebble_quad.iter().all(|p| (5.0..=6.0).contains(&p[0]) && (5.0..=6.0).contains(&p[2])));
+        // The stone keeps all six faces, its top included: a pebble doesn't
+        // cover it.
+        assert_eq!(mesh.solid.positions.len(), 6 * 4 + 4, "the stone's six faces and the pebble's one");
+    }
 
     #[test]
     fn a_tints_brightness_rides_in_the_light_because_the_shader_normalizes_it() {

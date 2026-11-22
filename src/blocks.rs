@@ -105,6 +105,10 @@
 //!   the placed block instance, not the definition, so two logs placed
 //!   differently render differently even though they share one `BlockDef` -
 //!   see `Chunk::axis` in `world.rs`.
+//! - `shape` is `"cube"` (the default) or `"floor"`: lying flat on the
+//!   block below, like a pebble or a twig (see [`Shape`]). A floor block
+//!   defaults to `solid: false`, `replaceable: true`, `transparent:
+//!   "partial"` and `item_model: "face"`, and draws only its `top` texture.
 //! - `light` makes this block a light source (see [`LightSpec`]). `level` is
 //!   its brightness in light levels (`0`, the default, emits nothing; `16` is
 //!   the maximum and reaches 15 blocks); `color` is a 0-255 RGB hue, white by
@@ -317,6 +321,22 @@ pub enum Rotation {
     None,
     /// Minecraft log behavior - see the module docs' `rotation` entry.
     Log,
+}
+
+/// A block's shape in the world.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Shape {
+    /// A full block - nearly everything.
+    #[default]
+    Cube,
+    /// Lying flat on the block below: a single picture of its top texture
+    /// a hair above the ground (pebbles, twigs). Defaults to no collision,
+    /// see-through, replaceable (placing a block there just takes its
+    /// place), a flat inventory icon, and it can only be placed on top of
+    /// something solid - and it breaks off, dropping itself, if that
+    /// support is removed (`interact::pop_unsupported`).
+    Floor,
 }
 
 /// How much light a block emits, and what color. Blocks that aren't light
@@ -646,6 +666,8 @@ pub struct BlockDef {
     /// Whether a placed instance can face different directions. See
     /// [`Rotation`].
     pub rotation: Rotation,
+    /// Its shape in the world. See [`Shape`].
+    pub shape: Shape,
     /// How much light this block emits, and in what color. See [`LightSpec`];
     /// defaults to emitting nothing.
     pub light: LightSpec,
@@ -711,6 +733,7 @@ impl Default for BlockDef {
             custom_item_model: None,
             block_model: None,
             rotation: Rotation::default(),
+            shape: Shape::default(),
             light: LightSpec::default(),
             transmission: Transmission::default(),
             texture_scheme: TextureScheme::default(),
@@ -743,8 +766,7 @@ pub(crate) fn title_case(id: &str) -> String {
 struct BlockFile {
     id: String,
     name: Option<String>,
-    #[serde(default)]
-    transparent: Transparency,
+    transparent: Option<Transparency>,
     #[serde(default)]
     fluid: bool,
     #[serde(default)]
@@ -762,12 +784,13 @@ struct BlockFile {
     max_stack: u32,
     #[serde(default = "default_true")]
     item: bool,
-    #[serde(default)]
-    item_model: ItemModel,
+    item_model: Option<ItemModel>,
     custom_item_model: Option<String>,
     block_model: Option<String>,
     #[serde(default)]
     rotation: Rotation,
+    #[serde(default)]
+    shape: Shape,
     #[serde(default)]
     light: LightSpec,
     #[serde(default)]
@@ -799,16 +822,21 @@ impl BlockFile {
         // A fluid defaults to water-like physics (not solid, can't be
         // targeted, placing into it just replaces it) unless the file
         // explicitly overrides one of those fields.
+        // A floor shape (a pebble on the ground) defaults the same way,
+        // except that it can be targeted, so it can be picked up.
         let (solid, selectable, replaceable) = if self.fluid {
             (false, false, true)
+        } else if self.shape == Shape::Floor {
+            (false, true, true)
         } else {
             (true, true, false)
         };
+        let floor = self.shape == Shape::Floor;
         BlockDef {
             id: self.id.clone(),
             name: self.name.unwrap_or_else(|| title_case(&self.id)),
             solid: self.solid.unwrap_or(solid),
-            transparency: self.transparent,
+            transparency: self.transparent.unwrap_or(if floor { Transparency::Partial } else { Transparency::No }),
             fluid: self.fluid,
             flow_distance: self.flow_distance,
             selectable: self.selectable.unwrap_or(selectable),
@@ -818,10 +846,11 @@ impl BlockFile {
             drops: self.drops.into(),
             max_stack: self.max_stack,
             item: self.item,
-            item_model: self.item_model,
+            item_model: self.item_model.unwrap_or(if floor { ItemModel::Face } else { ItemModel::Default }),
             custom_item_model: self.custom_item_model,
             block_model: self.block_model,
             rotation: self.rotation,
+            shape: self.shape,
             light: self.light,
             transmission: self.transmission,
             texture_scheme: self.texture_scheme,
@@ -851,6 +880,9 @@ pub struct Tables {
     /// the mesher skip the axis lookup/remap entirely for the vast majority
     /// of blocks that never rotate.
     pub rotates: Vec<bool>,
+    /// Lies flat on the ground (`Shape::Floor`): the mesher draws only a
+    /// low top face.
+    pub floor: Vec<bool>,
     /// Per-channel light emission (`BlockDef::light`, resolved by
     /// `LightSpec::emission`), `0..=light::MAX_LIGHT` each. `[0; 3]` for
     /// everything that isn't a light source, which `light.rs` treats as
@@ -981,7 +1013,7 @@ impl BlockRegistry {
             if file.id.contains(char::is_whitespace) {
                 panic!("block file {path:?}: id {:?} must not contain spaces", file.id);
             }
-            if file.item_model == ItemModel::Custom && file.custom_item_model.is_none() {
+            if file.item_model == Some(ItemModel::Custom) && file.custom_item_model.is_none() {
                 panic!(
                     "block file {path:?}: item_model \"custom\" requires a custom_item_model path"
                 );
@@ -1074,6 +1106,7 @@ impl BlockRegistry {
             replaceable: vec![false; n],
             flow_distance: vec![0; n],
             rotates: vec![false; n],
+            floor: vec![false; n],
             light: vec![[0; 3]; n],
             // Air (id 0) is skipped by the loop below and must be clear, not
             // the `Default::default()` zero that would make it block light.
@@ -1094,6 +1127,7 @@ impl BlockRegistry {
             tables.replaceable[id] = def.replaceable;
             tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
             tables.rotates[id] = def.rotation != Rotation::None;
+            tables.floor[id] = def.shape == Shape::Floor;
             tables.light[id] = def.light.emission();
             // An opaque block stops light whatever its `transmission` says,
             // so that's resolved once here rather than re-checked at every
@@ -1422,7 +1456,7 @@ mod tests {
         // into_def, since into_def itself can't panic with file context).
         let file: BlockFile =
             serde_json::from_str(r#"{"id": "gizmo", "item_model": "custom"}"#).unwrap();
-        assert_eq!(file.item_model, ItemModel::Custom);
+        assert_eq!(file.item_model, Some(ItemModel::Custom));
         assert!(file.custom_item_model.is_none());
     }
 

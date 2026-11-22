@@ -686,6 +686,26 @@ pub fn default_painters() -> Painters {
         t.px(4, 3, [96.0, 140.0, 58.0]);
     });
 
+    // A few small grey stones on a transparent background - a pebble lying
+    // on the ground (and its inventory icon).
+    p.register("pebble", |t, rng| {
+        for (cx, cy, r) in [(6.0f32, 8.0f32, 2.6f32), (10.5, 10.0, 1.8), (9.5, 5.5, 1.4)] {
+            for y in 0..S {
+                for x in 0..S {
+                    let (dx, dy) = (x as f32 + 0.5 - cx, (y as f32 + 0.5 - cy) * 1.25);
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d <= r {
+                        // Lit from the top-left, darker toward the far rim.
+                        let shade = 1.0 - 0.35 * ((dx + dy) / (2.0 * r)).clamp(-1.0, 1.0) - 0.15 * d / r;
+                        let j = (rng() - 0.5) * 16.0;
+                        let v = 128.0 * shade + j;
+                        t.px(x, y, [v, v * 0.98, v * 0.95]);
+                    }
+                }
+            }
+        }
+    });
+
     // A straight, peeled stick: lighter and cleaner than a twig.
     p.register("stick", |t, rng| {
         for i in 2..15 {
@@ -831,7 +851,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 26 + DESTROY_STAGES);
+        assert_eq!(a.indices.len(), 27 + DESTROY_STAGES);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

@@ -2452,3 +2452,26 @@ etc.) instead of inventing a new approach:
   release) and the linker died with `signal 7 [Bus error]`, not an
   out-of-space message. `rm -rf target/release target/debug/incremental`
   freed enough. Check `df -h .` first when the linker crashes.
+- **Pebbles and twigs are `Shape::Floor` blocks, not decorations or
+  items.** A floor block is a real block in the grid, so the snapshot, edit
+  log, mining, drops and lighting all work with no special cases. Its
+  behaviour is spread across a handful of places, each keyed on
+  `Tables::floor`/`BlockDef::shape`, never on a block id:
+  - `mesher::push_floor` draws one quad at `FLOOR_HEIGHT` with the cell's
+    own light.
+  - `items.rs` drops it as a sprite.
+  - `interact` gives it a flat outline, refuses to place it without solid
+    ground, and breaks it off when its support goes (`pop_unsupported`,
+    with the pure check `unsupported_floor`).
+  - The file defaults (no collision, partial transparency, replaceable, a
+    `face` icon) live in `BlockFile::into_def`, so `transparent` and
+    `item_model` became `Option`s there.
+  Twig used to be a plain item. It became a block, and its item is now the
+  block's own item under the same id string, so recipes, saves and leaf
+  drops didn't change.
+- **Twigs scatter from the `trees` list, so they cross chunk borders.**
+  `TWIG_RADIUS` must stay at most `TREE_CANOPY_RADIUS`, which is how far
+  past its border a chunk looks for trees. Measured over 256 chunks (seed
+  7): pebbles on ~1% of dry columns, twigs on ~6% of forest columns.
+  `pebbles_lie_about_and_twigs_lie_under_trees` goes red if twigs ignore
+  the trees.

@@ -52,6 +52,13 @@ const MAX_TREE_CHANCE: f32 = 0.08;
 /// How far a canopy reaches from its trunk - so how far past its own
 /// border a chunk looks for trees whose leaves reach into it.
 const TREE_CANOPY_RADIUS: i32 = 2;
+/// How far from a trunk twigs fall. At most `TREE_CANOPY_RADIUS`, which is
+/// how far past its border a chunk looks for trees.
+const TWIG_RADIUS: i32 = 2;
+/// Chance a column under a tree has a twig lying on it.
+const TWIG_CHANCE: f32 = 0.09;
+/// Chance any other dry, open column has a pebble on it.
+const PEBBLE_CHANCE: f32 = 0.016;
 
 /// Very-low-frequency noise stream deciding where large, genuinely
 /// *connected* ocean basins sit, entirely separate from `mountain`/
@@ -546,6 +553,8 @@ struct TerrainIds {
     iron: BlockId,
     mud: BlockId,
     salt: BlockId,
+    pebble: BlockId,
+    twig: BlockId,
 }
 
 pub struct TerrainGenerator {
@@ -620,6 +629,8 @@ impl TerrainGenerator {
                 iron: reg.id("iron_ore"),
                 mud: reg.id("mud"),
                 salt: reg.id("salt"),
+                pebble: reg.id("pebble"),
+                twig: reg.id("twig"),
             },
             terrain: SimplexNoise::new(seed),
             mountain: SimplexNoise::new(seed ^ 0x9e3779b9),
@@ -1668,6 +1679,37 @@ impl TerrainGenerator {
             leaf(x, h + trunk + 1, z);
         }
 
+        // Pebbles and twigs lying on the ground (`Shape::Floor` blocks), the
+        // first things to pick up: twigs only under trees - within
+        // `TWIG_RADIUS` of a trunk, which every tree that close is already
+        // in `trees` for, so twigs cross chunk borders like canopies do -
+        // and pebbles on any dry, open ground.
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let (wx, wz) = (cx * CHUNK_SIZE + x, cz * CHUNK_SIZE + z);
+                let col = at(x, z);
+                let h = col.height;
+                if blend.old_column(wx, wz).is_some() || col.water_top.is_some() || h + 1 >= WORLD_HEIGHT || h < 1 {
+                    continue;
+                }
+                let base = block_index(x as usize, 0, z as usize);
+                let (ground, above) = (blocks[base + h as usize], base + h as usize + 1);
+                if blocks[above] != AIR {
+                    continue;
+                }
+                let under_tree = trees.iter().any(|&(tx, tz, th, _)| {
+                    (tx, tz) != (x, z) && (tx - x).abs() <= TWIG_RADIUS && (tz - z).abs() <= TWIG_RADIUS && (th - h).abs() <= 2
+                });
+                if under_tree && (ground == ids.grass || ground == ids.dirt) && hash2(wx, wz, seed ^ 0x7419) < TWIG_CHANCE {
+                    blocks[above] = ids.twig;
+                } else if [ids.grass, ids.dirt, ids.sand, ids.gravel, ids.stone].contains(&ground)
+                    && hash2(wx, wz, seed ^ 0x9eb1) < PEBBLE_CHANCE
+                {
+                    blocks[above] = ids.pebble;
+                }
+            }
+        }
+
         GeneratedChunk {
             fluid,
             axis: vec![AXIS_Y; blocks.len()],
@@ -2347,7 +2389,9 @@ mod tests {
                         if gen.biome_at(wx, wz) != Biome::Mountain || gen.column_profile(wx, wz).water_top.is_some() {
                             continue;
                         }
-                        let top = ground_top(&chunk, x, z, &[reg.id("leaves"), reg.id("log")]);
+                        // Leaves and trunks are foliage, a pebble lies on top: not ground.
+                        let skip = [reg.id("leaves"), reg.id("log"), reg.id("pebble"), reg.id("twig")];
+                        let top = ground_top(&chunk, x, z, &skip);
                         assert!(allowed.contains(&top), "Mountain column ({wx}, {wz}) has a {top} surface");
                         checked += 1;
                     }
@@ -3210,6 +3254,62 @@ mod tests {
     /// Forests are dense and plains have the odd tree; and trees grow right
     /// up to chunk edges, with their canopies carrying on into the next
     /// chunk instead of being cut off.
+    #[test]
+    fn pebbles_lie_about_and_twigs_lie_under_trees() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let (log, pebble, twig) = (reg.id("log"), reg.id("pebble"), reg.id("twig"));
+        let (mut columns, mut pebbles, mut twigs, mut far_twigs) = (0usize, 0usize, 0usize, 0usize);
+        let mut forest_twigs = 0usize;
+        let mut forest_columns = 0usize;
+        for i in 0..16 {
+            for j in 0..16 {
+                let (cx, cz) = (i * 7 - 60, j * 7 - 60);
+                let chunk = gen.generate(cx, cz);
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let ground = chunk.columns[x + CS * z].ground as usize;
+                        if chunk.columns[x + CS * z].water.is_some() || ground + 1 >= H {
+                            continue;
+                        }
+                        columns += 1;
+                        let on_top = chunk.blocks[block_index(x, ground + 1, z)];
+                        let (wx, wz) = (cx * CHUNK_SIZE + x as i32, cz * CHUNK_SIZE + z as i32);
+                        let forest = gen.biome_at(wx, wz) == Biome::Forest;
+                        forest_columns += forest as usize;
+                        if on_top == pebble {
+                            pebbles += 1;
+                        }
+                        if on_top == twig {
+                            twigs += 1;
+                            forest_twigs += forest as usize;
+                            // A trunk within TWIG_RADIUS, in this chunk or the
+                            // next one over (where we can't see it, so give
+                            // the edges the benefit of the doubt).
+                            let r = TWIG_RADIUS as usize;
+                            let near_edge = x < r || z < r || x + r >= CS || z + r >= CS;
+                            let near_trunk = (x.saturating_sub(r)..=(x + r).min(CS - 1)).any(|tx| {
+                                (z.saturating_sub(r)..=(z + r).min(CS - 1))
+                                    .any(|tz| (ground.saturating_sub(3)..ground + 4).any(|y| chunk.blocks[block_index(tx, y, tz)] == log))
+                            });
+                            far_twigs += (!near_trunk && !near_edge) as usize;
+                        }
+                        // Whatever lies on the ground lies on something solid.
+                        if on_top == pebble || on_top == twig {
+                            assert!(reg.def(chunk.blocks[block_index(x, ground, z)]).solid);
+                        }
+                    }
+                }
+            }
+        }
+        let pebble_rate = pebbles as f64 / columns as f64;
+        eprintln!("pebbles {pebbles} ({:.2}%), twigs {twigs} ({forest_twigs} in forest, {:.2}% of forest columns)",
+            pebble_rate * 100.0, forest_twigs as f64 * 100.0 / forest_columns.max(1) as f64);
+        assert!((0.005..0.02).contains(&pebble_rate), "pebbles on {:.2}% of dry columns", pebble_rate * 100.0);
+        assert!(forest_twigs > 50, "only {forest_twigs} twigs in forests");
+        assert_eq!(far_twigs, 0, "{far_twigs} twigs nowhere near a tree");
+    }
+
     #[test]
     fn forests_are_dense_and_trees_cross_chunk_borders() {
         let reg = BlockRegistry::with_defaults();

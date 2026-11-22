@@ -13,7 +13,9 @@ use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 
 use crate::atlas::{destroy_stage_name, DESTROY_STAGES};
-use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemStack, Rotation, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE};
+use crate::blocks::{
+    BlockId, BlockRegistry, BlockTables, ItemStack, Rotation, Shape, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE,
+};
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::crafting::RecipeBook;
@@ -283,11 +285,14 @@ fn interact(
     };
 
     if let Some(hit) = &target.0 {
-        gizmos.cuboid(
-            Transform::from_translation(hit.pos.as_vec3() + Vec3::splat(0.5))
-                .with_scale(Vec3::splat(1.002)),
-            Color::srgba(0.05, 0.05, 0.05, 0.9),
-        );
+        // A thin box around something lying on the ground, a cube otherwise.
+        let flat = registry.def(map.get_block(hit.pos)).shape == Shape::Floor;
+        let (centre, size) = if flat {
+            (hit.pos.as_vec3() + Vec3::new(0.5, 0.05, 0.5), Vec3::new(1.002, 0.1, 1.002))
+        } else {
+            (hit.pos.as_vec3() + Vec3::splat(0.5), Vec3::splat(1.002))
+        };
+        gizmos.cuboid(Transform::from_translation(centre).with_scale(size), Color::srgba(0.05, 0.05, 0.05, 0.9));
     }
 
     let dt = time.delta_secs();
@@ -350,7 +355,10 @@ fn interact(
             let existing = map.get_block(place_pos);
             let replaceable = existing == AIR || registry.def(existing).replaceable;
             let blocked = registry.def(id).solid && player.intersects_block(place_pos);
-            if replaceable && !blocked {
+            // Something that lies on the ground needs ground under it.
+            let unsupported = registry.def(id).shape == Shape::Floor
+                && !registry.def(map.get_block(place_pos - IVec3::Y)).solid;
+            if replaceable && !blocked && !unsupported {
                 if let Some(prev) = map.set_block(place_pos, id) {
                     if registry.def(id).fluid {
                         // A player-placed fluid always starts as a
@@ -403,6 +411,34 @@ fn interact(
             }
         }
     }
+}
+
+/// Breaks off a floor-shaped block (a pebble, a twig) whose support just
+/// went - the block under it was mined, or replaced by something it can't
+/// rest on - dropping it as an item, the way it would drop if mined.
+fn pop_unsupported(
+    mut events: ParamSet<(EventReader<BlockSetEvent>, EventWriter<BlockSetEvent>)>,
+    mut map: ResMut<ChunkMap>,
+    content: Content,
+    mut drops: EventWriter<SpawnDrop>,
+) {
+    let changed: Vec<IVec3> = events.p0().read().map(|e| e.pos).collect();
+    for pos in changed {
+        let above = pos + IVec3::Y;
+        if let Some(prev) = unsupported_floor(&map, &content.blocks, above).and_then(|_| map.set_block(above, AIR)) {
+            events.p1().write(BlockSetEvent { pos: above, id: AIR, prev, axis: AXIS_Y });
+            if let Some(stack) = content.items.drop_of(&content.blocks, prev, 0.0) {
+                drops.write(mined_drop(above, stack));
+            }
+        }
+    }
+}
+
+/// `Some` if the block at `pos` lies on the ground and nothing solid is
+/// under it any more.
+pub fn unsupported_floor(map: &ChunkMap, blocks: &BlockRegistry, pos: IVec3) -> Option<BlockId> {
+    let id = map.get_block(pos);
+    (blocks.def(id).shape == Shape::Floor && !blocks.def(map.get_block(pos - IVec3::Y)).solid).then_some(id)
 }
 
 /// The block, item and recipe lists, as one system parameter.
@@ -536,7 +572,7 @@ impl Plugin for InteractPlugin {
             .add_systems(OnExit(AppState::InGame), reset_mining)
             .add_systems(
                 Update,
-                (select_slot, interact, open_station, sync_crack_overlay)
+                (select_slot, interact, pop_unsupported, open_station, sync_crack_overlay)
                     .chain()
                     .after(crate::player::PlayerSet)
                     .run_if(in_state(AppState::InGame)),
@@ -618,6 +654,28 @@ mod tests {
             }
         }
         assert!((5..=8).contains(&broken), "{broken} torches in one second");
+    }
+
+    #[test]
+    fn a_pebble_with_nothing_under_it_is_unsupported() {
+        let blocks = BlockRegistry::with_defaults();
+        let (stone, pebble) = (blocks.id("stone"), blocks.id("pebble"));
+        let mut map = ChunkMap::default();
+        map.chunks.insert(
+            IVec2::ZERO,
+            crate::world::Chunk {
+                blocks: Some(vec![AIR; crate::config::CS * crate::config::CS * crate::config::H]),
+                ..Default::default()
+            },
+        );
+        let at = IVec3::new(4, 20, 4);
+        map.set_block(at - IVec3::Y, stone);
+        map.set_block(at, pebble);
+        assert_eq!(unsupported_floor(&map, &blocks, at), None, "resting on stone");
+        map.set_block(at - IVec3::Y, AIR);
+        assert_eq!(unsupported_floor(&map, &blocks, at), Some(pebble), "the stone's gone");
+        map.set_block(at, stone);
+        assert_eq!(unsupported_floor(&map, &blocks, at), None, "a cube doesn't need support");
     }
 
     #[test]

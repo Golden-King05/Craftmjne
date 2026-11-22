@@ -265,11 +265,14 @@ mod tests {
 
     #[test]
     fn plain_items_load_and_place_nothing() {
-        let (_, items) = shipped();
-        for name in ["twig", "stick"] {
-            let id = items.id(name);
-            assert_eq!(items.block_of(id), None, "{name} would place a block");
-            assert!(matches!(items.def(id).kind, ItemKind::Plain { .. }));
+        let (blocks, items) = shipped();
+        let stick = items.id("stick");
+        assert_eq!(items.block_of(stick), None, "a stick would place a block");
+        assert!(matches!(items.def(stick).kind, ItemKind::Plain { .. }));
+        // Twigs and pebbles are blocks lying on the ground, so their items
+        // put them back down.
+        for name in ["twig", "pebble"] {
+            assert_eq!(items.block_of(items.id(name)), Some(blocks.id(name)));
         }
     }
 

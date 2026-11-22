@@ -88,6 +88,8 @@ grass's underside too.
 | `leaves.png` | leaves (all faces) |
 | `log_side.png` | log (side faces) |
 | `log_top.png` | log (top and bottom faces) |
+| `pebble.png` | pebble (lying on the ground, and its icon) - draw it on a transparent background |
+| `twig.png` | twig (lying on the ground, and its icon) - draw it on a transparent background |
 | `planks.png` | planks (all faces) |
 | `sand.png` | sand (all faces) |
 | `snow.png` | snow (all faces) |
