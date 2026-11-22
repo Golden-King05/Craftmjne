@@ -745,7 +745,7 @@ main block (same textures, drops, hardness, floor-ness; no item of its own).
   what, so water becomes `ice` and `pebble@water` becomes `pebble@ice`.
 - **Placing and mining.** Setting a waterloggable block down in water keeps
   the water; mining one takes the block and leaves the layer
-  (`BlockRegistry::left_behind`) - the water, or the ice it was frozen in.
+  (`BlockRegistry::left_behind`) - water flows on, but ice breaks with it.
 - **Drawing.** The mesher draws each half of a two-part cell as its own part
   against neighbours seen as that half, so the pebble is a pebble and the
   water around it is just more water, with no hole in the surface.

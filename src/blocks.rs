@@ -1152,11 +1152,12 @@ impl BlockRegistry {
         }
     }
 
-    /// What's left in a cell when its main block is removed: the layer it
-    /// was holding (`water` from `pebble@water`, `ice` from `pebble@ice`),
-    /// or `AIR` for an ordinary block.
+    /// What's left in a cell when its block is broken: the fluid it was
+    /// holding (`water` from `pebble@water`), which flows on. A solid layer
+    /// breaks along with the block (`pebble@ice` leaves air), and an
+    /// ordinary block leaves `AIR`.
     pub fn left_behind(&self, id: BlockId) -> BlockId {
-        self.def(id).layered.map_or(AIR, |l| l.layer)
+        self.def(id).layered.map_or(AIR, |l| if self.def(l.layer).fluid { l.layer } else { AIR })
     }
 
     /// The `block@layer` id, if `block` is waterloggable and `layer` is a
@@ -1748,7 +1749,7 @@ mod tests {
         assert_eq!(reg.def(wet as BlockId).hardness, reg.def(pebble).hardness);
         assert!(tables.floor[wet], "still a floor block, so it still needs ground");
         assert_eq!(reg.left_behind(wet as BlockId), water, "mining it leaves the water");
-        assert_eq!(reg.left_behind(frozen as BlockId), ice);
+        assert_eq!(reg.left_behind(frozen as BlockId), AIR, "the ice breaks along with the pebble");
         assert_eq!(reg.left_behind(pebble), AIR);
     }
 

@@ -2503,8 +2503,10 @@ etc.) instead of inventing a new approach:
     pebble and walled it in - the part view has to prefer whichever half is
     the same block as the part being drawn (`part_at`), and only fall back to
     the part's own side for unrelated neighbours.
-  - **Break leaves the layer** (`BlockRegistry::left_behind`), so mining a
-    waterlogged pebble leaves water and mining one frozen in ice leaves ice,
+  - **Break leaves a fluid layer but not a solid one**
+    (`BlockRegistry::left_behind`): mining a waterlogged pebble leaves
+    water, while a pebble frozen in ice drops the pebble and breaks the ice
+    too (ice itself drops nothing). It applies
     on all three paths that remove a block (Creative break, Survival mine,
     unsupported pop). Placing it into water picks the variant instead of
     displacing the fluid.
