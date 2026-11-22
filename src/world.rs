@@ -230,6 +230,16 @@ impl ChunkMap {
         }
     }
 
+    /// Whether `pos` counts as underwater for swimming and floating: a
+    /// fluid cell, or a floor block (a pebble) lying on a bed with fluid
+    /// directly above it - the pebble sits in what is otherwise a water
+    /// cell, so the water shouldn't stop at it.
+    pub fn is_wet(&self, tables: &Tables, pos: IVec3) -> bool {
+        let id = self.get_block(pos);
+        tables.fluid[id as usize]
+            || (tables.floor[id as usize] && tables.fluid[self.get_block(pos + IVec3::Y) as usize])
+    }
+
     /// Whether the chunk holding `pos`'s column is loaded and generated.
     pub fn is_loaded(&self, pos: IVec3) -> bool {
         self.chunks.get(&Self::chunk_coord(pos.x, pos.z)).is_some_and(|c| c.blocks.is_some())
@@ -616,6 +626,17 @@ fn process_fluid_updates(
 /// A fluid can only occupy air, a `replaceable` block, or itself — anything
 /// else blocks it outright, matching the existing placement rule in
 /// `interact.rs`.
+/// Whether a fluid may flow into a cell holding block `id`: air, or a
+/// `replaceable` block - except a floor block (a pebble), which water flows
+/// around rather than washing away. Pebbles are generated on river, lake and
+/// sea beds with water all around and above them, and any nearby edit
+/// recomputes those cells; if water could overwrite them they'd silently
+/// vanish the first time anything was dug. (Placing a block there still
+/// replaces the pebble - that's `replaceable`'s other meaning.)
+pub fn fluid_can_enter(tables: &Tables, id: BlockId) -> bool {
+    id == AIR || (tables.replaceable[id as usize] && !tables.floor[id as usize])
+}
+
 fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut VecDeque<IVec3>) {
     if pos.y < 0 || pos.y >= WORLD_HEIGHT {
         return;
@@ -647,7 +668,7 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
                 let below = npos.y - 1;
                 let below_open = below >= 0 && {
                     let below_id = map.get_block(IVec3::new(npos.x, below, npos.z));
-                    below_id == AIR || tables.replaceable[below_id as usize]
+                    fluid_can_enter(tables, below_id)
                 };
                 if below_open {
                     continue;
@@ -708,7 +729,7 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
                     return;
                 }
             }
-            let can_host = id == AIR || tables.replaceable[id as usize] || id == cid;
+            let can_host = fluid_can_enter(tables, id) || id == cid;
             if !can_host {
                 return; // obstructed
             }
@@ -1708,6 +1729,62 @@ mod tests {
             guard += 1;
             assert!(guard < 50_000, "fluid recompute did not converge");
         }
+    }
+
+    fn pebble_id() -> BlockId {
+        BlockRegistry::with_defaults().id("pebble")
+    }
+
+    #[test]
+    fn water_flows_around_a_pebble_instead_of_washing_it_away() {
+        let (water, stone, tables, mut map) = setup();
+        let pebble = pebble_id();
+        fill_floor(&mut map, 9, stone);
+        let source = IVec3::new(4, 10, 4);
+        let at = IVec3::new(5, 10, 4);
+        map.set_fluid_cell(source, water, FLUID_SOURCE);
+        map.set_block(at, pebble);
+
+        drain(&mut map, &tables, at);
+        assert_eq!(map.get_block(at), pebble, "water overwrote the pebble");
+        // ...and it still spreads past it, around the side: (5, 10, 5) is
+        // only reachable through (4, 10, 5), since the pebble blocks the
+        // direct way.
+        drain(&mut map, &tables, IVec3::new(4, 10, 5));
+        assert_eq!(map.get_block(IVec3::new(5, 10, 5)), water, "water never got around the pebble");
+        assert_eq!(map.get_block(at), pebble, "and the pebble is still there");
+    }
+
+    #[test]
+    fn a_waterfall_landing_on_a_pebble_still_spreads_sideways() {
+        let (water, stone, tables, mut map) = setup();
+        let pebble = pebble_id();
+        fill_floor(&mut map, 9, stone);
+        map.set_block(IVec3::new(8, 10, 8), pebble);
+        for y in 11..14 {
+            map.set_fluid_cell(IVec3::new(8, y, 8), water, FLUID_FALLING);
+        }
+        map.set_fluid_cell(IVec3::new(8, 14, 8), water, FLUID_SOURCE);
+        // Neighbours of the lowest falling cell: with the pebble reading as
+        // "open space below", the fall would neither land nor spread.
+        drain(&mut map, &tables, IVec3::new(9, 11, 8));
+        assert_eq!(map.get_block(IVec3::new(9, 11, 8)), water, "it never spread off the pebble");
+    }
+
+    #[test]
+    fn a_pebble_under_water_is_wet_and_one_under_air_is_not() {
+        let (water, stone, tables, mut map) = setup();
+        let pebble = pebble_id();
+        fill_floor(&mut map, 9, stone);
+        let under = IVec3::new(4, 10, 4);
+        let dry = IVec3::new(8, 10, 8);
+        map.set_block(under, pebble);
+        map.set_block(under + IVec3::Y, water);
+        map.set_block(dry, pebble);
+        assert!(map.is_wet(&tables, under), "a pebble under water should swim like water");
+        assert!(map.is_wet(&tables, under + IVec3::Y));
+        assert!(!map.is_wet(&tables, dry), "a pebble on dry ground isn't underwater");
+        assert!(!map.is_wet(&tables, IVec3::new(2, 10, 2)));
     }
 
     #[test]

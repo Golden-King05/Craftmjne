@@ -157,11 +157,14 @@ with the world. `Q` throws one of the selected item, `Ctrl+Q` the stack.
 ### Pebbles and twigs
 
 The first things to pick up. **Pebbles** lie scattered on dry, open ground
-(about one column in a hundred), and **twigs** lie under trees, within two
+(about one column in a hundred) and on river, lake and sea beds (about one
+in fifty where the water is at least two blocks deep), and **twigs** lie under trees, within two
 blocks of a trunk (about two per tree), on top of the ones leaves drop.
 Both are blocks lying flat on the ground (`"shape": "floor"`): no collision,
 instant to pick up, and placeable again, but only on top of something solid.
-Mine the block under one and it drops as an item. They're the first step
+Mine the block under one and it drops as an item. Water flows around a
+pebble rather than washing it away, and you swim past one on a bed as if it
+were water. They're the first step
 toward the first tools.
 
 ### Health

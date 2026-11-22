@@ -2475,3 +2475,23 @@ etc.) instead of inventing a new approach:
   7): pebbles on ~1% of dry columns, twigs on ~6% of forest columns.
   `pebbles_lie_about_and_twigs_lie_under_trees` goes red if twigs ignore
   the trees.
+- **A pebble on a river, lake or sea bed lives in what is otherwise a water
+  cell, and three systems each had to be told.** One block per cell means
+  the cell holds the pebble *instead of* water, so:
+  - **The fluid sim** treated a pebble as `replaceable` and would have
+    overwritten it the first time any nearby edit recomputed that cell.
+    `world::fluid_can_enter` (air, or replaceable and not a floor block)
+    replaces both places that asked, including the "is there open space
+    below" check - without that one, a waterfall landing on a pebble
+    neither fell nor spread. Water now flows around pebbles, on land too.
+  - **The mesher** drew a wall of the surrounding water's faces around the
+    pebble's cell. A floor block with the same fluid directly above it now
+    counts as that fluid when deciding what to cull.
+  - **Swimming, floating items and breath** all asked "is this cell a fluid
+    block". `ChunkMap::is_wet` (a fluid, or a floor block with fluid above)
+    is the one definition they share.
+  Bed pebbles need at least two blocks of water so the pebble is never the
+  top layer, which would leave a hole in the water's own surface. Measured
+  on seed 7: 1.9% of deep-water columns. Each of the three rules has a test
+  that goes red without it. Lighting needed nothing: the pebble is clear to
+  light in both the generator's fill and `light.rs`, so they still agree.

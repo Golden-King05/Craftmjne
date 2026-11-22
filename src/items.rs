@@ -269,7 +269,7 @@ fn simulate_items(
             continue;
         }
         let solid = |c: IVec3| map.is_solid(tables, c);
-        let wet = |c: IVec3| tables.fluid[map.get_block(c) as usize];
+        let wet = |c: IVec3| map.is_wet(tables, c);
         let item = &mut *item;
         let mut left = dt;
         while left > 0.0 {

@@ -417,7 +417,17 @@ pub fn mesh_chunk(
 
                 for (f, face) in FACES.iter().enumerate() {
                     let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
-                    let nid = padded.blocks[n_cell];
+                    let mut nid = padded.blocks[n_cell];
+                    // A floor block (a pebble) on a bed with fluid above it
+                    // is, to the water around it, one more cell of that
+                    // water - otherwise every pebble would be walled in by
+                    // a hole in the water's own surface faces.
+                    if tables.floor[nid as usize] {
+                        let over = padded.blocks[n_cell + SY as usize];
+                        if tables.fluid[over as usize] {
+                            nid = over;
+                        }
+                    }
                     let is_side = matches!(f, 0 | 1 | 4 | 5);
                     let mut bottom = 0.0f32;
                     let mut stepped = false;
@@ -711,6 +721,29 @@ mod tests {
         // The stone keeps all six faces, its top included: a pebble doesn't
         // cover it.
         assert_eq!(mesh.solid.positions.len(), 6 * 4 + 4, "the stone's six faces and the pebble's one");
+    }
+
+    /// Whether the water cell at (4, 11, 5) draws its +x face (the plane at
+    /// x = 5, biased inward when it faces a different non-opaque block) into
+    /// the pebble cell next to it.
+    fn draws_wall_toward_pebble(water_above_pebble: bool) -> bool {
+        let (reg, tables) = tables();
+        let (stone, pebble, water) = (reg.id("stone"), reg.id("pebble"), reg.id("water"));
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone;
+        padded.blocks[padded_index(5, 11, 5)] = pebble;
+        padded.blocks[padded_index(4, 11, 5)] = water;
+        if water_above_pebble {
+            padded.blocks[padded_index(5, 12, 5)] = water;
+        }
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        mesh.water.positions.iter().any(|p| (p[0] - (5.0 - COINCIDENT_FACE_BIAS)).abs() < 1e-6)
+    }
+
+    #[test]
+    fn water_has_no_wall_against_a_pebble_that_is_under_water() {
+        assert!(draws_wall_toward_pebble(false), "a pebble on dry ground is a real edge of the water");
+        assert!(!draws_wall_toward_pebble(true), "a pebble under water is walled in by a hole in the water");
     }
 
     #[test]

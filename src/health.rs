@@ -169,7 +169,7 @@ fn tick_vitals(
         return;
     }
     let head = player.eye().floor().as_ivec3();
-    let head_underwater = tables.0.fluid[map.get_block(head) as usize];
+    let head_underwater = map.is_wet(&tables.0, head);
     player.vitals.hurt(fall_damage(fall));
     player.vitals.tick(time.delta_secs(), head_underwater);
     if player.pos.y < VOID_Y {

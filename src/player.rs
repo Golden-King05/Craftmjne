@@ -171,7 +171,7 @@ impl Player {
         }
         let sprint = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let body = self.pos + Vec3::Y * 0.6;
-        let in_water = tables.fluid[map.get_block(body.floor().as_ivec3()) as usize];
+        let in_water = map.is_wet(tables, body.floor().as_ivec3());
 
         if self.fly {
             let speed = FLY_SPEED * if sprint { 2.5 } else { 1.0 };
@@ -251,8 +251,7 @@ impl Player {
     /// climb, right up until you're actually standing on the ledge.
     fn assist_climb_out(&mut self, map: &ChunkMap, tables: &Tables, wish: Vec2) {
         let feet = self.pos.y.floor() as i32;
-        let feet_wet = tables.fluid
-            [map.get_block(IVec3::new(self.pos.x.floor() as i32, feet, self.pos.z.floor() as i32)) as usize];
+        let feet_wet = map.is_wet(tables, IVec3::new(self.pos.x.floor() as i32, feet, self.pos.z.floor() as i32));
         if !feet_wet {
             return;
         }
