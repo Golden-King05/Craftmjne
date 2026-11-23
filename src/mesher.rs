@@ -430,20 +430,26 @@ pub fn mesh_chunk(
                 let is_translucent = tables.translucent[id as usize];
                 let bucket = if is_translucent { &mut water } else { &mut solid };
                 let is_fluid = tables.fluid[id as usize];
+                // Fluids, and what one freezes into, are drawn at the height
+                // their stored level says (a frozen river keeps its slope).
+                let shaped = is_fluid || tables.level_shaped[id as usize];
                 let axis = if tables.rotates[id as usize] { padded.axis[cell] } else { AXIS_Y };
                 let level = padded.fluid[cell];
                 let flow_dist = tables.flow_distance[id as usize];
                 // Covered by more of the same fluid above -> render full
                 // height (it's not this stack's exposed surface).
-                let cap = if is_fluid {
-                    if part_at(cell + SY as usize) == id {
+                // Frozen cells at a still or falling level are plain cubes.
+                let top_of = |i: usize| -> f32 {
+                    let l = padded.fluid[i];
+                    if !shaped || !(is_fluid || (l != FLUID_SOURCE && l != FLUID_FALLING)) {
+                        1.0
+                    } else if part_at(i + SY as usize) == id {
                         1.0
                     } else {
-                        fluid_height(level, flow_dist)
+                        fluid_height(l, flow_dist)
                     }
-                } else {
-                    1.0
                 };
+                let cap = top_of(cell);
 
                 for (f, face) in FACES.iter().enumerate() {
                     let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
@@ -456,18 +462,13 @@ pub fn mesh_chunk(
                             continue;
                         }
                         if nid == id {
-                            if is_fluid && is_side {
+                            if shaped && is_side {
                                 // Same fluid next door at a different level:
                                 // draw a partial "step" wall from its surface
                                 // up to ours instead of culling the face
                                 // outright (a flat cull would leave a visible
                                 // gap between two different-height cells).
-                                let n_level = padded.fluid[n_cell];
-                                let n_cap = if part_at(n_cell + SY as usize) == id {
-                                    1.0
-                                } else {
-                                    fluid_height(n_level, flow_dist)
-                                };
+                                let n_cap = top_of(n_cell);
                                 if n_cap + 1e-4 >= cap {
                                     continue;
                                 }
@@ -789,6 +790,47 @@ mod tests {
         padded.blocks[padded_index(5, 11, 5)] = pebble;
         let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert!(mesh.water.positions.is_empty());
+    }
+
+    /// The top of the ice cell at (5, 11, 5): `level` as stored there.
+    fn ice_top(level: u8) -> f32 {
+        let (reg, tables) = tables();
+        let (stone, ice) = (reg.id("stone"), reg.id("ice"));
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone;
+        padded.blocks[padded_index(5, 11, 5)] = ice;
+        padded.fluid[padded_index(5, 11, 5)] = level;
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        mesh.solid.positions.iter().chain(&mesh.water.positions).map(|p| p[1]).fold(0.0, f32::max) - 11.0
+    }
+
+    #[test]
+    fn frozen_flowing_water_keeps_the_waters_geometry() {
+        assert_eq!(ice_top(FLUID_SOURCE), 1.0, "ordinary ice is a full cube");
+        assert_eq!(ice_top(FLUID_FALLING), 1.0, "a frozen waterfall is a column");
+        let (shallow, deep) = (ice_top(6), ice_top(1));
+        assert!(shallow < deep && deep < 1.0, "flowing ice slopes like flowing water: {shallow} {deep}");
+        let water_top = fluid_height(1, 7);
+        assert!((deep - water_top).abs() < 1e-6, "same height as the water it froze from");
+    }
+
+    #[test]
+    fn ice_beside_flowing_ice_gets_a_step_wall_like_water_does() {
+        let quads = |level: u8| {
+            let (reg, tables) = tables();
+            let (stone, ice) = (reg.id("stone"), reg.id("ice"));
+            let mut padded = lit_padded();
+            for x in [4, 5] {
+                padded.blocks[padded_index(x, 10, 5)] = stone;
+                padded.blocks[padded_index(x, 11, 5)] = ice;
+            }
+            padded.fluid[padded_index(5, 11, 5)] = level;
+            let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+            (mesh.solid.positions.len() + mesh.water.positions.len()) / 4
+        };
+        // Two cubes share one culled face; make one of them lower and the
+        // cube's side toward it shows the part above the lower surface.
+        assert_eq!(quads(3), quads(FLUID_SOURCE) + 1);
     }
 
     #[test]

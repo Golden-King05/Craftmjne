@@ -374,6 +374,11 @@ fn interact(
                         // permanent source, not whatever level that cell's
                         // fluid array last held (e.g. a dried flowing cell).
                         map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
+                    } else if waterlogged.is_none() {
+                        // Anything else starts at the default level too, so a
+                        // stale flowing level left by earlier water can't
+                        // make a placed block of ice slope.
+                        map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
                     }
                     // A rotating block's orientation follows the face it was
                     // placed against, Minecraft-log-style; everything else

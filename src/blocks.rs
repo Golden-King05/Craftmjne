@@ -973,6 +973,12 @@ pub struct Tables {
     pub frozen: Vec<BlockId>,
     /// `(block, layer)` -> the derived `block@layer` id.
     pub variants: HashMap<(BlockId, BlockId), BlockId>,
+    /// What a fluid freezes into keeps the fluid's *shape*: a frozen cell
+    /// whose stored level is a flowing one (not source, not falling) is
+    /// drawn at that level's height, so a frozen river keeps its slope.
+    /// True for `ice` and the variants holding it; `flow_distance` of such a
+    /// block is the fluid's, so the heights match the water's.
+    pub level_shaped: Vec<bool>,
     /// The atlas's actual per-tile pixel resolution (`atlas::AtlasData::
     /// tile_size` at compile time) - one of `atlas::ALLOWED_TILE_SIZES`.
     pub tile_size: usize,
@@ -984,6 +990,16 @@ pub struct Tables {
     /// `1/ATLAS_TILES - 2*uv_pad`: how much of each tile's UV span is
     /// actually sampled once `uv_pad` insets both edges.
     pub uv_span: f32,
+}
+
+impl Tables {
+    /// Whether a cell holding `id` at stored fluid `level` has fluid state
+    /// worth saving and drawing: a fluid, or something frozen from one that
+    /// still carries a flowing level.
+    pub fn holds_level(&self, id: BlockId, level: u8) -> bool {
+        self.fluid[id as usize]
+            || (self.level_shaped[id as usize] && level != FLUID_SOURCE && level != FLUID_FALLING)
+    }
 }
 
 #[derive(Resource, Clone)]
@@ -1266,6 +1282,7 @@ impl BlockRegistry {
             dried: vec![AIR; n],
             frozen: vec![AIR; n],
             variants: self.variants.clone(),
+            level_shaped: vec![false; n],
             tile_size,
             uv_pad,
             uv_span: uv_tile - 2.0 * uv_pad,
@@ -1326,12 +1343,21 @@ impl BlockRegistry {
         for (id, def) in self.defs.iter().enumerate().skip(1) {
             let Some(target) = def.freezes_to.as_deref().and_then(|n| self.by_name.get(n).copied()) else { continue };
             tables.frozen[id] = target;
+            // The frozen form keeps this fluid's shape (see `level_shaped`).
+            let fd = tables.flow_distance[id];
+            tables.level_shaped[target as usize] = true;
+            tables.flow_distance[target as usize] = tables.flow_distance[target as usize].max(fd);
             for (&(block, layer), &variant) in &self.variants {
                 if layer == id as BlockId {
                     if let Some(&frozen) = self.variants.get(&(block, target)) {
                         tables.frozen[variant as usize] = frozen;
                     }
                 }
+            }
+        }
+        for (&(_, layer), &variant) in &self.variants {
+            if tables.level_shaped[layer as usize] {
+                tables.level_shaped[variant as usize] = true;
             }
         }
         self.compiled = true;

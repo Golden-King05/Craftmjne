@@ -2514,3 +2514,20 @@ etc.) instead of inventing a new approach:
     `compile` time - their derived texture name (`pebble@ice`) has no painter.
   - `SAVE_FORMAT` 3 -> 4: an older build would read the variant names as
     missing blocks and drop the pebbles on save.
+- **Frozen water keeps the water's geometry by keeping its *level*, not by
+  becoming a fluid.** A river's shape lives in the per-cell `fluid_level`
+  array, and `set_block` leaves that array alone, so freezing a cell already
+  preserved the slope - nothing drew it, and nothing saved it. Three pieces:
+  `Tables::level_shaped` (ice, and variants holding it; its `flow_distance`
+  is the water's, so heights match) tells the mesher to size a frozen cell
+  by its level (`top_of`, shared by the cell and its step-wall neighbour);
+  `Tables::holds_level(id, level)` is the one "does this cell carry fluid
+  state" test, used by both the save scan and the generated-terrain
+  `base_fluid` bit (a frozen cell at a still/falling level has nothing to
+  save, so plain ice stays a plain cube and costs nothing); and placing a
+  non-fluid block resets the stored level, since a stale flowing level left
+  by earlier water would otherwise make a freshly placed ice block slope.
+  Generated frozen rivers needed no generator change - they already wrote
+  the flowing level under the ice. Runtime freezing is still only checked
+  at `BlockSetEvent`s (the simulation's own writes emit none), so a river
+  spreading into a cold biome freezes when something nearby changes.

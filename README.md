@@ -740,9 +740,15 @@ main block (same textures, drops, hardness, floor-ness; no item of its own).
   it into `pebble@water` at the water's level instead of overwriting it
   (`world::fluid_host`), spreads on from it like any water cell, and when it
   dries the pebble is left behind (`Tables::dried`).
-- **Freezing.** A fluid with `"freezes_to": "ice"` freezes its exposed still
-  sources in cold biomes; the cell's own `Tables::frozen` entry says into
-  what, so water becomes `ice` and `pebble@water` becomes `pebble@ice`.
+- **Freezing.** A fluid with `"freezes_to": "ice"` freezes its exposed
+  still or flowing cells (not a waterfall column) in cold biomes; the cell's
+  own `Tables::frozen` entry says into what, so water becomes `ice` and
+  `pebble@water` becomes `pebble@ice`. **Frozen water keeps its geometry:**
+  the cell's stored fluid level survives the freeze, and the mesher draws
+  ice at a flowing level at the same height the water had
+  (`Tables::level_shaped`), so a frozen river keeps its slope and steps.
+  Ice at a still or falling level (everything placed by hand, shore ice,
+  sheets) is the plain cube it always was. Collision stays a full block.
 - **Placing and mining.** Setting a waterloggable block down in water keeps
   the water; mining one takes the block and leaves the layer
   (`BlockRegistry::left_behind`) - water flows on, but ice breaks with it.

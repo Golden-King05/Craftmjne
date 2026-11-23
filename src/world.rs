@@ -981,11 +981,14 @@ fn try_freeze_cell(
     pos: IVec3,
     biome_at: impl Fn(i32, i32) -> biome::Biome,
 ) -> Option<(BlockId, BlockId)> {
-    // Only a fluid with something to freeze into (`freezes_to`), and a still
-    // source of it: the cell's own `frozen` entry is `ice` for plain water
-    // and `pebble@ice` for a waterlogged pebble.
+    // Only a fluid with something to freeze into (`freezes_to`): the cell's
+    // own `frozen` entry is `ice` for plain water and `pebble@ice` for a
+    // waterlogged pebble.
+    // Still or flowing (a frozen river keeps its slope: the stored level
+    // stays and the mesher draws the ice at that height), but not a
+    // falling column.
     let frozen = tables.frozen[map.get_block(pos) as usize];
-    if frozen == AIR || map.get_fluid_level(pos) != FLUID_SOURCE {
+    if frozen == AIR || map.get_fluid_level(pos) == FLUID_FALLING {
         return None;
     }
     if map.get_block(pos + IVec3::Y) != AIR {
@@ -1145,7 +1148,7 @@ fn chunk_fluid_cells(
             for y in 0..H {
                 let idx = block_index(x, y, z);
                 let id = blocks[idx];
-                if !tables.fluid[id as usize] {
+                if !tables.holds_level(id, levels[idx]) {
                     continue;
                 }
                 if base_fluid.is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1) {
@@ -1414,7 +1417,7 @@ fn collect_gen_tasks(
         let chunk = map.chunks.get_mut(&gen_task.coord).unwrap();
         let mut base_fluid = vec![0u64; generated.blocks.len().div_ceil(64)];
         for (i, &id) in generated.blocks.iter().enumerate() {
-            if tables.0.fluid[id as usize] {
+            if tables.0.holds_level(id, generated.fluid[i]) {
                 base_fluid[i / 64] |= 1 << (i % 64);
             }
         }
@@ -1982,15 +1985,52 @@ mod tests {
     }
 
     #[test]
-    fn try_freeze_cell_leaves_flowing_water_alone_even_in_a_freezing_biome() {
+    fn try_freeze_cell_freezes_flowing_water_and_keeps_its_level() {
         let noise = biome::ClimateMaps::for_seed(1);
         let pos = find_biome_column(&noise, biome::Biome::Snow);
         let (water, ice, _stone, tables, mut map) = freeze_setup(pos);
         map.set_fluid_cell(pos, water, 3); // flowing, not a source
 
-        let prev = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
+        let result = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
 
-        assert_eq!(prev, None);
+        assert_eq!(result, Some((water, ice)));
+        assert_eq!(map.get_block(pos), ice);
+        assert_eq!(map.get_fluid_level(pos), 3, "the frozen river keeps its slope");
+        assert!(tables.holds_level(ice, 3), "and the level is saved and drawn");
+        assert!(!tables.holds_level(ice, FLUID_SOURCE), "a plain ice cube has nothing to save");
+    }
+
+    #[test]
+    fn a_frozen_flowing_cell_is_saved_with_its_level_but_plain_ice_is_not() {
+        let (_water, _stone, tables, mut map) = setup();
+        let reg = BlockRegistry::with_defaults();
+        let ice = reg.id("ice");
+        map.set_block(IVec3::new(2, 10, 2), ice);
+        map.set_fluid_level_raw(IVec3::new(2, 10, 2), 4);
+        map.set_block(IVec3::new(3, 10, 2), ice); // a plain cube
+        let chunk = map.chunks.get(&IVec2::ZERO).unwrap();
+        let cells = chunk_fluid_cells(
+            IVec2::ZERO,
+            chunk.blocks.as_ref().unwrap(),
+            chunk.fluid_level.as_ref().unwrap(),
+            None,
+            &reg,
+            &tables,
+        );
+        let saved: Vec<_> = cells.iter().filter(|c| c.block == "ice").map(|c| (c.x, c.level)).collect();
+        assert_eq!(saved, vec![(2, 4)], "only the sloped ice carries state");
+    }
+
+    #[test]
+    fn try_freeze_cell_leaves_a_waterfall_liquid() {
+        let noise = biome::ClimateMaps::for_seed(1);
+        let pos = find_biome_column(&noise, biome::Biome::Snow);
+        let (water, _ice, _stone, tables, mut map) = freeze_setup(pos);
+        map.set_fluid_cell(pos, water, FLUID_FALLING);
+
+        let result = try_freeze_cell(&mut map, &tables, pos, |x, z| biome::region_biome_at(&noise, x, z));
+
+        assert_eq!(result, None);
         assert_eq!(map.get_block(pos), water);
     }
 
