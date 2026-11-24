@@ -2630,3 +2630,41 @@ etc.) instead of inventing a new approach:
   BlockDef, held)`) because passing hardness, tool, requires_tool and
   response separately had reached four positional arguments.
 
+- **Knapping: a circle of force can't cut a sharp corner, so "exact match is
+  100%" needed a second, gentler tool - and the measurements said so before
+  any tuning did.** Pure logic is `knapping.rs` (`Session`: strike, tap,
+  score, quality); the screen is `knap_ui.rs`; recipes carry a `knap`
+  entry (`crafting::KnapSpec`) and `craft_clicks` opens the screen instead
+  of crafting. Steps that mattered:
+  - **Measure with bots, not by feel.** A greedy bot (best strike judged on
+    force alone, as a player can) on the five shipped outlines never
+    exceeded ~0.85-0.98 raw score with strikes alone, so Legendary would
+    have been impossible. The right-click **tap** (breaks one cell, dents
+    four, can't crack) is *my own addition*, not asked for; the user should
+    be told and may veto it. With unlimited taps the bot made Legendary 41%
+    of the time; hidden per-cell toughness (`INTEGRITY_SPREAD`) and strike
+    force variance (`FORCE_VARIANCE`) cut that, and a per-stone budget
+    (`MAX_TAPS` = 4) landed it at ~4% (careful bot: ~61% Rare, ~28% Epic).
+    Those numbers are asserted in
+    `a_careful_player_usually_makes_rare_tools_...`, and
+    `heavy_strikes_alone_cannot_make_a_perfect_tool` /
+    `striking_at_random_wrecks_the_stone` pin the other ends.
+  - **The bot must depend on the rule the test guards.** The first
+    two-phase bot looped `while session.taps_left() > 0`, so removing the
+    budget from `Session::tap` left every test green. It now keeps tapping
+    until the session refuses, and the budget break-test goes red.
+  - **Don't draw hidden state.** The screen shades a cell by band
+    (solid / weakened / flawed), never by raw integrity, which would leak the
+    hidden toughness and make the stone readable.
+  - **Take the stone on the first strike, not on opening.** Then "closing
+    before touching it refunds" is true by construction (nothing was
+    taken), with no refund path to keep in sync. The haft/binding are
+    taken at Done (`finish_knapping`, which changes nothing if they're
+    gone), and the tool is given with `ItemStack { quality, ..output }`.
+  - **Escape/E ordering.** The knap systems sit at the end of
+    `InventoryPlugin`'s chain; `toggle_inventory`/`inventory_escape` check
+    `KnapState::is_open()` first (state at the start of the frame), so
+    Escape closes the knap screen, not the inventory under it. The screen
+    root has `FocusPolicy::Block` and a `GlobalZIndex` so the inventory's
+    rebuilds (it respawns when the hotbar changes) can't draw over it or
+    take clicks.

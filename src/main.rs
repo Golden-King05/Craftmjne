@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use craftmjne::config::WorldSettings;
 use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
-use craftmjne::{chat, commands, health, interact, inventory, items, light, menu, player, render, sky, ui, world};
+use craftmjne::{chat, commands, health, interact, inventory, items, knap_ui, light, menu, player, render, sky, ui, world};
 
 struct Args {
     seed: u32,
@@ -120,6 +120,7 @@ fn main() {
             sky::SkyPlugin,
             interact::InteractPlugin,
             inventory::InventoryPlugin,
+            knap_ui::KnapUiPlugin,
             items::ItemsPlugin,
             health::HealthPlugin,
             commands::CommandsPlugin,

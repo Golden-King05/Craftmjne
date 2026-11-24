@@ -26,7 +26,8 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::chat::ChatState;
-use crate::crafting::{craft, stations_near, times_craftable, KnownItems, NearbyStations, RecipeBook};
+use crate::knap_ui::{abandon_when_inventory_closes, knap_input, sync_knap_screen, KnapState};
+use crate::crafting::{can_start_knapping, craft, stations_near, times_craftable, KnownItems, NearbyStations, RecipeBook};
 use crate::interact::Hotbar;
 use crate::item_registry::{ItemId, ItemRegistry, ItemStack, NO_ITEM};
 use crate::items::{give, SpawnDrop, THROWN_PICKUP_DELAY};
@@ -274,10 +275,11 @@ fn toggle_inventory(
     chat: Res<ChatState>,
     paused: Res<PauseState>,
     death: Res<DeathState>,
+    knap: Res<KnapState>,
     mut inv: ResMut<InventoryState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || paused.open || death.open || !keys.just_pressed(KeyCode::KeyE) {
+    if chat.open || paused.open || death.open || knap.is_open() || !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
@@ -290,10 +292,12 @@ fn toggle_inventory(
 
 fn inventory_escape(
     keys: Res<ButtonInput<KeyCode>>,
+    knap: Res<KnapState>,
     mut inv: ResMut<InventoryState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if !inv.open || !keys.just_pressed(KeyCode::Escape) {
+    // Escape closes the knapping screen first (`knap_ui`), not the inventory under it.
+    if !inv.open || knap.is_open() || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
@@ -394,6 +398,7 @@ fn craft_clicks(
     mut inventory: ResMut<Inventory>,
     players: Query<&Player>,
     mut drops: EventWriter<SpawnDrop>,
+    mut knap: ResMut<KnapState>,
     clicks: Query<(&Interaction, &CraftButton), Changed<Interaction>>,
 ) {
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -402,6 +407,13 @@ fn craft_clicks(
             continue;
         }
         let recipe = &book.recipes[button.0];
+        if let Some(spec) = &recipe.knap {
+            // Shaped by hand on its own screen instead of crafted at once.
+            if !knap.is_open() && can_start_knapping(recipe, &hotbar.slots, &inventory.slots) {
+                knap.open(button.0, spec.outline.clone());
+            }
+            continue;
+        }
         let max = registry.max_stack(recipe.output.id);
         let times = if shift { times_craftable(recipe, &hotbar.slots, &inventory.slots) } else { 1 };
         let mut overflow = 0;
@@ -896,6 +908,9 @@ impl Plugin for InventoryPlugin {
                     track_hovered_item,
                     sync_inventory_screen,
                     sync_cursor_ui,
+                    abandon_when_inventory_closes,
+                    knap_input,
+                    sync_knap_screen,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),

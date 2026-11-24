@@ -16,6 +16,8 @@ pub mod interact;
 pub mod inventory;
 pub mod item_registry;
 pub mod items;
+pub mod knap_ui;
+pub mod knapping;
 pub mod light;
 pub mod menu;
 pub mod mesher;

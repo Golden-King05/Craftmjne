@@ -202,8 +202,8 @@ one per material):
 ```
 
 Kinds are `axe`, `pickaxe`, `shovel`, `hoe`, `dagger`, `longsword` and
-`greatsword`. Stone has an axe, pickaxe, shovel, hoe and dagger so far (no
-recipes yet, so they only come from Creative, with placeholder art).
+`greatsword`. Stone has an axe, pickaxe, shovel, hoe and dagger so far, made by
+[knapping](#knapping) (placeholder art).
 
 **Quality** is a whole percent, 0 to 100, stored on the tool's stack (so
 tools never stack; their `max_stack` is forced to 1). It says how good *this*
@@ -217,7 +217,8 @@ The tooltip never shows the number. A tool shows a quality name in that
 quality's colour: Trash (0-19, grey), Common (20-59, white), Rare (60-84,
 blue), Epic (85-99, purple), and Legendary only at exactly 100 (gold). Tools
 from Creative start at Common (quality 50). Quality saves with the tool, in
-slots and as a dropped item; knapping and forging will be what sets it.
+slots and as a dropped item; [knapping](#knapping) is what sets it for stone
+tools (forging will for metal).
 
 ### Health
 
@@ -302,6 +303,38 @@ The first recipes, all by hand:
 
 The crafting bench is the first station. Nothing needs it yet; it's where
 the next recipes go.
+
+### Knapping
+
+Stone tools aren't crafted at once: clicking one (pickaxe, axe, shovel, hoe,
+dagger; each needs a **pebble** plus sticks/twigs, and no bench) opens the
+**knapping screen** (`src/knap_ui.rs`, rules in `src/knapping.rs`). A 16x16
+stone sits in front of you with the tool head's outline marked in gold.
+
+- **Left click strikes.** A circle of force around the cell, strongest at its
+  centre, fading to nothing at its rim (about 3 cells). Cells on the stone's
+  edge are safe. A strike on a cell further in (the further, the likelier)
+  can **crack** the stone: the crack runs from the strike, bending toward the
+  nearest open edge, and either breaks through (losing a band of stone along
+  it) or runs out of energy and leaves a flaw (a dark, weakened line). Pieces
+  cut off from the main body fall away.
+- **Right click taps.** Breaks just the one cell, never cracks, but you only
+  get 4 per stone. A circle can't cut the outline's sharp corners exactly;
+  taps are how you finish them.
+- **Done** ends it. Quality is how close the stone is to the outline:
+  chipping into the outline costs twice as much as leaving extra, and a
+  perfect match is 100%. It's shown as a name (Trash, Common, Rare, Epic;
+  Legendary only at a perfect 100), never a number. Cancel or Escape leaves.
+- **Costs.** The pebble is used up by your first strike or tap, so closing
+  before touching it costs nothing and closing after loses the stone. The
+  haft and binding are used up when you press Done.
+
+How hard it is was measured with a bot that knows exactly what each strike
+does (a stronger player than a person): about 61% Rare, 28% Epic, 6% Common
+and 4% Legendary, in ~26 clicks. Heavy strikes alone never reach 100%. Each
+stone has hidden per-cell toughness and every strike varies a little, so
+taps can't be planned perfectly either. Random hitting always gives Trash.
+Nothing about a knap in progress is saved.
 
 ### Stacking
 
@@ -697,6 +730,8 @@ src/
 ├── interact.rs  # InteractPlugin: voxel DDA raycast, mining (time, cracks, drops), place/pick, hotbar
 ├── items.rs     # ItemsPlugin: dropped items - physics, pickup, merging, Q to throw, saved with the world
 ├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
+├── knapping.rs  # knapping rules: stone, strikes, cracks, scoring, quality (pure)
+├── knap_ui.rs   # the knapping screen
 ├── inventory.rs # InventoryPlugin: hotbar+storage, moving items, crafting panel, Creative's item list
 ├── item_registry.rs # every holdable item: one per block, plus plain items from items/
 ├── crafting.rs  # recipes from recipes/, stations, discovery, the craft rule
@@ -1087,6 +1122,12 @@ One file per recipe in `recipes/` (the file name is the recipe's id):
 `station` is `"hand"` (the default) or a block id, which makes that block a
 crafting station. `count` defaults to 1. An unknown item or station fails at
 startup with the file named.
+
+Add `"knap": { "stone": "pebble", "outline": [ ...16 strings of 16 chars,
+`#` for the head... ] }` to make it a [knapping](#knapping) recipe: `stone`
+must be one of the inputs, the output must be a tool, and the outline must
+be one connected piece that fits inside every stone (a test checks the
+shipped ones).
 
 ### Use real texture files instead of procedural art
 

@@ -24,6 +24,19 @@
 //!   and the planks recipe appears; you learn recipes by finding things,
 //!   not from a wiki.
 //!
+//! - **Knapping.** A recipe with a `"knap"` entry doesn't craft instantly:
+//!   clicking it opens the knapping screen (`knapping.rs`), where you shape a
+//!   stone toward the tool head's outline and the result's quality depends on
+//!   how well you did.
+//!
+//!   ```json
+//!   "knap": { "stone": "pebble", "outline": ["................", "...16 rows of 16..."] }
+//!   ```
+//!
+//!   `stone` names the input that's the stone being struck (it's used up by
+//!   the first strike); the other inputs (the haft and binding) are used up
+//!   when you finish. The output must be a tool.
+//!
 //! Ingredients come out of storage before the hotbar (so what you've got in
 //! hand is the last thing used up), and the output goes in like a pickup
 //! (`items::give`); whatever doesn't fit is dropped at your feet.
@@ -38,6 +51,7 @@ use crate::interact::Hotbar;
 use crate::inventory::{HeldStack, Inventory};
 use crate::item_registry::{ItemId, ItemRegistry, ItemStack};
 use crate::items::give;
+use crate::knapping::Outline;
 use crate::world::ChunkMap;
 
 /// How far (in blocks, each axis) a station can be from your eyes and still
@@ -50,6 +64,14 @@ pub enum Station {
     Block(BlockId),
 }
 
+/// What makes a recipe a knapping recipe: which input is the stone, and the
+/// outline of the head to shape it toward.
+#[derive(Clone, Debug)]
+pub struct KnapSpec {
+    pub stone: ItemId,
+    pub outline: Outline,
+}
+
 #[derive(Clone, Debug)]
 pub struct Recipe {
     /// The recipe file's name, without `.json`.
@@ -57,6 +79,8 @@ pub struct Recipe {
     pub station: Station,
     pub inputs: Vec<ItemStack>,
     pub output: ItemStack,
+    /// `Some` for a recipe made by knapping instead of crafted at once.
+    pub knap: Option<KnapSpec>,
 }
 
 #[derive(Deserialize)]
@@ -71,11 +95,18 @@ fn one() -> u32 {
 }
 
 #[derive(Deserialize)]
+struct KnapFile {
+    stone: String,
+    outline: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct RecipeFile {
     #[serde(default)]
     station: Option<String>,
     inputs: Vec<StackFile>,
     output: StackFile,
+    knap: Option<KnapFile>,
 }
 
 #[derive(Resource, Default)]
@@ -118,11 +149,27 @@ impl RecipeBook {
                 ),
             };
             assert!(!file.inputs.is_empty(), "recipe {path:?} has no inputs");
+            let inputs: Vec<ItemStack> = file.inputs.iter().map(stack).collect();
+            let output = stack(&file.output);
+            let knap = file.knap.as_ref().map(|k| {
+                let stone = items
+                    .by_name(&k.stone)
+                    .unwrap_or_else(|| panic!("recipe {path:?}: knap stone {:?} is not an item", k.stone));
+                assert!(
+                    inputs.iter().any(|i| i.id == stone),
+                    "recipe {path:?}: the knap stone {:?} must also be one of the inputs",
+                    k.stone
+                );
+                assert!(items.tool(output.id).is_some(), "recipe {path:?}: a knapped recipe must make a tool");
+                let outline = Outline::parse(&k.outline).unwrap_or_else(|err| panic!("recipe {path:?}: {err}"));
+                KnapSpec { stone, outline }
+            });
             let recipe = Recipe {
                 id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
                 station,
-                inputs: file.inputs.iter().map(stack).collect(),
-                output: stack(&file.output),
+                inputs,
+                output,
+                knap,
             };
             book.add(recipe);
         }
@@ -181,23 +228,64 @@ pub fn craft(recipe: &Recipe, hotbar: &mut [ItemStack], storage: &mut [ItemStack
         return None;
     }
     for input in &recipe.inputs {
-        let mut need = input.count;
-        for slot in storage.iter_mut().rev().chain(hotbar.iter_mut().rev()) {
-            if need == 0 {
-                break;
-            }
-            if slot.is_empty() || slot.id != input.id {
-                continue;
-            }
-            let taken = need.min(slot.count);
-            slot.count -= taken;
-            need -= taken;
-            if slot.count == 0 {
-                *slot = ItemStack::EMPTY;
-            }
-        }
+        take_items(hotbar, storage, input.id, input.count);
     }
     Some(give(hotbar, storage, recipe.output, max_stack))
+}
+
+/// Takes up to `count` of `item` out of storage first, then the hotbar (each
+/// from its last slot backwards, so what's in hand goes last). Returns how
+/// many it actually took.
+pub fn take_items(hotbar: &mut [ItemStack], storage: &mut [ItemStack], item: ItemId, count: u32) -> u32 {
+    let mut need = count;
+    for slot in storage.iter_mut().rev().chain(hotbar.iter_mut().rev()) {
+        if need == 0 {
+            break;
+        }
+        if slot.is_empty() || slot.id != item {
+            continue;
+        }
+        let taken = need.min(slot.count);
+        slot.count -= taken;
+        need -= taken;
+        if slot.count == 0 {
+            *slot = ItemStack::EMPTY;
+        }
+    }
+    count - need
+}
+
+/// Whether a knapping recipe's inputs are all on hand (so the screen can open).
+pub fn can_start_knapping(recipe: &Recipe, hotbar: &[ItemStack], storage: &[ItemStack]) -> bool {
+    recipe.knap.is_some() && times_craftable(recipe, hotbar, storage) >= 1
+}
+
+/// The first strike uses up the stone (all of that input's count).
+pub fn consume_knap_stone(recipe: &Recipe, hotbar: &mut [ItemStack], storage: &mut [ItemStack]) -> bool {
+    let Some(knap) = &recipe.knap else { return false };
+    let count = recipe.inputs.iter().filter(|i| i.id == knap.stone).map(|i| i.count).sum();
+    take_items(hotbar, storage, knap.stone, count) == count
+}
+
+/// Finishes a knapped tool: the non-stone inputs (haft, binding) are used up
+/// and the tool arrives at `quality`. `None`, changing nothing, if one of
+/// them is missing; otherwise whatever didn't fit in the inventory.
+pub fn finish_knapping(
+    recipe: &Recipe,
+    quality: u8,
+    hotbar: &mut [ItemStack],
+    storage: &mut [ItemStack],
+    max_stack: u32,
+) -> Option<u32> {
+    let knap = recipe.knap.as_ref()?;
+    let rest = || recipe.inputs.iter().filter(|i| i.id != knap.stone);
+    if rest().any(|i| count_of(hotbar.iter().chain(storage.iter()), i.id) < i.count) {
+        return None;
+    }
+    for input in rest() {
+        take_items(hotbar, storage, input.id, input.count);
+    }
+    Some(give(hotbar, storage, ItemStack { quality, ..recipe.output }, max_stack))
 }
 
 /// Every item the player has ever held in this world - what decides which
@@ -343,6 +431,7 @@ mod tests {
             station: Station::Block(bench),
             inputs: vec![ItemStack::new(items.id("stick"), 1)],
             output: ItemStack::new(items.id("dirt"), 1),
+            knap: None,
         });
         let ids = |stations: &HashSet<BlockId>, known: &HashSet<ItemId>| {
             book.visible(stations, known).map(|(_, r)| r.id.clone()).collect::<Vec<_>>()
@@ -367,6 +456,7 @@ mod tests {
             station: Station::Block(bench),
             inputs: vec![ItemStack::new(1, 1)],
             output: ItemStack::new(1, 1),
+            knap: None,
         });
         let mut map = ChunkMap::default();
         map.chunks.insert(
@@ -382,5 +472,57 @@ mod tests {
         map.set_block(at + IVec3::new(STATION_REACH, 0, 0), 0);
         map.set_block(at + IVec3::new(STATION_REACH + 1, 0, 0), bench);
         assert!(stations_near(&map, &book, at).is_empty());
+    }
+
+    #[test]
+    fn every_stone_tool_is_knapped_by_hand_from_a_pebble() {
+        let (_, items, book) = shipped();
+        let pebble = items.id("pebble");
+        let mut n = 0;
+        for r in &book.recipes {
+            let Some(k) = &r.knap else { continue };
+            n += 1;
+            assert_eq!(k.stone, pebble, "{}", r.id);
+            assert_eq!(r.station, Station::Hand, "{} needs no bench", r.id);
+            assert!(items.tool(r.output.id).is_some(), "{}", r.id);
+            assert!(k.outline.area() >= 20, "{} outline is tiny", r.id);
+        }
+        assert_eq!(n, 5, "pickaxe, axe, shovel, hoe, dagger");
+    }
+
+    #[test]
+    fn knapping_uses_the_pebble_on_the_first_strike_and_the_rest_on_finishing() {
+        let (_, items, book) = shipped();
+        let r = recipe(&book, &items, "stone_axe");
+        let (pebble, stick, twig) = (items.id("pebble"), items.id("stick"), items.id("twig"));
+        let mut hotbar = vec![ItemStack::EMPTY; 4];
+        let mut storage = vec![ItemStack::EMPTY; 4];
+        assert!(!can_start_knapping(r, &hotbar, &storage));
+        for input in &r.inputs {
+            give(&mut hotbar, &mut storage, ItemStack::new(input.id, input.count + 1), 64);
+        }
+        assert!(can_start_knapping(r, &hotbar, &storage));
+        let have = |h: &[ItemStack], s: &[ItemStack], id| count_of(h.iter().chain(s.iter()), id);
+        let before = have(&hotbar, &storage, pebble);
+        assert!(consume_knap_stone(r, &mut hotbar, &mut storage));
+        assert!(have(&hotbar, &storage, pebble) < before);
+        let (sticks, twigs) = (have(&hotbar, &storage, stick), have(&hotbar, &storage, twig));
+        assert_eq!(finish_knapping(r, 87, &mut hotbar, &mut storage, 1), Some(0));
+        let made: Vec<_> = hotbar.iter().chain(storage.iter()).filter(|s| s.id == r.output.id).collect();
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].quality, 87, "the tool carries its quality");
+        assert!(have(&hotbar, &storage, stick) + have(&hotbar, &storage, twig) < sticks + twigs, "haft used up");
+    }
+
+    #[test]
+    fn finishing_without_the_haft_changes_nothing() {
+        let (_, items, book) = shipped();
+        let r = recipe(&book, &items, "stone_axe");
+        let mut hotbar = vec![ItemStack::EMPTY; 4];
+        let mut storage = vec![ItemStack::EMPTY; 4];
+        give(&mut hotbar, &mut storage, ItemStack::new(items.id("pebble"), 1), 64);
+        let snapshot = hotbar.clone();
+        assert_eq!(finish_knapping(r, 50, &mut hotbar, &mut storage, 1), None);
+        assert_eq!(hotbar, snapshot);
     }
 }
