@@ -2546,4 +2546,43 @@ etc.) instead of inventing a new approach:
   where it should: against a covered neighbour. The flat look is kept as
   `SurfaceStyle::Flat` behind `mesh_chunk_styled`, the `FallingWaterStyle`
   pattern, so the old step-wall tests still run against it.
+- **Per-tool quality is per-*stack* data, which means every place that
+  rebuilds a stack from its parts is now a place that can silently drop
+  it.** `ItemStack` gained `quality: u8` (a whole percent, 0 for anything
+  that isn't a tool), and `ItemStack { id, count }` literals were everywhere
+  (50 of them). The mechanical part was a regex to `ItemStack::new`; the part
+  that mattered was reading every site that *derives* a stack from another
+  one - a partial move (`quick_move`'s leftovers, the cursor's remainder, a
+  thrown drop, a stack landing in an empty slot) has to be `ItemStack {
+  count, ..stack }`, not `new(stack.id, count)`, or the tool quietly comes
+  back as quality 0. The regex had silently done exactly that to five sites,
+  found only by grepping the rewritten calls for `stack.id`. Merging is the
+  other half: `ItemStack::same_item` (id *and* quality) replaced `.id ==` in
+  `click_slot` and `give`. Tools' `max_stack` is forced to 1 anyway, so
+  nothing merges in practice today; the check is what keeps that true if a
+  tool ever stacks. Each of the three (merge on click, merge on shift-click,
+  save/reload of slots, and of a dropped item) has a test that goes red when
+  it's reverted.
+- **Tiers are independent of each other on purpose, so there is no
+  cross-tier invariant to test - only a within-tier one.** An early draft
+  of the design required each tier's worst tool to beat the previous tier's
+  best, with the band ratios checked at load. The user wanted the opposite:
+  a perfect iron sword that still beats a poor steel one is the interesting
+  decision. `Tier::multiplier` is a straight line from the band's low to its
+  high value, the loader only insists on `0 < low <= high` (quality never
+  makes a tool worse), and a test pins the overlap case so nobody "fixes"
+  it later. The tooltip shows the quality *name* (colour-coded) and never
+  the number; the tier bands decide how much a name is worth.
+- **`SAVE_FORMAT` 4 -> 5 for a field that's a plain serde default.** Same
+  reason as every previous bump: an older build would read a saved tool at
+  quality 0 and write that back over the real value. `quality` is skipped
+  when zero, so saves of ordinary stacks look exactly as before.
+- **A timing-sensitive headless test can fail under parallel load without
+  being broken.** `streaming_while_moving_keeps_the_light_backlog_small`
+  needs >150 chunks to stream in during a fixed number of frames; with 23
+  headless apps competing for CPU it sometimes saw 99. It passes alone and
+  with `--test-threads=1`, and it failed once with the new test skipped, so
+  it isn't the new code. Not fixed here (it would mean reworking the test's
+  frame budget); worth remembering before chasing a "regression" that is
+  just a loaded machine.
 

@@ -1,0 +1,5 @@
+{
+  "id": "stone_dagger",
+  "name": "Stone Dagger",
+  "tool": { "kind": "dagger", "tier": "stone" }
+}

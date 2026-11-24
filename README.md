@@ -167,6 +167,37 @@ Mine the block under one and it drops as an item. Both are
 cell, and you swim past it as if it were water. They're the first step
 toward the first tools.
 
+### Tools, tiers and quality
+
+Tools are items with a `"tool"` entry, and they come in **tiers** (`tiers/*.json`,
+one per material):
+
+```json
+{ "id": "stone", "name": "Stone", "mining_speed": 2.0, "damage": 3.0, "quality_band": [0.75, 1.15] }
+```
+
+```json
+{ "id": "stone_pickaxe", "name": "Stone Pickaxe", "tool": { "kind": "pickaxe", "tier": "stone" } }
+```
+
+Kinds are `axe`, `pickaxe`, `shovel`, `hoe`, `dagger`, `longsword` and
+`greatsword`. Stone has an axe, pickaxe, shovel, hoe and dagger so far (no
+recipes yet, so they only come from Creative, with placeholder art).
+
+**Quality** is a whole percent, 0 to 100, stored on the tool's stack (so
+tools never stack; their `max_stack` is forced to 1). It says how good *this*
+tool is *for its tier*: a tool's stats are the tier's base stats times a
+multiplier that runs from the band's low value at 0% to its high value at
+100%. **Tiers are independent**: nothing requires a tier's worst tool to beat
+the previous tier's best, so a perfect iron sword can still out-damage a poor
+steel one. The overlap is a matter of the bases and bands you pick.
+
+The tooltip never shows the number. A tool shows a quality name in that
+quality's colour: Trash (0-19, grey), Common (20-59, white), Rare (60-84,
+blue), Epic (85-99, purple), and Legendary only at exactly 100 (gold). Tools
+from Creative start at Common (quality 50). Quality saves with the tool, in
+slots and as a dropped item; knapping and forging will be what sets it.
+
 ### Health
 
 `health.rs`. Ten hearts (20 points) and ten bubbles of breath above the
@@ -1016,7 +1047,9 @@ Only `id` is required; `texture` defaults to `id` and works like a block
 face's (a procedural painter in `atlas.rs`, a `textures/blocks/<name>.png`,
 or the checkerboard placeholder). An item id can't also be a block id.
 Blocks can drop it with `"drops": "stick"` or
-`"drops": {"item": "stick", "chance": 0.2, "count": 1}`.
+`"drops": {"item": "stick", "chance": 0.2, "count": 1}`. A `"tool": {"kind":
+.., "tier": ..}` entry makes it a tool (see [Tools, tiers and
+quality](#tools-tiers-and-quality)).
 
 ### Add a recipe
 

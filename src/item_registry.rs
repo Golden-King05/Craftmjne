@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::blocks::{find_data_dir, BlockId, BlockRegistry, Drops, AIR, DEFAULT_MAX_STACK};
+use crate::tools::{Tier, TierBook, ToolKind, ToolSpec, DEFAULT_TOOL_QUALITY, MAX_QUALITY};
 
 pub type ItemId = u16;
 
@@ -36,14 +37,36 @@ pub const NO_ITEM: ItemId = 0;
 /// A slot's contents: which item and how many. `id == NO_ITEM` (or `count
 /// == 0`) means empty — `is_empty()` treats either as the same thing, so
 /// callers don't need to keep both fields in sync by hand.
+///
+/// `quality` (a whole percent, see `tools.rs`) is per-stack data that only
+/// means something for tools, which never stack; it's `0` for everything
+/// else. Anything that splits, moves or copies a stack has to carry it along
+/// - `ItemStack { count, ..stack }` rather than rebuilding from `id` - and
+/// anything that merges two stacks has to check [`ItemStack::same_item`].
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct ItemStack {
     pub id: ItemId,
     pub count: u32,
+    pub quality: u8,
 }
 
 impl ItemStack {
-    pub const EMPTY: ItemStack = ItemStack { id: NO_ITEM, count: 0 };
+    pub const EMPTY: ItemStack = ItemStack { id: NO_ITEM, count: 0, quality: 0 };
+
+    /// A stack with no quality (everything that isn't a tool).
+    pub const fn new(id: ItemId, count: u32) -> Self {
+        Self { id, count, quality: 0 }
+    }
+
+    pub const fn with_quality(self, quality: u8) -> Self {
+        Self { quality, ..self }
+    }
+
+    /// Whether two stacks are the same thing, so they may merge: the same
+    /// item *and* the same quality.
+    pub fn same_item(&self, other: &ItemStack) -> bool {
+        self.id == other.id && self.quality == other.quality
+    }
 
     pub fn is_empty(&self) -> bool {
         self.id == NO_ITEM || self.count == 0
@@ -64,6 +87,14 @@ pub struct ItemDef {
     pub name: String,
     pub max_stack: u32,
     pub kind: ItemKind,
+    /// `Some` for a tool: its kind and which tier's stats it uses.
+    pub tool: Option<ToolSpec>,
+}
+
+#[derive(Deserialize)]
+struct ToolFile {
+    kind: ToolKind,
+    tier: String,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +103,7 @@ struct ItemFile {
     name: Option<String>,
     max_stack: Option<u32>,
     texture: Option<String>,
+    tool: Option<ToolFile>,
 }
 
 #[derive(Resource)]
@@ -83,12 +115,32 @@ pub struct ItemRegistry {
     /// Atlas tile per item, filled in by `resolve_tiles` once the atlas is
     /// built - meaningful for plain items only.
     tiles: Vec<u16>,
+    /// The tiers tool items name. Empty until `with_tiers`.
+    pub tiers: TierBook,
 }
 
 impl ItemRegistry {
-    /// Block items plus every `items/*.json` file.
+    /// Block items, every `items/*.json` file, and the `tiers/` they name.
     pub fn with_defaults(blocks: &BlockRegistry) -> Self {
-        Self::load_from_dir(blocks, &find_data_dir("items"))
+        Self::load_from_dir(blocks, &find_data_dir("items")).with_tiers(TierBook::with_defaults())
+    }
+
+    /// Attaches the tier list, panicking with a clear message if a tool item
+    /// names a tier that doesn't exist - startup content, like a missing
+    /// texture or an unknown drop.
+    pub fn with_tiers(mut self, tiers: TierBook) -> Self {
+        for def in &self.defs {
+            if let Some(tool) = &def.tool {
+                assert!(
+                    tiers.get(&tool.tier).is_some(),
+                    "item {:?}: tool names unknown tier {:?}",
+                    def.id,
+                    tool.tier
+                );
+            }
+        }
+        self.tiers = tiers;
+        self
     }
 
     /// Panics, with a clear message, on an unreadable or malformed file, an
@@ -110,10 +162,13 @@ impl ItemRegistry {
                     .unwrap_or_else(|err| panic!("failed to read item file {path:?}: {err}"));
                 let file: ItemFile = serde_json::from_str(&text)
                     .unwrap_or_else(|err| panic!("failed to parse item file {path:?}: {err}"));
+                let tool = file.tool.map(|t| ToolSpec { kind: t.kind, tier: t.tier });
                 ItemDef {
                     name: file.name.unwrap_or_else(|| crate::blocks::title_case(&file.id)),
-                    max_stack: file.max_stack.unwrap_or(DEFAULT_MAX_STACK).max(1),
+                    // Quality is per-stack, so a tool can't share a slot.
+                    max_stack: if tool.is_some() { 1 } else { file.max_stack.unwrap_or(DEFAULT_MAX_STACK).max(1) },
                     kind: ItemKind::Plain { texture: file.texture.unwrap_or_else(|| file.id.clone()) },
+                    tool,
                     id: file.id,
                 }
             })
@@ -122,12 +177,13 @@ impl ItemRegistry {
     }
 
     pub fn build(blocks: &BlockRegistry, plain: Vec<ItemDef>) -> Self {
-        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR) };
+        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None };
         let mut reg = Self {
             defs: vec![empty],
             by_name: HashMap::new(),
             of_block: vec![NO_ITEM; blocks.defs.len()],
             tiles: Vec::new(),
+            tiers: TierBook::default(),
         };
         for (block, def) in blocks.defs.iter().enumerate().skip(1) {
             if !def.item {
@@ -138,6 +194,7 @@ impl ItemRegistry {
                 name: def.name.clone(),
                 max_stack: def.max_stack.max(1),
                 kind: ItemKind::Block(block as BlockId),
+                tool: None,
             });
             reg.of_block[block] = id;
         }
@@ -182,6 +239,33 @@ impl ItemRegistry {
     /// For untrusted names (save files, recipes).
     pub fn by_name(&self, name: &str) -> Option<ItemId> {
         self.by_name.get(name).copied()
+    }
+
+    /// `Some` if `id` is a tool.
+    pub fn tool(&self, id: ItemId) -> Option<&ToolSpec> {
+        self.def(id).tool.as_ref()
+    }
+
+    /// The tier a tool item belongs to.
+    pub fn tier_of(&self, id: ItemId) -> Option<&Tier> {
+        self.tiers.get(&self.tool(id)?.tier)
+    }
+
+    /// A fresh stack of `count` of `id`: a tool starts at the default
+    /// quality (`tools::DEFAULT_TOOL_QUALITY`), anything else has none.
+    /// For items that appear without being made - Creative's list.
+    pub fn stack(&self, id: ItemId, count: u32) -> ItemStack {
+        let quality = if self.tool(id).is_some() { DEFAULT_TOOL_QUALITY } else { 0 };
+        ItemStack { id, count, quality }
+    }
+
+    /// A stack read back from a save (or any untrusted source): the count
+    /// is clamped to what one slot holds, and quality is clamped to a
+    /// percent and dropped entirely for anything that isn't a tool, so a
+    /// hand-edited save can't put an impossible stack in a slot.
+    pub fn restore(&self, id: ItemId, count: u32, quality: u8) -> ItemStack {
+        let quality = if self.tool(id).is_some() { quality.min(MAX_QUALITY) } else { 0 };
+        ItemStack { id, count: count.min(self.max_stack(id)), quality }
     }
 
     pub fn max_stack(&self, id: ItemId) -> u32 {
@@ -238,7 +322,7 @@ impl ItemRegistry {
                 (self.by_name(item)?, *count)
             }
         };
-        Some(ItemStack { id, count })
+        Some(ItemStack::new(id, count))
     }
 }
 
@@ -290,7 +374,7 @@ mod tests {
     fn shipped_blocks_drop_what_they_should() {
         let (blocks, items) = shipped();
         let drop = |block: &str, roll: f32| items.drop_of(&blocks, blocks.id(block), roll);
-        let one = |item: &str| Some(ItemStack { id: items.id(item), count: 1 });
+        let one = |item: &str| Some(ItemStack::new(items.id(item), 1));
         assert_eq!(drop("stone", 0.5), one("cobblestone"));
         assert_eq!(drop("grass", 0.5), one("dirt"));
         assert_eq!(drop("dirt", 0.5), one("dirt"));
@@ -322,7 +406,70 @@ mod tests {
             name: "Dirt".into(),
             max_stack: 1,
             kind: ItemKind::Plain { texture: "dirt".into() },
+            tool: None,
         };
         ItemRegistry::build(&blocks, vec![def]);
+    }
+
+    #[test]
+    fn tool_items_load_with_a_kind_and_tier_and_never_stack() {
+        let (_blocks, items) = shipped();
+        for (name, kind) in [
+            ("stone_axe", ToolKind::Axe),
+            ("stone_pickaxe", ToolKind::Pickaxe),
+            ("stone_shovel", ToolKind::Shovel),
+            ("stone_hoe", ToolKind::Hoe),
+            ("stone_dagger", ToolKind::Dagger),
+        ] {
+            let id = items.id(name);
+            assert_eq!(items.tool(id).map(|t| t.kind), Some(kind), "{name}");
+            assert_eq!(items.tier_of(id).map(|t| t.id.as_str()), Some("stone"));
+            assert_eq!(items.max_stack(id), 1, "{name}: quality is per-stack, so a tool can't share a slot");
+        }
+        assert!(items.tool(items.id("stick")).is_none());
+        assert!(items.tier_of(items.id("stick")).is_none());
+        assert_eq!(items.max_stack(items.id("stick")), DEFAULT_MAX_STACK, "plain items still stack");
+    }
+
+    #[test]
+    fn a_fresh_tool_starts_at_the_default_quality_and_anything_else_has_none() {
+        let (_blocks, items) = shipped();
+        assert_eq!(items.stack(items.id("stone_pickaxe"), 1).quality, DEFAULT_TOOL_QUALITY);
+        assert_eq!(items.stack(items.id("stick"), 7), ItemStack::new(items.id("stick"), 7));
+        assert_eq!(items.stack(items.id("dirt"), 1).quality, 0);
+    }
+
+    #[test]
+    fn restoring_a_stack_clamps_quality_and_drops_it_for_non_tools() {
+        let (_blocks, items) = shipped();
+        let pick = items.id("stone_pickaxe");
+        assert_eq!(items.restore(pick, 1, 83).quality, 83);
+        assert_eq!(items.restore(pick, 1, 250).quality, MAX_QUALITY, "a hand-edited quality is clamped");
+        assert_eq!(items.restore(pick, 40, 10).count, 1, "and a tool can't be restored as a stack");
+        assert_eq!(items.restore(items.id("dirt"), 5, 90).quality, 0, "dirt has no quality");
+    }
+
+    #[test]
+    fn two_stacks_of_one_tool_at_different_qualities_are_not_the_same_item() {
+        let (_blocks, items) = shipped();
+        let pick = items.id("stone_pickaxe");
+        let (a, b) = (ItemStack::new(pick, 1).with_quality(80), ItemStack::new(pick, 1).with_quality(81));
+        assert!(a.same_item(&a));
+        assert!(!a.same_item(&b));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown tier")]
+    fn a_tool_naming_an_unknown_tier_fails_at_startup() {
+        let blocks = BlockRegistry::with_defaults();
+        let def = ItemDef {
+            id: "mithril_pick".into(),
+            name: "Mithril Pick".into(),
+            max_stack: 1,
+            kind: ItemKind::Plain { texture: "stick".into() },
+            tool: Some(ToolSpec { kind: ToolKind::Pickaxe, tier: "mithril".into() }),
+        };
+        ItemRegistry::build(&blocks, vec![def]).with_tiers(TierBook::with_defaults());
     }
 }

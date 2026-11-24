@@ -896,7 +896,7 @@ fn enter_world(
         .iter()
         .filter_map(|item| {
             let id = items.by_name(&item.block)?;
-            let stack = ItemStack { id, count: item.count.min(items.max_stack(id)) };
+            let stack = items.restore(id, item.count, item.quality);
             Some((stack, Vec3::new(item.x, item.y, item.z), item.age))
         })
         .collect();
@@ -1124,6 +1124,7 @@ impl CarriedState<'_, '_> {
                 z: item.pos.z,
                 block: registry.def(item.stack.id).id.clone(),
                 count: item.stack.count,
+                quality: item.stack.quality,
                 age: item.age,
             })
             .collect();

@@ -1,0 +1,7 @@
+{
+  "id": "stone",
+  "name": "Stone",
+  "mining_speed": 2.0,
+  "damage": 3.0,
+  "quality_band": [0.75, 1.15]
+}

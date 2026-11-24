@@ -1673,9 +1673,9 @@ mod tests {
     #[test]
     fn item_stack_is_empty_for_air_or_zero_count() {
         assert!(ItemStack::EMPTY.is_empty());
-        assert!(ItemStack { id: AIR, count: 5 }.is_empty());
-        assert!(ItemStack { id: 3, count: 0 }.is_empty());
-        assert!(!ItemStack { id: 3, count: 1 }.is_empty());
+        assert!(ItemStack::new(AIR, 5).is_empty());
+        assert!(ItemStack::new(3, 0).is_empty());
+        assert!(!ItemStack::new(3, 1).is_empty());
     }
 
     #[test]

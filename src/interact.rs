@@ -421,7 +421,7 @@ fn interact(
                 hotbar.selected = existing;
             } else {
                 let sel = hotbar.selected;
-                hotbar.slots[sel] = ItemStack { id, count: content.items.max_stack(id) };
+                hotbar.slots[sel] = content.items.stack(id, content.items.max_stack(id));
             }
         }
     }

@@ -28,6 +28,7 @@ pub mod snapshot;
 pub mod state;
 pub mod terrain;
 pub mod text_color;
+pub mod tools;
 pub mod texture_report;
 pub mod ui;
 pub mod world;

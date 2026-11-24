@@ -1037,7 +1037,7 @@ fn a_dropped_item_falls_and_is_picked_up_into_the_hotbar() {
     let away = feet + Vec3::new(4.0, 2.0, 0.0);
     app.world_mut().send_event(SpawnDrop {
         pos: away,
-        stack: ItemStack { id: dirt, count: 3 },
+        stack: ItemStack::new(dirt, 3),
         vel: Vec3::ZERO,
         pickup_delay: 0.0,
     });
@@ -1057,7 +1057,7 @@ fn a_dropped_item_falls_and_is_picked_up_into_the_hotbar() {
     // Then right at the player's feet: picked up.
     app.world_mut().send_event(SpawnDrop {
         pos: feet + Vec3::Y * 0.5,
-        stack: ItemStack { id: dirt, count: 2 },
+        stack: ItemStack::new(dirt, 2),
         vel: Vec3::ZERO,
         pickup_delay: 0.0,
     });
@@ -1065,7 +1065,7 @@ fn a_dropped_item_falls_and_is_picked_up_into_the_hotbar() {
         app.update();
     }
     let hotbar = app.world().resource::<Hotbar>();
-    assert_eq!(hotbar.slots[0], ItemStack { id: dirt, count: 2 });
+    assert_eq!(hotbar.slots[0], ItemStack::new(dirt, 2));
     let world = app.world_mut();
     assert_eq!(world.query::<&DroppedItem>().iter(world).count(), 1, "only the far item is left");
 }
@@ -1083,12 +1083,12 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
     };
     {
         let mut hotbar = app.world_mut().resource_mut::<Hotbar>();
-        hotbar.slots[2] = ItemStack { id: dirt, count: 17 };
+        hotbar.slots[2] = ItemStack::new(dirt, 17);
         hotbar.selected = 2;
     }
-    app.world_mut().resource_mut::<Inventory>().slots[5] = ItemStack { id: log, count: 4 };
+    app.world_mut().resource_mut::<Inventory>().slots[5] = ItemStack::new(log, 4);
     let stick = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("stick");
-    app.world_mut().resource_mut::<craftmjne::inventory::HeldStack>().0 = ItemStack { id: stick, count: 3 };
+    app.world_mut().resource_mut::<craftmjne::inventory::HeldStack>().0 = ItemStack::new(stick, 3);
     // Discovered earlier but no longer carried: only the save remembers it.
     let twig = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("twig");
     app.world_mut().resource_mut::<craftmjne::crafting::KnownItems>().0.insert(twig);
@@ -1099,7 +1099,7 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
     }
     app.world_mut().send_event(SpawnDrop {
         pos: feet + Vec3::new(5.0, 1.0, 5.0),
-        stack: ItemStack { id: log, count: 9 },
+        stack: ItemStack::new(log, 9),
         vel: Vec3::ZERO,
         pickup_delay: 0.0,
     });
@@ -1115,12 +1115,12 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
     let mut app2 = reload_app(&temp);
     app2.update(); // the loaded items spawn
     let hotbar = app2.world().resource::<Hotbar>();
-    assert_eq!(hotbar.slots[2], ItemStack { id: dirt, count: 17 });
+    assert_eq!(hotbar.slots[2], ItemStack::new(dirt, 17));
     assert_eq!(hotbar.selected, 2);
-    assert_eq!(app2.world().resource::<Inventory>().slots[5], ItemStack { id: log, count: 4 });
+    assert_eq!(app2.world().resource::<Inventory>().slots[5], ItemStack::new(log, 4));
     // The stick on the cursor went back into the hotbar's first free slot,
     // and everything held was remembered as discovered.
-    assert_eq!(app2.world().resource::<Hotbar>().slots[0], ItemStack { id: stick, count: 3 });
+    assert_eq!(app2.world().resource::<Hotbar>().slots[0], ItemStack::new(stick, 3));
     let known = &app2.world().resource::<craftmjne::crafting::KnownItems>().0;
     assert!(known.contains(&dirt) && known.contains(&log) && known.contains(&stick), "{known:?}");
     let twig = app2.world().resource::<craftmjne::item_registry::ItemRegistry>().id("twig");
@@ -1130,8 +1130,46 @@ fn inventory_health_and_dropped_items_survive_a_reload() {
     assert_eq!((player.vitals.health, player.vitals.air), (11.0, 6.0));
     let items: Vec<(ItemStack, Vec3)> = world.query::<&DroppedItem>().iter(world).map(|i| (i.stack, i.pos)).collect();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].0, ItemStack { id: log, count: 9 });
+    assert_eq!(items[0].0, ItemStack::new(log, 9));
     assert!(items[0].1.distance(feet + Vec3::new(5.0, 1.0, 5.0)) < 1.5, "item moved to {:?}", items[0].1);
+}
+
+/// A tool's quality lives on its stack, so it has to ride along through the
+/// hotbar, storage, the cursor and a dropped item, and come back exactly -
+/// two tools of one kind but different quality are different things.
+#[test]
+fn a_tools_quality_survives_a_reload_in_every_place_it_can_sit() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let items = app.world().resource::<craftmjne::item_registry::ItemRegistry>();
+    let (pick, axe, dirt) = (items.id("stone_pickaxe"), items.id("stone_axe"), items.id("dirt"));
+    app.world_mut().resource_mut::<Hotbar>().slots[1] = ItemStack::new(pick, 1).with_quality(83);
+    app.world_mut().resource_mut::<Inventory>().slots[3] = ItemStack::new(pick, 1).with_quality(7);
+    app.world_mut().resource_mut::<Inventory>().slots[4] = ItemStack::new(dirt, 5);
+    let feet = {
+        let world = app.world_mut();
+        world.query::<&Player>().single(world).unwrap().pos
+    };
+    app.world_mut().send_event(SpawnDrop {
+        pos: feet + Vec3::new(5.0, 1.0, 5.0),
+        stack: ItemStack::new(axe, 1).with_quality(100),
+        vel: Vec3::ZERO,
+        pickup_delay: 0.0,
+    });
+    app.update();
+
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    let mut app2 = reload_app(&temp);
+    app2.update();
+    assert_eq!(app2.world().resource::<Hotbar>().slots[1], ItemStack::new(pick, 1).with_quality(83));
+    let storage = app2.world().resource::<Inventory>();
+    assert_eq!(storage.slots[3], ItemStack::new(pick, 1).with_quality(7));
+    assert_eq!(storage.slots[4], ItemStack::new(dirt, 5), "an ordinary stack still has no quality");
+    let world = app2.world_mut();
+    let dropped: Vec<ItemStack> = world.query::<&DroppedItem>().iter(world).map(|i| i.stack).collect();
+    assert_eq!(dropped, vec![ItemStack::new(axe, 1).with_quality(100)], "the dropped axe lost its quality");
 }
 
 /// A new world starts with nothing carried even if the previous world in
@@ -1142,8 +1180,8 @@ fn a_new_world_does_not_inherit_the_last_worlds_inventory() {
     let temp = temp_saves();
     let mut app = headless_app(&temp);
     let dirt = app.world().resource::<craftmjne::item_registry::ItemRegistry>().id("dirt");
-    app.world_mut().resource_mut::<Hotbar>().slots[0] = ItemStack { id: dirt, count: 5 };
-    app.world_mut().resource_mut::<Inventory>().slots[0] = ItemStack { id: dirt, count: 5 };
+    app.world_mut().resource_mut::<Hotbar>().slots[0] = ItemStack::new(dirt, 5);
+    app.world_mut().resource_mut::<Inventory>().slots[0] = ItemStack::new(dirt, 5);
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
     app.update();
 

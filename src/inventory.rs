@@ -33,6 +33,7 @@ use crate::items::{give, SpawnDrop, THROWN_PICKUP_DELAY};
 use crate::player::Player;
 use crate::save::{GameMode, InventorySave, SlotSave};
 use crate::state::{AppState, DeathState, PauseState};
+use crate::tools::Quality;
 use crate::ui::ItemIcons;
 use crate::world::ChunkMap;
 
@@ -74,7 +75,7 @@ pub fn click_slot(held: &mut ItemStack, slot: &mut ItemStack, max_stack: u32) {
         *held = std::mem::take(slot);
     } else if slot.is_empty() {
         *slot = std::mem::take(held);
-    } else if slot.id == held.id {
+    } else if slot.same_item(held) {
         let moved = held.count.min(max_stack.saturating_sub(slot.count));
         slot.count += moved;
         held.count -= moved;
@@ -100,7 +101,7 @@ pub fn quick_move(from: SlotRef, hotbar: &mut [ItemStack], storage: &mut [ItemSt
     let stack = std::mem::take(source);
     let left = give(dest, &mut [], stack, max_stack(stack.id));
     if left > 0 {
-        *source = ItemStack { id: stack.id, count: left };
+        *source = ItemStack { count: left, ..stack };
     }
 }
 
@@ -110,13 +111,13 @@ pub fn stacks_to_save(slots: &[ItemStack], registry: &ItemRegistry) -> Vec<Optio
 }
 
 fn stack_to_save(stack: ItemStack, registry: &ItemRegistry) -> Option<SlotSave> {
-    (!stack.is_empty()).then(|| SlotSave { block: registry.def(stack.id).id.clone(), count: stack.count })
+    (!stack.is_empty()).then(|| SlotSave { block: registry.def(stack.id).id.clone(), count: stack.count, quality: stack.quality })
 }
 
 fn stack_from_save(saved: &SlotSave, registry: &ItemRegistry) -> ItemStack {
     match registry.by_name(&saved.block) {
         Some(id) if id != NO_ITEM && saved.count > 0 => {
-            ItemStack { id, count: saved.count.min(registry.max_stack(id)) }
+            registry.restore(id, saved.count, saved.quality)
         }
         _ => ItemStack::EMPTY,
     }
@@ -166,7 +167,7 @@ pub fn restore_inventory(
     hotbar.selected = saved.selected.min(hotbar.slots.len() - 1);
     if let Some(stack) = saved.held.as_ref().map(|s| stack_from_save(s, registry)).filter(|s| !s.is_empty()) {
         let left = give(&mut hotbar.slots, &mut inventory.slots, stack, registry.max_stack(stack.id));
-        held.0 = ItemStack { id: stack.id, count: left };
+        held.0 = ItemStack { count: left, ..stack };
         if left == 0 {
             held.0 = ItemStack::EMPTY;
         }
@@ -187,7 +188,7 @@ enum CreativeTab {
 pub struct InventoryState {
     pub open: bool,
     was_grabbed: bool,
-    tooltip: Option<String>,
+    tooltip: Option<Tip>,
     creative_tab: CreativeTab,
 }
 
@@ -211,9 +212,28 @@ fn close(inv: &mut InventoryState, window: &mut Window) {
 
 #[derive(Component)]
 struct InventoryRoot;
-/// The item a slot shows, for its tooltip.
+/// The item a slot shows (and, for a tool, its quality), for its tooltip.
 #[derive(Component)]
-struct SlotItem(ItemId);
+struct SlotItem(ItemId, u8);
+
+/// What the tooltip says and the colour it's drawn in.
+#[derive(Clone, PartialEq, Debug)]
+struct Tip {
+    text: String,
+    color: [f32; 3],
+}
+
+/// The tooltip for an item: its name, and for a tool a second line naming
+/// its quality (Trash..Legendary - never the number) with both lines drawn
+/// in that quality's colour.
+fn tip_for(registry: &ItemRegistry, id: ItemId, quality: u8) -> Tip {
+    let name = registry.def(id).name.clone();
+    if registry.tool(id).is_none() {
+        return Tip { text: name, color: [1.0; 3] };
+    }
+    let q = Quality::from_percent(quality);
+    Tip { text: format!("{name}\n{}", q.label()), color: q.color() }
+}
 /// A cell in Creative's item list.
 #[derive(Component)]
 struct CreativeCell;
@@ -301,7 +321,7 @@ fn return_held_stack(
         if let Ok(player) = players.single() {
             drops.write(SpawnDrop {
                 pos: player.eye() - Vec3::Y * 0.3 + player.look_dir() * 0.4,
-                stack: ItemStack { id: stack.id, count: left },
+                stack: ItemStack { count: left, ..stack },
                 vel: player.look_dir() * 2.0,
                 pickup_delay: THROWN_PICKUP_DELAY,
             });
@@ -359,7 +379,7 @@ fn handle_creative_click(
     for (interaction, item) in &clicks {
         if *interaction == Interaction::Pressed {
             let selected = hotbar.selected;
-            hotbar.slots[selected] = ItemStack { id: item.0, count: registry.max_stack(item.0) };
+            hotbar.slots[selected] = registry.stack(item.0, registry.max_stack(item.0));
         }
     }
 }
@@ -395,7 +415,7 @@ fn craft_clicks(
             if let Ok(player) = players.single() {
                 drops.write(SpawnDrop {
                     pos: player.pos + Vec3::Y * 0.5,
-                    stack: ItemStack { id: recipe.output.id, count: overflow },
+                    stack: ItemStack::new(recipe.output.id, overflow),
                     vel: Vec3::ZERO,
                     pickup_delay: THROWN_PICKUP_DELAY,
                 });
@@ -461,7 +481,7 @@ fn track_hovered_item(
     }
     let hovered = slots.iter().find_map(|(interaction, slot)| {
         (slot.0 != NO_ITEM && matches!(interaction, Interaction::Hovered | Interaction::Pressed))
-            .then(|| registry.def(slot.0).name.clone())
+            .then(|| tip_for(&registry, slot.0, slot.1))
     });
     if inv.tooltip != hovered {
         inv.tooltip = hovered;
@@ -494,7 +514,7 @@ fn spawn_slot_row(
                 row.spawn((
                     Button,
                     slot,
-                    SlotItem(stack.id),
+                    SlotItem(stack.id, stack.quality),
                     Node {
                         width: Val::Px(46.0),
                         height: Val::Px(46.0),
@@ -744,7 +764,7 @@ fn sync_inventory_screen(
                                     for id in 1..icons.items.defs.len() as ItemId {
                                         grid.spawn((
                                             Button,
-                                            SlotItem(id),
+                                            SlotItem(id, icons.items.stack(id, 1).quality),
                                             CreativeCell,
                                             Node {
                                                 width: Val::Px(46.0),
@@ -757,7 +777,7 @@ fn sync_inventory_screen(
                                             BackgroundColor(SLOT_BG),
                                         ))
                                         .with_children(|cell| {
-                                            spawn_stack(cell, &icons, ItemStack { id, count: 1 }, 34.0)
+                                            spawn_stack(cell, &icons, ItemStack::new(id, 1), 34.0)
                                         });
                                     }
                                 });
@@ -807,7 +827,7 @@ fn sync_inventory_screen(
 fn sync_cursor_ui(
     inv: Res<InventoryState>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    mut tooltips: Query<(&mut Text, &mut Node, &mut Visibility), (With<TooltipText>, Without<HeldIcon>)>,
+    mut tooltips: Query<(&mut Text, &mut Node, &mut Visibility, &mut TextColor), (With<TooltipText>, Without<HeldIcon>)>,
     mut held_icons: Query<&mut Node, (With<HeldIcon>, Without<TooltipText>)>,
 ) {
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
@@ -815,15 +835,17 @@ fn sync_cursor_ui(
         node.left = Val::Px(cursor.x - 20.0);
         node.top = Val::Px(cursor.y - 20.0);
     }
-    let Ok((mut text, mut node, mut vis)) = tooltips.single_mut() else { return };
-    let Some(name) = &inv.tooltip else {
+    let Ok((mut text, mut node, mut vis, mut color)) = tooltips.single_mut() else { return };
+    let Some(tip) = &inv.tooltip else {
         *vis = Visibility::Hidden;
         return;
     };
     *vis = Visibility::Visible;
-    if text.0 != *name {
-        text.0 = name.clone();
+    if text.0 != tip.text {
+        text.0 = tip.text.clone();
     }
+    let [r, g, b] = tip.color;
+    color.0 = Color::srgb(r, g, b);
     if let Some(cursor) = cursor {
         node.left = Val::Px(cursor.x + 16.0);
         node.top = Val::Px(cursor.y + 16.0);
@@ -886,7 +908,7 @@ mod tests {
     use super::*;
 
     fn stack(id: ItemId, count: u32) -> ItemStack {
-        ItemStack { id, count }
+        ItemStack::new(id, count)
     }
 
     #[test]
@@ -951,10 +973,10 @@ mod tests {
         assert_eq!(stacks_from_save(&saved, 3, &registry), slots);
 
         let odd = vec![
-            Some(SlotSave { block: "no_such_item".into(), count: 3 }),
-            Some(SlotSave { block: "dirt".into(), count: 100_000 }),
-            Some(SlotSave { block: "air".into(), count: 3 }),
-            Some(SlotSave { block: "dirt".into(), count: 4 }),
+            Some(SlotSave { block: "no_such_item".into(), count: 3, quality: 0 }),
+            Some(SlotSave { block: "dirt".into(), count: 100_000, quality: 0 }),
+            Some(SlotSave { block: "air".into(), count: 3, quality: 0 }),
+            Some(SlotSave { block: "dirt".into(), count: 4, quality: 0 }),
         ];
         let back = stacks_from_save(&odd, 3, &registry);
         assert_eq!(back.len(), 3, "a longer saved list is cut to the slots that exist");
@@ -971,7 +993,7 @@ mod tests {
             hotbar: vec![],
             storage: vec![],
             selected: 0,
-            held: Some(SlotSave { block: "stick".into(), count: 5 }),
+            held: Some(SlotSave { block: "stick".into(), count: 5, quality: 0 }),
         };
         let (mut hotbar, mut inventory, mut held) = (Hotbar::default(), Inventory::default(), HeldStack::default());
         restore_inventory(Some(&saved), &mut hotbar, &mut inventory, &mut held, &registry);
@@ -984,5 +1006,65 @@ mod tests {
         let inv = Inventory::default();
         assert_eq!(inv.slots.len(), INVENTORY_SIZE);
         assert!(inv.slots.iter().all(|s| s.is_empty()));
+    }
+
+    fn tool(quality: u8) -> ItemStack {
+        ItemStack::new(7, 1).with_quality(quality)
+    }
+
+    #[test]
+    fn clicking_never_merges_tools_of_different_quality() {
+        // Even with room for more than one in a slot.
+        let (mut held, mut slot) = (tool(80), tool(20));
+        click_slot(&mut held, &mut slot, 5);
+        assert_eq!((held, slot), (tool(20), tool(80)), "swapped, not merged");
+
+        let (mut held, mut slot) = (tool(80), tool(80));
+        click_slot(&mut held, &mut slot, 5);
+        assert_eq!(slot.count, 2, "identical ones still merge");
+    }
+
+    #[test]
+    fn shift_click_carries_quality_and_only_tops_up_the_same_quality() {
+        let mut hotbar = vec![tool(33), ItemStack::EMPTY];
+        let mut storage = vec![tool(90), ItemStack::EMPTY];
+        quick_move(SlotRef::Hotbar(0), &mut hotbar, &mut storage, |_| 5);
+        assert_eq!(storage[0], tool(90), "the other quality is left alone");
+        assert_eq!(storage[1], tool(33), "and the moved tool kept its own");
+    }
+
+    #[test]
+    fn a_tool_that_doesnt_fit_stays_behind_with_its_quality() {
+        let mut hotbar = vec![tool(61)];
+        let mut storage = vec![tool(10)];
+        quick_move(SlotRef::Hotbar(0), &mut hotbar, &mut storage, |_| 1);
+        assert_eq!(hotbar[0], tool(61));
+    }
+
+    #[test]
+    fn saved_slots_keep_a_tools_quality_and_old_saves_without_it_read_as_zero() {
+        let items = ItemRegistry::with_defaults(&crate::blocks::BlockRegistry::with_defaults());
+        let pick = items.id("stone_pickaxe");
+        let slots = [ItemStack::new(pick, 1).with_quality(83), ItemStack::new(items.id("dirt"), 4), ItemStack::EMPTY];
+        let saved = stacks_to_save(&slots, &items);
+        assert_eq!(stacks_from_save(&saved, 3, &items), slots);
+
+        let json = serde_json::to_string(&saved[1]).unwrap();
+        assert!(!json.contains("quality"), "an ordinary stack saves no quality: {json}");
+        let old: SlotSave = serde_json::from_str(r#"{ "block": "stone_pickaxe", "count": 1 }"#).unwrap();
+        assert_eq!(items.restore(pick, old.count, old.quality).quality, 0);
+    }
+
+    #[test]
+    fn a_tools_tooltip_names_its_quality_in_its_colour_and_never_shows_the_number() {
+        let items = ItemRegistry::with_defaults(&crate::blocks::BlockRegistry::with_defaults());
+        let pick = items.id("stone_pickaxe");
+        let tip = tip_for(&items, pick, 100);
+        assert_eq!(tip.text, "Stone Pickaxe\nLegendary");
+        assert_eq!(tip.color, Quality::Legendary.color());
+        assert!(!tip_for(&items, pick, 42).text.contains("42"));
+        assert_eq!(tip_for(&items, pick, 5).text, "Stone Pickaxe\nTrash");
+        let plain = tip_for(&items, items.id("stick"), 0);
+        assert_eq!((plain.text.as_str(), plain.color), ("Stick", [1.0; 3]), "plain items show just a name");
     }
 }

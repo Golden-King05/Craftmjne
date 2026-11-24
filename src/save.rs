@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 4;
+pub const SAVE_FORMAT: u32 = 5;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +105,9 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 2 -> 3 (plain items like sticks, the item on the cursor, and
         // discovered recipes) is the same: defaults only, bumped because a
         // format-2 build doesn't know plain items and would empty those slots.
+        // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
+        // a format-4 build would read a saved tool back as quality 0 and
+        // write that over the real value.
         // Step 3 -> 4 (waterlogged blocks, saved by the name of their
         // `pebble@water` variant) is defaults only too: a format-3 build
         // doesn't know those names and would read them as missing blocks.
@@ -209,6 +212,14 @@ fn full_air() -> f32 {
 pub struct SlotSave {
     pub block: String,
     pub count: u32,
+    /// A tool's quality percent (`tools.rs`); absent (0) for everything
+    /// else and for saves from before tools had one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub quality: u8,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
@@ -229,6 +240,9 @@ pub struct DroppedItemSave {
     pub z: f32,
     pub block: String,
     pub count: u32,
+    /// A tool's quality percent, as in [`SlotSave`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub quality: u8,
     /// Seconds it had already lain there, so reloading doesn't reset its
     /// despawn timer.
     pub age: f32,
@@ -676,12 +690,12 @@ mod tests {
         assert!(store.load_data(&slug).player.is_none()); // fresh world: no save yet
 
         let inventory = InventorySave {
-            hotbar: vec![Some(SlotSave { block: "dirt".into(), count: 7 }), None],
-            storage: vec![None, Some(SlotSave { block: "log".into(), count: 2 })],
+            hotbar: vec![Some(SlotSave { block: "dirt".into(), count: 7, quality: 0 }), None],
+            storage: vec![None, Some(SlotSave { block: "log".into(), count: 2, quality: 0 })],
             selected: 1,
-            held: Some(SlotSave { block: "stick".into(), count: 3 }),
+            held: Some(SlotSave { block: "stick".into(), count: 3, quality: 0 }),
         };
-        let item = DroppedItemSave { x: 1.5, y: 9.0, z: -2.0, block: "cobblestone".into(), count: 3, age: 12.0 };
+        let item = DroppedItemSave { x: 1.5, y: 9.0, z: -2.0, block: "cobblestone".into(), count: 3, quality: 0, age: 12.0 };
         let data = WorldData {
             player: Some(PlayerSave {
                 x: 1.0,

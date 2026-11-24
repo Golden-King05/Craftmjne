@@ -504,10 +504,10 @@ mod tests {
     #[test]
     fn death_drops_every_carried_stack_and_spreads_them_out() {
         let stacks = [
-            ItemStack { id: 3, count: 10 },
+            ItemStack::new(3, 10),
             ItemStack::EMPTY,
-            ItemStack { id: 4, count: 1 },
-            ItemStack { id: 3, count: 64 },
+            ItemStack::new(4, 1),
+            ItemStack::new(3, 64),
         ];
         let drops = death_drops(Vec3::new(5.0, 20.0, 5.0), stacks.into_iter());
         assert_eq!(drops.len(), 3, "the empty slot isn't dropped");

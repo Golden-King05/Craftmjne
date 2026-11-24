@@ -108,7 +108,7 @@ pub fn give(hotbar: &mut [ItemStack], storage: &mut [ItemStack], stack: ItemStac
         if left == 0 {
             break;
         }
-        if !slot.is_empty() && slot.id == stack.id && slot.count < max_stack {
+        if !slot.is_empty() && slot.same_item(&stack) && slot.count < max_stack {
             let moved = left.min(max_stack - slot.count);
             slot.count += moved;
             left -= moved;
@@ -120,7 +120,7 @@ pub fn give(hotbar: &mut [ItemStack], storage: &mut [ItemStack], stack: ItemStac
         }
         if slot.is_empty() {
             let moved = left.min(max_stack);
-            *slot = ItemStack { id: stack.id, count: moved };
+            *slot = ItemStack { count: moved, ..stack };
             left -= moved;
         }
     }
@@ -373,7 +373,7 @@ fn throw_selected(
     }
     let whole = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let count = if whole { slot.count } else { 1 };
-    let thrown = ItemStack { id: slot.id, count };
+    let thrown = ItemStack { count, ..*slot };
     slot.count -= count;
     if slot.count == 0 {
         *slot = ItemStack::EMPTY;
@@ -485,7 +485,7 @@ mod tests {
     use crate::blocks::AIR;
 
     fn stack(id: u16, count: u32) -> ItemStack {
-        ItemStack { id, count }
+        ItemStack::new(id, count)
     }
 
     #[test]

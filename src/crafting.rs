@@ -109,7 +109,7 @@ impl RecipeBook {
             let stack = |s: &StackFile| {
                 let id = items.by_name(&s.item).unwrap_or_else(|| panic!("recipe {path:?}: unknown item {:?}", s.item));
                 assert!(s.count > 0, "recipe {path:?}: {:?} has a count of zero", s.item);
-                ItemStack { id, count: s.count }
+                ItemStack::new(id, s.count)
             };
             let station = match file.station.as_deref() {
                 None | Some("hand") => Station::Hand,
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn the_first_recipes_are_the_ones_asked_for() {
         let (blocks, items, book) = shipped();
-        let s = |name: &str, count| ItemStack { id: items.id(name), count };
+        let s = |name: &str, count| ItemStack::new(items.id(name), count);
         let planks = recipe(&book, &items, "planks");
         assert_eq!((planks.inputs.clone(), planks.output), (vec![s("log", 1)], s("planks", 4)));
         let bench = recipe(&book, &items, "crafting_bench");
@@ -288,7 +288,7 @@ mod tests {
         let max = 124;
         let mut hotbar = vec![ItemStack::EMPTY; 9];
         let mut storage = vec![ItemStack::EMPTY; 27];
-        hotbar[0] = ItemStack { id: items.id("log"), count: 2 };
+        hotbar[0] = ItemStack::new(items.id("log"), 2);
         let planks = recipe(&book, &items, "planks");
         let bench = recipe(&book, &items, "crafting_bench");
         let sticks_from_planks = book
@@ -316,22 +316,22 @@ mod tests {
     fn ingredients_come_out_of_storage_before_the_hotbar() {
         let (_, items, book) = shipped();
         let log = items.id("log");
-        let mut hotbar = vec![ItemStack { id: log, count: 5 }];
-        let mut storage = vec![ItemStack { id: log, count: 1 }];
+        let mut hotbar = vec![ItemStack::new(log, 5)];
+        let mut storage = vec![ItemStack::new(log, 1)];
         craft(recipe(&book, &items, "planks"), &mut hotbar, &mut storage, 124);
         assert!(storage[0].id != log || storage[0].is_empty(), "storage's log wasn't used: {storage:?}");
-        assert_eq!(hotbar[0], ItemStack { id: log, count: 5 }, "the hotbar's logs were touched");
+        assert_eq!(hotbar[0], ItemStack::new(log, 5), "the hotbar's logs were touched");
     }
 
     #[test]
     fn output_that_does_not_fit_is_reported_for_dropping() {
         let (_, items, book) = shipped();
         let dirt = items.id("dirt");
-        let mut hotbar = vec![ItemStack { id: items.id("log"), count: 1 }];
-        let mut storage = vec![ItemStack { id: dirt, count: 124 }];
+        let mut hotbar = vec![ItemStack::new(items.id("log"), 1)];
+        let mut storage = vec![ItemStack::new(dirt, 124)];
         // The log's own slot frees up, so 4 planks fit there.
         assert_eq!(craft(recipe(&book, &items, "planks"), &mut hotbar, &mut storage, 2), Some(2));
-        assert_eq!(hotbar[0], ItemStack { id: items.id("planks"), count: 2 });
+        assert_eq!(hotbar[0], ItemStack::new(items.id("planks"), 2));
     }
 
     #[test]
@@ -341,8 +341,8 @@ mod tests {
         book.add(Recipe {
             id: "test_bench_only".into(),
             station: Station::Block(bench),
-            inputs: vec![ItemStack { id: items.id("stick"), count: 1 }],
-            output: ItemStack { id: items.id("dirt"), count: 1 },
+            inputs: vec![ItemStack::new(items.id("stick"), 1)],
+            output: ItemStack::new(items.id("dirt"), 1),
         });
         let ids = |stations: &HashSet<BlockId>, known: &HashSet<ItemId>| {
             book.visible(stations, known).map(|(_, r)| r.id.clone()).collect::<Vec<_>>()
@@ -365,8 +365,8 @@ mod tests {
         book.add(Recipe {
             id: "t".into(),
             station: Station::Block(bench),
-            inputs: vec![ItemStack { id: 1, count: 1 }],
-            output: ItemStack { id: 1, count: 1 },
+            inputs: vec![ItemStack::new(1, 1)],
+            output: ItemStack::new(1, 1),
         });
         let mut map = ChunkMap::default();
         map.chunks.insert(

@@ -1,0 +1,5 @@
+{
+  "id": "stone_axe",
+  "name": "Stone Axe",
+  "tool": { "kind": "axe", "tier": "stone" }
+}
