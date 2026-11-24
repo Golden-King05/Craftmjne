@@ -2592,7 +2592,13 @@ etc.) instead of inventing a new approach:
   held tool's (tier speed x quality multiplier) only if its kind matches the
   block's `tool`, and 1 for a hand or the wrong kind, times
   `NO_TOOL_PENALTY` (8) if the block `requires_tool` and this isn't it.
-  `harvests` is the matching "does it drop" rule. The user's bare-hand times
+  `harvests` is the matching "does it drop" rule. (A first version removed
+  the 8x penalty when you had the right tool, so a stone axe took a log from
+  45s to ~2s - the user pointed out that leaves no headroom for iron, steel
+  and the tiers after them. The penalty now only defines the *hand* time and
+  a tool divides that whole time by its speed, so `mining_speed` is "times
+  faster than a hand" and stone is 3.0; `stone_tools_are_slow_enough_to_
+  leave_room_for_better_tiers` pins that.) The user's bare-hand times
   (dirt 2.5s, gravel 5s, stone 60s, wood 45s) are what pinned the constants:
   5s per hardness and an 8x penalty put stone (1.5) at exactly 60s, and a log
   has hardness 1.125 so it lands on 45s with the same constants - the

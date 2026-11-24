@@ -8,7 +8,10 @@
 //!   "quality_band": [0.75, 1.15] }
 //! ```
 //!
-//! `mining_speed` and `damage` are the tier's base stats. `quality_band`
+//! `mining_speed` and `damage` are the tier's base stats. `mining_speed` is
+//! how many times faster than a bare hand the tier's tools mine the blocks
+//! they're made for (3.0 turns a 45-second log into 15 seconds), so it's the
+//! one number to leave headroom in: later tiers are bigger numbers. `quality_band`
 //! is what the stats are multiplied by at quality 0% and at quality 100%
 //! (defaults to `[0.75, 1.15]`); a tool in between gets the straight-line
 //! blend. **Tiers are independent of each other** - nothing requires one
@@ -48,8 +51,11 @@ pub const DEFAULT_TOOL_QUALITY: u8 = 50;
 /// 5s.
 pub const SECONDS_PER_HARDNESS: f32 = 5.0;
 
-/// How much slower a block that `requires_tool` is to mine without it. Stone
-/// (hardness 1.5) is 7.5s at speed 1, so 60s by hand; a log (1.125) 45s.
+/// How much longer a block that `requires_tool` takes *by hand* than its
+/// hardness alone says: stone (hardness 1.5, 7.5s) is 60s by hand, a log
+/// (1.125) 45s. A tool doesn't remove this - it divides the whole time by
+/// its own speed, so a tool's `mining_speed` is simply "how many times
+/// faster than a bare hand" and a better tier is just a bigger number.
 pub const NO_TOOL_PENALTY: f32 = 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
@@ -77,15 +83,14 @@ fn is_right_tool(block_tool: Option<ToolKind>, held: Option<HeldTool>) -> bool {
     matches!((block_tool, held), (Some(want), Some(h)) if want == h.kind)
 }
 
-/// Seconds to mine a block: its hardness over the speed of the tool in
-/// hand if that's the block's kind (otherwise speed 1), and
-/// `NO_TOOL_PENALTY` times longer if the block needs a tool it isn't being
-/// mined with.
+/// Seconds to mine a block: the time it takes by hand (its hardness, times
+/// `NO_TOOL_PENALTY` if it `requires_tool`) divided by the speed of the tool
+/// in hand if that's the block's kind. A bare hand or the wrong kind is
+/// speed 1, i.e. the hand time itself.
 pub fn mining_seconds(hardness: f32, block_tool: Option<ToolKind>, requires_tool: bool, held: Option<HeldTool>) -> f32 {
-    let right = is_right_tool(block_tool, held);
-    let speed = if right { held.map_or(1.0, |h| h.speed).max(0.01) } else { 1.0 };
-    let penalty = if requires_tool && !right { NO_TOOL_PENALTY } else { 1.0 };
-    hardness.max(0.0) * SECONDS_PER_HARDNESS * penalty / speed
+    let speed = if is_right_tool(block_tool, held) { held.map_or(1.0, |h| h.speed).max(0.01) } else { 1.0 };
+    let by_hand = hardness.max(0.0) * SECONDS_PER_HARDNESS * if requires_tool { NO_TOOL_PENALTY } else { 1.0 };
+    by_hand / speed
 }
 
 /// Whether mining the block with what's in hand yields its drops: always,
@@ -388,9 +393,23 @@ mod tests {
             let great = secs(&blocks, block, tool_in_hand(&items, tool, 100));
             assert!(great < poor && poor < hand, "{block}: hand {hand}s, poor {poor}s, great {great}s");
         }
-        // A stone axe turns a 45-second log into a few seconds, and a pick does the same for stone.
-        assert!(secs(&blocks, "log", tool_in_hand(&items, "stone_axe", 50)) < 4.0);
-        assert!(secs(&blocks, "stone", tool_in_hand(&items, "stone_pickaxe", 50)) < 5.0);
+    }
+
+    #[test]
+    fn stone_tools_are_slow_enough_to_leave_room_for_better_tiers() {
+        let (blocks, items) = shipped();
+        // The best stone axe ever made still takes real time on a log, so
+        // iron, steel and whatever follows each have somewhere to go.
+        let best = secs(&blocks, "log", tool_in_hand(&items, "stone_axe", 100));
+        let typical = secs(&blocks, "log", tool_in_hand(&items, "stone_axe", 50));
+        let worst = secs(&blocks, "log", tool_in_hand(&items, "stone_axe", 0));
+        assert!(best >= 10.0, "a perfect stone axe fells a log in {best}s");
+        assert!((13.0..=19.0).contains(&typical), "a typical stone axe takes {typical}s");
+        assert!(worst < secs(&blocks, "log", None), "even a poor stone axe beats a bare hand");
+        assert!(secs(&blocks, "stone", tool_in_hand(&items, "stone_pickaxe", 100)) >= 12.0);
+        // A tool is simply `speed` times faster than the hand on its block.
+        let speed = tool_in_hand(&items, "stone_axe", 50).unwrap().speed;
+        assert!((secs(&blocks, "log", None) / typical - speed).abs() < 1e-3);
     }
 
     #[test]

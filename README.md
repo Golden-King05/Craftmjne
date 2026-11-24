@@ -144,14 +144,17 @@ is speed 1. By hand that's dirt and grass 2.5s, gravel 5s, a torch
 instantly - and stone **60s** and wood (logs, planks) **45s**.
 
 Stone, cobblestone, bricks and ores want a pickaxe, and logs, planks and the
-crafting bench an axe, and those are `requires_tool` blocks: without the
-right tool they still break (eight times slower) but **drop nothing**, so
+crafting bench an axe, and those are `requires_tool` blocks: their hand time
+is eight times their hardness's, and without the right tool they still break
+but **drop nothing**, so
 nobody punches down a tree - you make a stone axe first. Dirt, grass, sand,
 mud, gravel, snow and salt just prefer a shovel; they drop either way. A
 tool's speed is its tier's `mining_speed` scaled by the tool's quality (see
 [Tools, tiers and quality](#tools-tiers-and-quality)): a stone axe takes a
-log from 45s to about 2.4s, a stone pickaxe takes stone from 60s to about
-3s, a stone shovel dirt to about a second. Swords and daggers, hoes (nothing
+log from 45s to about 16s, a stone pickaxe takes stone from 60s to about
+21s, a stone shovel takes dirt to under a second. A tier's `mining_speed` is
+just "how many times faster than a hand": stone is 3, which leaves room for
+iron, steel and the tiers beyond them to climb well above it. Swords and daggers, hoes (nothing
 to till yet) and the wrong tool all mine at hand speed. Changing tool partway
 through a block carries the work done over. Cracks spread across the
 block as you go (ten `destroy_stage_N` tiles; drop a
@@ -188,7 +191,7 @@ Tools are items with a `"tool"` entry, and they come in **tiers** (`tiers/*.json
 one per material):
 
 ```json
-{ "id": "stone", "name": "Stone", "mining_speed": 2.0, "damage": 3.0, "quality_band": [0.75, 1.15] }
+{ "id": "stone", "name": "Stone", "mining_speed": 3.0, "damage": 3.0, "quality_band": [0.75, 1.15] }
 ```
 
 ```json
