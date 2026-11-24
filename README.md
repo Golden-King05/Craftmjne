@@ -155,7 +155,7 @@ block of loose material. A
 tool's speed is its tier's `mining_speed` scaled by the tool's quality (see
 [Tools, tiers and quality](#tools-tiers-and-quality)): a stone axe takes a
 log from 45s to about 16s, a stone pickaxe takes stone from 60s to about
-21s, a stone shovel takes dirt to about 1.4s and gravel to about 2.8s. A tier's `mining_speed` is
+21s, a stone shovel takes dirt to about 1.5s and gravel to about 3s. A tier's `mining_speed` is
 just "how many times faster than a hand": stone is 3, which leaves room for
 iron, steel and the tiers beyond them to climb well above it. Swords and daggers, hoes (nothing
 to till yet) and the wrong tool all mine at hand speed. Changing tool partway
