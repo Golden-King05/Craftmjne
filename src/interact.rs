@@ -330,7 +330,7 @@ fn interact(
         // whether the block drops anything (when it needs one).
         let def = registry.def(aimed);
         let in_hand = content.items.held_tool(&hotbar.slots[hotbar.selected]);
-        let seconds = mining_seconds(def.hardness, def.tool, def.requires_tool, in_hand);
+        let seconds = mining_seconds(def, in_hand);
         let mined = breakable.then_some((hit.pos, aimed));
         if mining.advance(mined, mouse.pressed(MouseButton::Left), dt, seconds) {
             // Mining a waterlogged pebble takes the pebble and leaves the
@@ -339,7 +339,7 @@ fn interact(
             if let Some(prev) = map.set_block(hit.pos, after) {
                 block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
                 timers.breaks = timers.breaks.wrapping_add(1);
-                if harvests(def.tool, def.requires_tool, in_hand) {
+                if harvests(def, in_hand) {
                     if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
                         drops.write(mined_drop(hit.pos, stack));
                     }

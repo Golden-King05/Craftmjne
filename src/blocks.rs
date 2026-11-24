@@ -77,6 +77,10 @@
 //!   nothing**: stone and ores want a pickaxe, logs and planks an axe (60s
 //!   and 45s by hand, so in practice you make the tool first). Dirt, sand and
 //!   gravel only have a preferred shovel; they're merely faster with it.
+//! - `tool_response` (`0..=1`, default `1`) is how much of a tool's speed a
+//!   block takes: the speed is raised to this power. Dirt, gravel and the
+//!   like use `0.5`, so a good shovel still needs more than a second to
+//!   move a block, while logs and stone take the full speedup.
 //! - `drops` is what breaking this block in Survival gives you: `true` (the
 //!   default) drops the block itself, `false` drops nothing (ice, glass),
 //!   an item id drops that item instead (grass drops `"dirt"`), and
@@ -721,6 +725,12 @@ pub struct BlockDef {
     /// Without the right tool it still breaks (slowly) but drops nothing.
     /// Needs `tool`.
     pub requires_tool: bool,
+    /// How much of a tool's speed advantage this block takes, `0..=1`: the
+    /// tool's speed is raised to this power, so `1.0` (the default) is the
+    /// full speedup and `0.5` a square root of it. Soft, loose material
+    /// (dirt, gravel) takes only part, so even a great shovel needs real
+    /// time to move a block of it.
+    pub tool_response: f32,
     /// May hold a fluid (or the ice it freezes into) in the same cell as
     /// itself. See the module docs' `waterloggable` section.
     pub waterloggable: bool,
@@ -783,6 +793,7 @@ impl Default for BlockDef {
             overlay: FaceTextures::default(),
             tool: None,
             requires_tool: false,
+            tool_response: 1.0,
             waterloggable: false,
             freezes_to: None,
             layered: None,
@@ -855,6 +866,7 @@ struct BlockFile {
     tool: Option<ToolKind>,
     #[serde(default)]
     requires_tool: bool,
+    tool_response: Option<f32>,
 }
 
 fn default_true() -> bool {
@@ -911,6 +923,7 @@ impl BlockFile {
             overlay: self.overlay,
             tool: self.tool,
             requires_tool: self.requires_tool,
+            tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
             waterloggable: self.waterloggable,
             freezes_to: self.freezes_to,
             layered: None,

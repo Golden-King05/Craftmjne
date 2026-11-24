@@ -2,5 +2,6 @@
   "id": "gravel",
   "name": "Gravel",
   "hardness": 1.0,
-  "tool": "shovel"
+  "tool": "shovel",
+  "tool_response": 0.5
 }

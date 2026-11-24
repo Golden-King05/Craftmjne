@@ -37,7 +37,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::blocks::find_data_dir;
+use crate::blocks::{find_data_dir, BlockDef};
 
 /// The best a tool can be.
 pub const MAX_QUALITY: u8 = 100;
@@ -83,20 +83,25 @@ fn is_right_tool(block_tool: Option<ToolKind>, held: Option<HeldTool>) -> bool {
     matches!((block_tool, held), (Some(want), Some(h)) if want == h.kind)
 }
 
-/// Seconds to mine a block: the time it takes by hand (its hardness, times
-/// `NO_TOOL_PENALTY` if it `requires_tool`) divided by the speed of the tool
-/// in hand if that's the block's kind. A bare hand or the wrong kind is
-/// speed 1, i.e. the hand time itself.
-pub fn mining_seconds(hardness: f32, block_tool: Option<ToolKind>, requires_tool: bool, held: Option<HeldTool>) -> f32 {
-    let speed = if is_right_tool(block_tool, held) { held.map_or(1.0, |h| h.speed).max(0.01) } else { 1.0 };
-    let by_hand = hardness.max(0.0) * SECONDS_PER_HARDNESS * if requires_tool { NO_TOOL_PENALTY } else { 1.0 };
+/// Seconds to mine `block` with `held` in hand: the time it takes by hand
+/// (its hardness, times `NO_TOOL_PENALTY` if it `requires_tool`) divided by
+/// the tool's speed - only if the tool is the block's kind, and only as much
+/// of it as the block's `tool_response` allows (the speed raised to that
+/// power). A bare hand or the wrong kind is speed 1, i.e. the hand time.
+pub fn mining_seconds(block: &BlockDef, held: Option<HeldTool>) -> f32 {
+    let speed = if is_right_tool(block.tool, held) {
+        held.map_or(1.0, |h| h.speed).max(0.01).powf(block.tool_response)
+    } else {
+        1.0
+    };
+    let by_hand = block.hardness.max(0.0) * SECONDS_PER_HARDNESS * if block.requires_tool { NO_TOOL_PENALTY } else { 1.0 };
     by_hand / speed
 }
 
-/// Whether mining the block with what's in hand yields its drops: always,
-/// unless the block `requires_tool` and this isn't it.
-pub fn harvests(block_tool: Option<ToolKind>, requires_tool: bool, held: Option<HeldTool>) -> bool {
-    !requires_tool || is_right_tool(block_tool, held)
+/// Whether mining `block` with what's in hand yields its drops: always,
+/// unless it `requires_tool` and this isn't it.
+pub fn harvests(block: &BlockDef, held: Option<HeldTool>) -> bool {
+    !block.requires_tool || is_right_tool(block.tool, held)
 }
 
 /// What a tool item is: its kind and which tier's stats it uses.
@@ -361,8 +366,7 @@ mod tests {
 
     /// Seconds to mine `block` with `held` in hand, from the shipped data.
     fn secs(blocks: &BlockRegistry, block: &str, held: Option<HeldTool>) -> f32 {
-        let def = blocks.def(blocks.id(block));
-        mining_seconds(def.hardness, def.tool, def.requires_tool, held)
+        mining_seconds(blocks.def(blocks.id(block)), held)
     }
 
     fn tool_in_hand(items: &ItemRegistry, name: &str, quality: u8) -> Option<HeldTool> {
@@ -393,6 +397,34 @@ mod tests {
             let great = secs(&blocks, block, tool_in_hand(&items, tool, 100));
             assert!(great < poor && poor < hand, "{block}: hand {hand}s, poor {poor}s, great {great}s");
         }
+    }
+
+    #[test]
+    fn soft_blocks_take_real_time_even_with_a_good_shovel_but_a_better_tool_still_helps() {
+        let (blocks, items) = shipped();
+        for name in ["dirt", "grass", "sand", "mud", "salt"] {
+            let t = |q| secs(&blocks, name, tool_in_hand(&items, "stone_shovel", q));
+            assert!(t(100) > 1.2, "{name}: even the best stone shovel takes {}s", t(100));
+            assert!(t(0) > t(100), "{name}: quality still matters");
+            assert!(t(0) < secs(&blocks, name, None), "{name}: and a shovel still beats a hand");
+        }
+        let gravel = |q| secs(&blocks, "gravel", tool_in_hand(&items, "stone_shovel", q));
+        assert!(gravel(100) > 2.5 && gravel(0) < 5.0, "gravel {}s..{}s", gravel(100), gravel(0));
+        // A far better tier helps more, but never to instant: speed 40 is a
+        // 6x speedup here, not 40x.
+        let dirt = blocks.def(blocks.id("dirt"));
+        let fast = Some(HeldTool { kind: ToolKind::Shovel, speed: 40.0 });
+        let t = mining_seconds(dirt, fast);
+        assert!((0.3..0.6).contains(&t), "an end-game shovel takes {t}s on dirt");
+    }
+
+    #[test]
+    fn hard_blocks_take_the_tools_full_speedup() {
+        let (blocks, items) = shipped();
+        let log = blocks.def(blocks.id("log"));
+        assert_eq!(log.tool_response, 1.0);
+        let axe = tool_in_hand(&items, "stone_axe", 50).unwrap();
+        assert!((mining_seconds(log, None) / mining_seconds(log, Some(axe)) - axe.speed).abs() < 1e-3);
     }
 
     #[test]
@@ -436,8 +468,7 @@ mod tests {
     fn blocks_that_need_a_tool_drop_nothing_without_it() {
         let (blocks, items) = shipped();
         let drops = |block: &str, held: Option<HeldTool>| {
-            let def = blocks.def(blocks.id(block));
-            harvests(def.tool, def.requires_tool, held)
+            harvests(blocks.def(blocks.id(block)), held)
         };
         assert!(!drops("log", None), "a log punched by hand gives nothing");
         assert!(!drops("planks", None));
@@ -486,9 +517,9 @@ mod tests {
 
     #[test]
     fn instant_and_zero_hardness_blocks_stay_instant_with_any_tool() {
-        assert_eq!(mining_seconds(0.0, None, false, None), 0.0);
-        assert_eq!(mining_seconds(-1.0, None, false, None), 0.0);
+        let block = |hardness| BlockDef { hardness, tool: Some(ToolKind::Axe), requires_tool: true, ..BlockDef::default() };
+        assert_eq!(mining_seconds(&block(0.0), None), 0.0);
         let held = Some(HeldTool { kind: ToolKind::Axe, speed: 2.0 });
-        assert_eq!(mining_seconds(0.0, Some(ToolKind::Axe), true, held), 0.0);
+        assert_eq!(mining_seconds(&block(0.0), held), 0.0);
     }
 }

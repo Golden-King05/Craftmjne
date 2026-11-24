@@ -2,5 +2,6 @@
   "id": "snow",
   "name": "Snow",
   "hardness": 0.2,
-  "tool": "shovel"
+  "tool": "shovel",
+  "tool_response": 0.5
 }

@@ -2615,4 +2615,18 @@ etc.) instead of inventing a new approach:
   end depended on CPU contention; it now keeps stepping (player stationary)
   until the setup threshold is met before judging, with the backlog still
   tracked throughout. Three full parallel runs passed after the change.
+- **Soft blocks get a response curve, not a hard floor.** With tool speed a
+  plain multiple of hand time, a stone shovel took dirt to 0.9s - under the
+  second a cubic metre of earth should plausibly take, and a faster tier
+  would only make it worse. The options were a per-block minimum time (but a
+  floor makes tool *quality* irrelevant whenever it binds, which it did for
+  every stone shovel) or letting a block take only part of the speedup.
+  `BlockDef::tool_response` (`0..=1`, default 1) raises the tool's speed to
+  that power, so dirt and gravel at `0.5` use its square root: a stone shovel
+  is ~1.4s on dirt and ~2.8s on gravel, quality still moves it (1.67s down
+  to 1.35s), iron ~1s, and even a speed-40 shovel is ~0.4s rather than
+  instant. Logs and stone stay at 1 and take the full multiple. The rule
+  reads the whole block now (`mining_seconds(&BlockDef, held)`, `harvests(&
+  BlockDef, held)`) because passing hardness, tool, requires_tool and
+  response separately had reached four positional arguments.
 

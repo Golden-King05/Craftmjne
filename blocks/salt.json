@@ -2,5 +2,6 @@
   "id": "salt",
   "name": "Salt",
   "hardness": 0.5,
-  "tool": "shovel"
+  "tool": "shovel",
+  "tool_response": 0.5
 }
