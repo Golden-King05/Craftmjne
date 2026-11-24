@@ -103,6 +103,54 @@ enum FallingWaterStyle {
 
 const FALLING_WATER_STYLE: FallingWaterStyle = FallingWaterStyle::Sloped;
 
+/// The same world-space corner of a face, in the coordinates of the
+/// neighbouring cell across that face: crossing an x face flips the x
+/// coordinate, a z face flips z.
+fn neighbour_corner(face: usize, px: f32, pz: f32) -> (f32, f32) {
+    match face {
+        0 | 1 => (1.0 - px, pz),
+        4 | 5 => (px, 1.0 - pz),
+        _ => (px, pz),
+    }
+}
+
+/// How the top of a fluid (or frozen-fluid) cell is shaped.
+///
+/// `Sloped` (the default) gives every top *corner* its own height, shared by
+/// every cell that touches that corner: the lowest of the cells around it
+/// (see `blend_corner`). So a cell's surface runs from its own height at
+/// the upstream edge down to the next cell's height at the downstream edge,
+/// whatever the two levels are (16 into 15, 16 into 13), and the surface is
+/// one continuous skin with no steps - the same rule serves flowing rivers,
+/// waterfalls and any future hand-shaped block.
+///
+/// `Flat` is the original look: one height for the whole cell top, with a
+/// partial "step wall" between neighbours at different heights. Kept as a
+/// real, compiled, tested alternative (see `mesh_chunk_styled`) instead of
+/// deleted, for a future per-fluid setting or graphics option.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum SurfaceStyle {
+    // Only reachable through `mesh_chunk_styled` (the tests use it) and by
+    // editing `SURFACE_STYLE` below - that's the point, not a mistake.
+    #[allow(dead_code)]
+    Flat,
+    Sloped,
+}
+
+/// The style every chunk is meshed with.
+pub const SURFACE_STYLE: SurfaceStyle = SurfaceStyle::Sloped;
+
+/// The height of one top corner of a cell, given the cell's own height and
+/// the heights of the (up to three) other same-fluid cells touching that
+/// corner. `Flat` ignores them; `Sloped` takes the lowest, so the corner
+/// matches whichever neighbour is lower and the surface never steps.
+fn blend_corner(style: SurfaceStyle, own: f32, others: [Option<f32>; 3]) -> f32 {
+    match style {
+        SurfaceStyle::Flat => own,
+        SurfaceStyle::Sloped => others.into_iter().flatten().fold(own, f32::min),
+    }
+}
+
 /// Surface height for a fluid cell at `level` blocks from its source, given
 /// that fluid's configured `flow_distance`. Level 0 (a permanent source) and
 /// `FLUID_FALLING` (a waterfall column) both render full-height; everything
@@ -369,6 +417,17 @@ pub fn mesh_chunk(
     climate: &crate::biome::ClimateMaps,
     chunk_origin: (i32, i32),
 ) -> ChunkMeshData {
+    mesh_chunk_styled(padded, tables, climate, chunk_origin, SURFACE_STYLE)
+}
+
+/// `mesh_chunk` with an explicit fluid [`SurfaceStyle`].
+pub fn mesh_chunk_styled(
+    padded: &PaddedChunk,
+    tables: &Tables,
+    climate: &crate::biome::ClimateMaps,
+    chunk_origin: (i32, i32),
+    style: SurfaceStyle,
+) -> ChunkMeshData {
     debug_assert_eq!(padded.blocks.len(), PAD_XZ * PAD_XZ * PAD_Y);
     debug_assert_eq!(padded.fluid.len(), padded.blocks.len());
     debug_assert_eq!(padded.axis.len(), padded.blocks.len());
@@ -449,7 +508,32 @@ pub fn mesh_chunk(
                         fluid_height(l, flow_dist)
                     }
                 };
-                let cap = top_of(cell);
+                // Whether a cell is the *exposed* surface of its fluid (not
+                // covered by more of it above) and so has a shaped top.
+                let exposed = |i: usize| -> bool {
+                    let l = padded.fluid[i];
+                    shaped && (is_fluid || (l != FLUID_SOURCE && l != FLUID_FALLING)) && part_at(i + SY as usize) != id
+                };
+                // The height of the top corner at `(px, pz)` (0.0 or 1.0 in
+                // the cell's own x/z) of cell `i`: its own height, lowered
+                // to match any lower same-fluid cell touching that corner.
+                // The value depends only on which cells meet at the corner,
+                // not on which of them asks, so two neighbours always agree
+                // on their shared edge. A covered or unshaped cell stays
+                // flat at the top of its cell.
+                let corner_top = |i: usize, px: f32, pz: f32| -> f32 {
+                    let own = top_of(i);
+                    if !shaped || !exposed(i) {
+                        return own;
+                    }
+                    let dx = if px > 0.5 { SX } else { -SX };
+                    let dz = if pz > 0.5 { SZ } else { -SZ };
+                    let near = |ofs: i32| -> Option<f32> {
+                        let j = (i as i32 + ofs) as usize;
+                        (part_at(j) == id).then(|| top_of(j))
+                    };
+                    blend_corner(style, own, [near(dx), near(dz), near(dx + dz)])
+                };
 
                 for (f, face) in FACES.iter().enumerate() {
                     let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
@@ -463,16 +547,22 @@ pub fn mesh_chunk(
                         }
                         if nid == id {
                             if shaped && is_side {
-                                // Same fluid next door at a different level:
-                                // draw a partial "step" wall from its surface
-                                // up to ours instead of culling the face
-                                // outright (a flat cull would leave a visible
-                                // gap between two different-height cells).
-                                let n_cap = top_of(n_cell);
-                                if n_cap + 1e-4 >= cap {
+                                // Same fluid next door, lower than us at some
+                                // corner of the shared edge: draw the part of
+                                // the wall between its surface and ours
+                                // instead of culling the face outright (a
+                                // flat cull would leave a gap). Under
+                                // `Sloped` two exposed cells share their edge
+                                // corners, so this only fires against a
+                                // covered neighbour; under `Flat` it's the
+                                // old step wall.
+                                let lower = face.corners.iter().filter(|c| c.pos[1] == 1.0).any(|c| {
+                                    let (npx, npz) = neighbour_corner(f, c.pos[0], c.pos[2]);
+                                    corner_top(cell, c.pos[0], c.pos[2]) > corner_top(n_cell, npx, npz) + 1e-4
+                                });
+                                if !lower {
                                     continue;
                                 }
-                                bottom = n_cap;
                                 stepped = true;
                             } else {
                                 continue;
@@ -560,7 +650,16 @@ pub fn mesh_chunk(
 
                         corner_pos[ci] = [
                             x as f32 + c.pos[0],
-                            y as f32 + if c.pos[1] == 1.0 { cap } else { bottom },
+                            y as f32
+                                + if c.pos[1] == 1.0 {
+                                    corner_top(cell, c.pos[0], c.pos[2])
+                                } else if stepped {
+                                    // Down to the neighbour's surface at this corner.
+                                    let (npx, npz) = neighbour_corner(f, c.pos[0], c.pos[2]);
+                                    corner_top(n_cell, npx, npz).min(corner_top(cell, c.pos[0], c.pos[2]))
+                                } else {
+                                    bottom
+                                },
                             z as f32 + c.pos[2],
                         ];
 
@@ -943,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_water_at_different_levels_gets_a_step_wall() {
+    fn flat_style_keeps_the_original_step_wall_between_levels() {
         let (reg, tables) = tables();
         let water = reg.id("water");
         let mut padded = lit_padded();
@@ -951,15 +1050,69 @@ mod tests {
         padded.blocks[padded_index(5, 10, 4)] = water;
         padded.fluid[padded_index(4, 10, 4)] = 1;
         padded.fluid[padded_index(5, 10, 4)] = 4; // shallower neighbour
-        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        let flat = |p: &PaddedChunk| mesh_chunk_styled(p, &tables, &no_tint(), (0, 0), SurfaceStyle::Flat);
+        let mesh = flat(&padded);
         // the boundary between them must render a wall face instead of being
         // fully culled (same-id neighbours at equal height cull completely).
         assert!(!mesh.water.is_empty());
 
         // sanity: identical levels on both sides fully cull that face.
         padded.fluid[padded_index(5, 10, 4)] = 1;
-        let level_mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
-        assert!(level_mesh.water.positions.len() < mesh.water.positions.len());
+        assert!(flat(&padded).water.positions.len() < mesh.water.positions.len());
+    }
+
+    /// Water at two levels side by side on stone, meshed in `style`; returns
+    /// every water vertex.
+    fn two_levels(style: SurfaceStyle, (a, b): (u8, u8)) -> Vec<[f32; 3]> {
+        let (reg, tables) = tables();
+        let (stone, water) = (reg.id("stone"), reg.id("water"));
+        let mut padded = lit_padded();
+        for x in [4, 5] {
+            padded.blocks[padded_index(x, 10, 5)] = stone;
+            padded.blocks[padded_index(x, 11, 5)] = water;
+        }
+        padded.fluid[padded_index(4, 11, 5)] = a;
+        padded.fluid[padded_index(5, 11, 5)] = b;
+        mesh_chunk_styled(&padded, &tables, &no_tint(), (0, 0), style).water.positions
+    }
+
+    #[test]
+    fn sloped_water_runs_from_its_own_height_down_to_the_next_cells() {
+        // Level 1 (higher) flowing into level 4 (lower), 16-into-13 style.
+        let (high, low) = (11.0 + fluid_height(1, 7), 11.0 + fluid_height(4, 7));
+        assert!(high > low);
+        let verts = two_levels(SurfaceStyle::Sloped, (1, 4));
+        let top_at = |x: f32| verts.iter().filter(|p| (p[0] - x).abs() < 1e-6).map(|p| p[1]).fold(0.0, f32::max);
+        assert!((top_at(4.0) - high).abs() < 1e-5, "the upstream edge keeps its own height");
+        assert!((top_at(5.0) - low).abs() < 1e-5, "the shared edge drops to the lower cell's height");
+        assert!((top_at(6.0) - low).abs() < 1e-5, "and the lower cell stays at its own");
+        // One continuous skin: nothing pokes above the shared edge's height
+        // there, so there's no step wall to see.
+        assert!(verts.iter().filter(|p| (p[0] - 5.0).abs() < 1e-6).all(|p| p[1] <= low + 1e-5));
+    }
+
+    #[test]
+    fn sloped_surfaces_need_no_step_wall_where_flat_ones_do() {
+        let sloped = two_levels(SurfaceStyle::Sloped, (1, 4)).len();
+        let flat = two_levels(SurfaceStyle::Flat, (1, 4)).len();
+        assert!(sloped < flat, "{sloped} vs {flat}: the slope replaces the wall");
+    }
+
+    #[test]
+    fn corners_take_the_lowest_cell_that_touches_them() {
+        let others = [Some(0.5), None, Some(0.8)];
+        assert_eq!(blend_corner(SurfaceStyle::Flat, 0.9, others), 0.9, "flat ignores neighbours");
+        assert_eq!(blend_corner(SurfaceStyle::Sloped, 0.9, others), 0.5);
+        assert_eq!(blend_corner(SurfaceStyle::Sloped, 0.4, others), 0.4, "never raised above its own");
+        assert_eq!(blend_corner(SurfaceStyle::Sloped, 0.9, [None; 3]), 0.9, "alone, it's flat");
+    }
+
+    #[test]
+    fn neighbour_corners_mirror_across_the_face_they_share() {
+        assert_eq!(neighbour_corner(0, 1.0, 0.0), (0.0, 0.0));
+        assert_eq!(neighbour_corner(1, 0.0, 1.0), (1.0, 1.0));
+        assert_eq!(neighbour_corner(4, 1.0, 1.0), (1.0, 0.0));
+        assert_eq!(neighbour_corner(5, 0.0, 0.0), (0.0, 1.0));
     }
 
     #[test]

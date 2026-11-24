@@ -2531,3 +2531,19 @@ etc.) instead of inventing a new approach:
   the flowing level under the ice. Runtime freezing is still only checked
   at `BlockSetEvent`s (the simulation's own writes emit none), so a river
   spreading into a cold biome freezes when something nearby changes.
+- **Sloped fluid surfaces are a per-corner rule, not a per-cell height plus
+  a wall.** The old mesher gave a fluid cell one top height and drew a
+  partial step wall wherever a neighbour differed. The shape the user drew
+  (each cell running from its own height down to the next cell's) is the
+  same as "a corner is as low as the lowest same-fluid cell touching it",
+  and that has to be a function of *which cells meet at the corner*, never
+  of which one asks (`corner_top`, with `neighbour_corner` mirroring the
+  coordinate across a face) - that's what makes two neighbours agree on
+  their shared edge, so the surface is continuous and the wall disappears
+  by itself instead of needing a second rule. Covered and unshaped cells
+  (a plain ice cube, a deeper water cell under more water) stay flat at the
+  top of their cell and don't lower anyone, so the wall survives exactly
+  where it should: against a covered neighbour. The flat look is kept as
+  `SurfaceStyle::Flat` behind `mesh_chunk_styled`, the `FallingWaterStyle`
+  pattern, so the old step-wall tests still run against it.
+

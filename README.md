@@ -715,6 +715,19 @@ source itself — the classic "two water source blocks either side of a gap"
 trick, so a bounded pool built from placed sources doesn't dry up like a
 transient flow would.
 
+**Sloped surfaces.** Water and ice (frozen water) don't draw flat steps
+between levels. Each top *corner* of a cell takes the lowest height of the
+same-fluid cells that touch it (`mesher::blend_corner`), so a cell runs from
+its own height at the upstream edge down to the next cell's height at the
+downstream edge - 16 into 15, 16 into 13, whatever the two levels are - and
+neighbouring cells always agree on their shared edge, so the surface is one
+continuous skin and the step walls only appear against a covered (deeper)
+neighbour. The rule only looks at the cells around each corner, so
+waterfalls and any future hand-shaped block get the same treatment. The old
+one-height-per-cell look with step walls is still compiled and tested as
+`mesher::SurfaceStyle::Flat` (`mesh_chunk_styled`); change `SURFACE_STYLE`
+to switch globally.
+
 A budgeted queue (`FluidQueue`/`recompute_cell`) reacts to `BlockSetEvent`
 and relaxes affected cells a few hundred at a time per tick, so a large
 spread is visibly gradual rather than resolving in one frame. The mesher
