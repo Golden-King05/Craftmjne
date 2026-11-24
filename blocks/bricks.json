@@ -1,5 +1,7 @@
 {
   "id": "bricks",
   "name": "Bricks",
-  "hardness": 2.0
+  "hardness": 2.0,
+  "tool": "pickaxe",
+  "requires_tool": true
 }

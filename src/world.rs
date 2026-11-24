@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
 use crate::biome;
 use crate::blocks::{
-    BlockId, BlockRegistry, BlockTables, ItemStack, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
+    BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
 };
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
 use crate::icons::{build_icon_atlas, IconAtlasData};

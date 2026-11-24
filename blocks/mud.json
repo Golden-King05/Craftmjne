@@ -1,5 +1,6 @@
 {
   "id": "mud",
   "name": "Mud",
-  "hardness": 0.5
+  "hardness": 0.5,
+  "tool": "shovel"
 }

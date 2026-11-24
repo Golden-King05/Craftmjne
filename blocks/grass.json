@@ -12,6 +12,7 @@
   "overlay": {
     "side": "grass_side"
   },
-  "hardness": 0.6,
-  "drops": "dirt"
+  "hardness": 0.5,
+  "drops": "dirt",
+  "tool": "shovel"
 }

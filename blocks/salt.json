@@ -1,5 +1,6 @@
 {
   "id": "salt",
   "name": "Salt",
-  "hardness": 0.5
+  "hardness": 0.5,
+  "tool": "shovel"
 }

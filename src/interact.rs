@@ -2,8 +2,9 @@
 //! and hotbar selection.
 //!
 //! Survival mining takes time: hold the left button on a block for
-//! [`mining_seconds`] of its `hardness` and it breaks, dropping whatever its
-//! `drops` says (`items.rs` spawns the item). Cracks spread across it while
+//! [`mining_seconds`] of its `hardness` - shorter with the right tool in hand
+//! (`tools.rs`) - and it breaks, dropping whatever its `drops` says
+//! (`items.rs` spawns the item), unless it needs a tool you don't have. Cracks spread across it while
 //! you mine (`atlas::destroy_stage_name` tiles on a cube drawn just outside
 //! the block), and looking away or letting go starts it over. A block with
 //! `breakable: false` (bedrock) can't be mined at all, in either mode.
@@ -28,21 +29,15 @@ use crate::player::{cursor_grabbed, Player};
 use crate::render::{bucket_to_mesh, ChunkMaterials};
 use crate::save::GameMode;
 use crate::state::{AppState, DeathState, PauseState};
+use crate::tools::{harvests, mining_seconds};
 use crate::world::{Atlas, BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
 const ACTION_REPEAT: f32 = 0.22; // seconds between repeats while a button is held
-/// Seconds of bare-handed mining per point of a block's `hardness`.
-pub const SECONDS_PER_HARDNESS: f32 = 1.5;
 /// After a block breaks, the next one starts after this pause, so holding
 /// the button on instant blocks (torches) doesn't clear a whole row in a
 /// blink.
 const MINE_COOLDOWN: f32 = 0.15;
-
-/// How long a block of this hardness takes to mine by hand.
-pub fn mining_seconds(hardness: f32) -> f32 {
-    hardness.max(0.0) * SECONDS_PER_HARDNESS
-}
 
 /// The block being mined in Survival, and how far along it is.
 #[derive(Resource, Default)]
@@ -50,7 +45,10 @@ pub struct Mining {
     /// The cell being mined, and the block that was in it when mining
     /// started - if either changes, mining starts over.
     target: Option<(IVec3, BlockId)>,
-    /// Seconds spent on `target` so far.
+    /// How far through `target` it is, `0..1`. A fraction rather than
+    /// seconds, so changing tool partway through (a different speed) carries
+    /// the work done over instead of letting a long, slow block finish the
+    /// instant you swap to a fast tool.
     progress: f32,
     cooldown: f32,
 }
@@ -73,8 +71,8 @@ impl Mining {
         if self.cooldown > 0.0 {
             return false;
         }
-        self.progress += dt;
-        if self.progress < seconds {
+        self.progress += if seconds > 0.0 { dt / seconds } else { 1.0 };
+        if self.progress < 1.0 {
             return false;
         }
         self.target = None;
@@ -85,12 +83,12 @@ impl Mining {
 
     /// Which crack stage to draw (`0..DESTROY_STAGES`), or `None` when
     /// nothing's being mined.
-    pub fn crack_stage(&self, seconds: f32) -> Option<usize> {
+    pub fn crack_stage(&self) -> Option<usize> {
         self.target?;
-        if seconds <= 0.0 || self.progress <= 0.0 {
+        if self.progress <= 0.0 {
             return None;
         }
-        let fraction = (self.progress / seconds).clamp(0.0, 1.0);
+        let fraction = self.progress.clamp(0.0, 1.0);
         Some(((fraction * DESTROY_STAGES as f32) as usize).min(DESTROY_STAGES - 1))
     }
 
@@ -328,7 +326,11 @@ fn interact(
             timers.break_t = ACTION_REPEAT;
         }
     } else {
-        let seconds = mining_seconds(registry.def(aimed).hardness);
+        // What's in hand sets the speed (when it's this block's tool) and
+        // whether the block drops anything (when it needs one).
+        let def = registry.def(aimed);
+        let in_hand = content.items.held_tool(&hotbar.slots[hotbar.selected]);
+        let seconds = mining_seconds(def.hardness, def.tool, def.requires_tool, in_hand);
         let mined = breakable.then_some((hit.pos, aimed));
         if mining.advance(mined, mouse.pressed(MouseButton::Left), dt, seconds) {
             // Mining a waterlogged pebble takes the pebble and leaves the
@@ -337,8 +339,10 @@ fn interact(
             if let Some(prev) = map.set_block(hit.pos, after) {
                 block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
                 timers.breaks = timers.breaks.wrapping_add(1);
-                if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
-                    drops.write(mined_drop(hit.pos, stack));
+                if harvests(def.tool, def.requires_tool, in_hand) {
+                    if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
+                        drops.write(mined_drop(hit.pos, stack));
+                    }
                 }
             }
         }
@@ -514,8 +518,6 @@ struct CrackOverlay {
 fn sync_crack_overlay(
     mut commands: Commands,
     mining: Res<Mining>,
-    map: Res<ChunkMap>,
-    registry: Res<BlockRegistry>,
     tables: Option<Res<BlockTables>>,
     atlas: Option<Res<Atlas>>,
     materials: Option<Res<ChunkMaterials>>,
@@ -535,10 +537,7 @@ fn sync_crack_overlay(
             })
             .collect();
     }
-    let shown = mining.cell().and_then(|pos| {
-        let seconds = mining_seconds(registry.def(map.get_block(pos)).hardness);
-        mining.crack_stage(seconds).map(|stage| (pos, stage))
-    });
+    let shown = mining.cell().and_then(|pos| mining.crack_stage().map(|stage| (pos, stage)));
     let entity = match overlay.entity {
         Some(e) => e,
         None => {
@@ -630,7 +629,7 @@ mod tests {
         let other = Some((IVec3::new(1, 2, 4), 5));
         let dt = 0.05;
         let mut m = Mining::default();
-        let secs = mining_seconds(1.5); // stone: 2.25s
+        let secs = 2.25; // seconds, say
         let mut frames = 0;
         while !m.advance(block, true, dt, secs) {
             frames += 1;
@@ -643,18 +642,18 @@ mod tests {
         for _ in 0..20 {
             assert!(!m.advance(block, true, dt, secs));
         }
-        assert_eq!(m.crack_stage(secs), Some(4));
+        assert_eq!(m.crack_stage(), Some(4));
         m.advance(other, true, dt, secs);
-        assert_eq!(m.crack_stage(secs), Some(0), "switching blocks restarts");
+        assert_eq!(m.crack_stage(), Some(0), "switching blocks restarts");
         // Letting go also restarts.
         m.advance(other, false, dt, secs);
-        assert_eq!(m.crack_stage(secs), None);
+        assert_eq!(m.crack_stage(), None);
         // And so does the block in the cell changing under you.
         for _ in 0..20 {
             m.advance(block, true, dt, secs);
         }
         m.advance(Some((IVec3::new(1, 2, 3), 6)), true, dt, secs);
-        assert!(m.crack_stage(secs).unwrap() < 1);
+        assert!(m.crack_stage().unwrap() < 1);
     }
 
     #[test]
@@ -664,7 +663,7 @@ mod tests {
         let mut broken = 0;
         for i in 0..100 {
             // A fresh torch in front of you every frame (the last one broke).
-            if m.advance(Some((IVec3::new(i, 0, 0), 9)), true, dt, mining_seconds(0.0)) {
+            if m.advance(Some((IVec3::new(i, 0, 0), 9)), true, dt, 0.0) {
                 broken += 1;
             }
         }
@@ -694,10 +693,22 @@ mod tests {
     }
 
     #[test]
-    fn harder_blocks_take_longer() {
-        assert!(mining_seconds(0.5) < mining_seconds(1.5));
-        assert_eq!(mining_seconds(0.0), 0.0);
-        assert_eq!(mining_seconds(-1.0), 0.0);
+    fn swapping_to_a_faster_tool_partway_carries_the_work_done_over() {
+        let block = Some((IVec3::new(1, 2, 3), 5));
+        let dt = 0.1;
+        let mut m = Mining::default();
+        // Half way through a 60-second block by hand...
+        for _ in 0..300 {
+            assert!(!m.advance(block, true, dt, 60.0));
+        }
+        assert!(matches!(m.crack_stage(), Some(4 | 5)), "{:?}", m.crack_stage());
+        // ...then a tool that does it in 3 seconds: half is left, not none.
+        let mut frames = 0;
+        while !m.advance(block, true, dt, 3.0) {
+            frames += 1;
+            assert!(frames < 100);
+        }
+        assert!((13..=17).contains(&frames), "took {frames} frames of 0.1s for the second half");
     }
 
     #[test]

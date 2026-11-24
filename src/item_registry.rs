@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::blocks::{find_data_dir, BlockId, BlockRegistry, Drops, AIR, DEFAULT_MAX_STACK};
-use crate::tools::{Tier, TierBook, ToolKind, ToolSpec, DEFAULT_TOOL_QUALITY, MAX_QUALITY};
+use crate::tools::{HeldTool, Tier, TierBook, ToolKind, ToolSpec, DEFAULT_TOOL_QUALITY, MAX_QUALITY};
 
 pub type ItemId = u16;
 
@@ -249,6 +249,18 @@ impl ItemRegistry {
     /// The tier a tool item belongs to.
     pub fn tier_of(&self, id: ItemId) -> Option<&Tier> {
         self.tiers.get(&self.tool(id)?.tier)
+    }
+
+    /// What mining sees of a stack in hand: `Some` for a tool, with its
+    /// speed at this stack's quality; `None` for a bare hand or anything
+    /// else.
+    pub fn held_tool(&self, stack: &ItemStack) -> Option<HeldTool> {
+        if stack.is_empty() {
+            return None;
+        }
+        let spec = self.tool(stack.id)?;
+        let tier = self.tiers.get(&spec.tier)?;
+        Some(HeldTool { kind: spec.kind, speed: tier.mining_speed_at(stack.quality) })
     }
 
     /// A fresh stack of `count` of `id`: a tool starts at the default

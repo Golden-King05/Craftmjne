@@ -64,12 +64,19 @@
 //!   game mode (default `true`; `blocks/bedrock.json` is the one built-in
 //!   `false`).
 //! - `hardness` is how tough this block is to mine (default `1.0`). Survival
-//!   mining time is `hardness * interact::SECONDS_PER_HARDNESS` with a bare
-//!   hand - `0` breaks instantly (torches), dirt is `0.5`, stone `1.5`;
-//!   Creative ignores it and breaks everything instantly. It's
-//!   a property of the material rather than a duration so a future tool can
-//!   divide it by its own speed instead of every block listing a time per
-//!   tool.
+//!   mining time is `hardness * tools::SECONDS_PER_HARDNESS` (5s) divided by
+//!   the speed of the tool in hand when it's the block's `tool` kind - and a
+//!   bare hand or the wrong tool is speed 1. `0` breaks instantly (torches);
+//!   dirt is `0.5` (2.5s by hand), gravel `1.0` (5s). Creative ignores it
+//!   and breaks everything instantly. It's a property of the material rather
+//!   than a duration so every tool can divide it by its own speed instead of
+//!   every block listing a time per tool.
+//! - `tool` names the tool kind a block is mined with (`"pickaxe"`, `"axe"`,
+//!   `"shovel"`, ...). `requires_tool: true` means that without it the block
+//!   still breaks - `tools::NO_TOOL_PENALTY` (8x) slower - but **drops
+//!   nothing**: stone and ores want a pickaxe, logs and planks an axe (60s
+//!   and 45s by hand, so in practice you make the tool first). Dirt, sand and
+//!   gravel only have a preferred shovel; they're merely faster with it.
 //! - `drops` is what breaking this block in Survival gives you: `true` (the
 //!   default) drops the block itself, `false` drops nothing (ice, glass),
 //!   an item id drops that item instead (grass drops `"dirt"`), and
@@ -170,6 +177,7 @@
 
 use bevy::prelude::*;
 use serde::Deserialize;
+use crate::tools::ToolKind;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -706,6 +714,13 @@ pub struct BlockDef {
     /// separate mechanism from `tinted` - defaults to no overlay on any
     /// face, which is every block except grass's sides.
     pub overlay: FaceTextures,
+    /// The tool kind this block is mined with (`blocks/*.json` `tool`): the
+    /// matching tool mines it at the tool's speed, anything else (a bare
+    /// hand, the wrong kind) at hand speed. `None`: no tool helps.
+    pub tool: Option<ToolKind>,
+    /// Without the right tool it still breaks (slowly) but drops nothing.
+    /// Needs `tool`.
+    pub requires_tool: bool,
     /// May hold a fluid (or the ice it freezes into) in the same cell as
     /// itself. See the module docs' `waterloggable` section.
     pub waterloggable: bool,
@@ -766,6 +781,8 @@ impl Default for BlockDef {
             textures: FaceTextures::default(),
             tinted: FaceTint::default(),
             overlay: FaceTextures::default(),
+            tool: None,
+            requires_tool: false,
             waterloggable: false,
             freezes_to: None,
             layered: None,
@@ -835,6 +852,9 @@ struct BlockFile {
     #[serde(default)]
     waterloggable: bool,
     freezes_to: Option<String>,
+    tool: Option<ToolKind>,
+    #[serde(default)]
+    requires_tool: bool,
 }
 
 fn default_true() -> bool {
@@ -889,6 +909,8 @@ impl BlockFile {
             textures: self.textures,
             tinted: self.tinted,
             overlay: self.overlay,
+            tool: self.tool,
+            requires_tool: self.requires_tool,
             waterloggable: self.waterloggable,
             freezes_to: self.freezes_to,
             layered: None,
@@ -1089,6 +1111,9 @@ impl BlockRegistry {
                 panic!(
                     "block file {path:?}: item_model \"custom\" requires a custom_item_model path"
                 );
+            }
+            if file.requires_tool && file.tool.is_none() {
+                panic!("block file {path:?}: requires_tool needs a tool (which kind?)");
             }
             reg.register(file.into_def());
         }
@@ -1816,5 +1841,16 @@ mod tests {
         let mut reg = BlockRegistry::with_defaults();
         reg.register(BlockDef { id: "lava".into(), fluid: true, freezes_to: Some("obsidiann".into()), ..BlockDef::default() });
         reg.add_layered_variants();
+    }
+
+    #[test]
+    #[should_panic(expected = "requires_tool needs a tool")]
+    fn requires_tool_without_a_tool_kind_is_refused() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("craftmjne-blocks-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("odd.json"), r#"{ "id": "odd", "requires_tool": true }"#).unwrap();
+        BlockRegistry::load_from_dir(&dir);
     }
 }

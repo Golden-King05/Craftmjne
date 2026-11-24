@@ -137,8 +137,23 @@ The mode can also be changed mid-game with `/mode <survival|creative>` (see
 ### Mining and drops
 
 Hold the left button on a block to mine it (`interact.rs`). How long it
-takes is the block's `hardness` times `SECONDS_PER_HARDNESS` (1.5s) - dirt
-0.75s, stone 2.25s, a log 3s, a torch instantly. Cracks spread across the
+takes is the block's `hardness` times `SECONDS_PER_HARDNESS` (5s), divided
+by the speed of the tool in your hand **if it's the kind of tool that block
+wants** (its `tool`: pickaxe, axe or shovel). A bare hand, or the wrong tool,
+is speed 1. By hand that's dirt and grass 2.5s, gravel 5s, a torch
+instantly - and stone **60s** and wood (logs, planks) **45s**.
+
+Stone, cobblestone, bricks and ores want a pickaxe, and logs, planks and the
+crafting bench an axe, and those are `requires_tool` blocks: without the
+right tool they still break (eight times slower) but **drop nothing**, so
+nobody punches down a tree - you make a stone axe first. Dirt, grass, sand,
+mud, gravel, snow and salt just prefer a shovel; they drop either way. A
+tool's speed is its tier's `mining_speed` scaled by the tool's quality (see
+[Tools, tiers and quality](#tools-tiers-and-quality)): a stone axe takes a
+log from 45s to about 2.4s, a stone pickaxe takes stone from 60s to about
+3s, a stone shovel dirt to about a second. Swords and daggers, hoes (nothing
+to till yet) and the wrong tool all mine at hand speed. Changing tool partway
+through a block carries the work done over. Cracks spread across the
 block as you go (ten `destroy_stage_N` tiles; drop a
 `textures/blocks/destroy_stage_N.png` in to replace them). Looking at
 another block or letting go starts over. Blocks with `"breakable": false`

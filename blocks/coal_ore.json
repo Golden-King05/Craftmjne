@@ -1,5 +1,7 @@
 {
   "id": "coal_ore",
   "name": "Coal Ore",
-  "hardness": 3.0
+  "hardness": 3.0,
+  "tool": "pickaxe",
+  "requires_tool": true
 }

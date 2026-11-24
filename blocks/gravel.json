@@ -1,5 +1,6 @@
 {
   "id": "gravel",
   "name": "Gravel",
-  "hardness": 0.6
+  "hardness": 1.0,
+  "tool": "shovel"
 }

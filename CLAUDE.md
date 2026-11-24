@@ -2585,4 +2585,28 @@ etc.) instead of inventing a new approach:
   it isn't the new code. Not fixed here (it would mean reworking the test's
   frame budget); worth remembering before chasing a "regression" that is
   just a loaded machine.
+- **Mining is "speed of the right tool" plus "does it drop", decided by the
+  block's data, and its progress has to be a fraction.** `tools::
+  mining_seconds(hardness, block_tool, requires_tool, held)` is one pure
+  rule: `hardness * SECONDS_PER_HARDNESS (5s) / speed`, where `speed` is the
+  held tool's (tier speed x quality multiplier) only if its kind matches the
+  block's `tool`, and 1 for a hand or the wrong kind, times
+  `NO_TOOL_PENALTY` (8) if the block `requires_tool` and this isn't it.
+  `harvests` is the matching "does it drop" rule. The user's bare-hand times
+  (dirt 2.5s, gravel 5s, stone 60s, wood 45s) are what pinned the constants:
+  5s per hardness and an 8x penalty put stone (1.5) at exactly 60s, and a log
+  has hardness 1.125 so it lands on 45s with the same constants - the
+  numbers on the blocks, not a per-block "hand time" field, so the rule has
+  one shape. Tools of the wrong kind, swords and hoes all fall out as speed 1
+  for free. `Mining::progress` became a fraction instead of seconds: with
+  seconds, swapping from your hand to a fast tool halfway through a 60-second
+  block finished it instantly, because the stored 30 seconds beat the new
+  3-second requirement. The crack overlay then no longer needs the block's
+  time, only the fraction.
+- **A flaky test that keeps failing under load is worth fixing once it's
+  been blamed on load twice.** `streaming_while_moving_keeps_the_light_
+  backlog_small` fixed its frame count, so how many chunks had landed by the
+  end depended on CPU contention; it now keeps stepping (player stationary)
+  until the setup threshold is met before judging, with the backlog still
+  tracked throughout. Three full parallel runs passed after the change.
 

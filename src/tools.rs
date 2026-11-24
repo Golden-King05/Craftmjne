@@ -43,6 +43,15 @@ pub const MAX_QUALITY: u8 = 100;
 /// for now. Knapping and forging will set real values.
 pub const DEFAULT_TOOL_QUALITY: u8 = 50;
 
+/// Seconds of mining per point of block `hardness`, at speed 1 (a bare
+/// hand, or a tool of the wrong kind). Dirt (0.5) takes 2.5s, gravel (1.0)
+/// 5s.
+pub const SECONDS_PER_HARDNESS: f32 = 5.0;
+
+/// How much slower a block that `requires_tool` is to mine without it. Stone
+/// (hardness 1.5) is 7.5s at speed 1, so 60s by hand; a log (1.125) 45s.
+pub const NO_TOOL_PENALTY: f32 = 8.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolKind {
@@ -53,6 +62,36 @@ pub enum ToolKind {
     Dagger,
     Longsword,
     Greatsword,
+}
+
+/// The tool in a player's hand, as far as mining is concerned: its kind and
+/// its speed (the tier's `mining_speed` scaled by this tool's quality).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct HeldTool {
+    pub kind: ToolKind,
+    pub speed: f32,
+}
+
+/// Whether the tool in hand is the kind `block_tool` asks for.
+fn is_right_tool(block_tool: Option<ToolKind>, held: Option<HeldTool>) -> bool {
+    matches!((block_tool, held), (Some(want), Some(h)) if want == h.kind)
+}
+
+/// Seconds to mine a block: its hardness over the speed of the tool in
+/// hand if that's the block's kind (otherwise speed 1), and
+/// `NO_TOOL_PENALTY` times longer if the block needs a tool it isn't being
+/// mined with.
+pub fn mining_seconds(hardness: f32, block_tool: Option<ToolKind>, requires_tool: bool, held: Option<HeldTool>) -> f32 {
+    let right = is_right_tool(block_tool, held);
+    let speed = if right { held.map_or(1.0, |h| h.speed).max(0.01) } else { 1.0 };
+    let penalty = if requires_tool && !right { NO_TOOL_PENALTY } else { 1.0 };
+    hardness.max(0.0) * SECONDS_PER_HARDNESS * penalty / speed
+}
+
+/// Whether mining the block with what's in hand yields its drops: always,
+/// unless the block `requires_tool` and this isn't it.
+pub fn harvests(block_tool: Option<ToolKind>, requires_tool: bool, held: Option<HeldTool>) -> bool {
+    !requires_tool || is_right_tool(block_tool, held)
 }
 
 /// What a tool item is: its kind and which tier's stats it uses.
@@ -302,5 +341,135 @@ mod tests {
     fn two_tiers_with_one_id_are_refused() {
         let dir = scratch(&[("a.json", r#"{ "id": "same" }"#), ("b.json", r#"{ "id": "same" }"#)]);
         TierBook::load_from_dir(&dir);
+    }
+
+    // ---- mining -------------------------------------------------------
+
+    use crate::blocks::BlockRegistry;
+    use crate::item_registry::{ItemRegistry, ItemStack};
+
+    fn shipped() -> (BlockRegistry, ItemRegistry) {
+        let blocks = BlockRegistry::with_defaults();
+        let items = ItemRegistry::with_defaults(&blocks);
+        (blocks, items)
+    }
+
+    /// Seconds to mine `block` with `held` in hand, from the shipped data.
+    fn secs(blocks: &BlockRegistry, block: &str, held: Option<HeldTool>) -> f32 {
+        let def = blocks.def(blocks.id(block));
+        mining_seconds(def.hardness, def.tool, def.requires_tool, held)
+    }
+
+    fn tool_in_hand(items: &ItemRegistry, name: &str, quality: u8) -> Option<HeldTool> {
+        items.held_tool(&ItemStack::new(items.id(name), 1).with_quality(quality))
+    }
+
+    #[test]
+    fn bare_hands_take_the_times_the_game_was_designed_around() {
+        let (blocks, _items) = shipped();
+        let near = |name: &str, want: f32| {
+            let got = secs(&blocks, name, None);
+            assert!((got - want).abs() < 1e-3, "{name} took {got}s by hand, want {want}s");
+        };
+        near("dirt", 2.5);
+        near("grass", 2.5);
+        near("gravel", 5.0);
+        near("stone", 60.0);
+        near("log", 45.0);
+        near("planks", 45.0);
+    }
+
+    #[test]
+    fn the_right_tool_is_much_faster_and_quality_makes_it_faster_still() {
+        let (blocks, items) = shipped();
+        for (block, tool) in [("stone", "stone_pickaxe"), ("log", "stone_axe"), ("dirt", "stone_shovel"), ("gravel", "stone_shovel")] {
+            let hand = secs(&blocks, block, None);
+            let poor = secs(&blocks, block, tool_in_hand(&items, tool, 0));
+            let great = secs(&blocks, block, tool_in_hand(&items, tool, 100));
+            assert!(great < poor && poor < hand, "{block}: hand {hand}s, poor {poor}s, great {great}s");
+        }
+        // A stone axe turns a 45-second log into a few seconds, and a pick does the same for stone.
+        assert!(secs(&blocks, "log", tool_in_hand(&items, "stone_axe", 50)) < 4.0);
+        assert!(secs(&blocks, "stone", tool_in_hand(&items, "stone_pickaxe", 50)) < 5.0);
+    }
+
+    #[test]
+    fn the_wrong_tool_mines_at_hand_speed_and_so_do_weapons() {
+        let (blocks, items) = shipped();
+        for (block, wrong) in [
+            ("stone", "stone_shovel"),
+            ("stone", "stone_axe"),
+            ("stone", "stone_dagger"),
+            ("log", "stone_pickaxe"),
+            ("dirt", "stone_pickaxe"),
+            ("dirt", "stone_dagger"),
+            ("dirt", "stone_hoe"),
+        ] {
+            assert_eq!(
+                secs(&blocks, block, tool_in_hand(&items, wrong, 100)),
+                secs(&blocks, block, None),
+                "{wrong} on {block} should be no better than a hand"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_that_need_a_tool_drop_nothing_without_it() {
+        let (blocks, items) = shipped();
+        let drops = |block: &str, held: Option<HeldTool>| {
+            let def = blocks.def(blocks.id(block));
+            harvests(def.tool, def.requires_tool, held)
+        };
+        assert!(!drops("log", None), "a log punched by hand gives nothing");
+        assert!(!drops("planks", None));
+        assert!(!drops("stone", None));
+        assert!(!drops("stone", tool_in_hand(&items, "stone_axe", 100)), "the wrong tool doesn't count");
+        assert!(drops("log", tool_in_hand(&items, "stone_axe", 0)), "any quality of the right tool will do");
+        assert!(drops("stone", tool_in_hand(&items, "stone_pickaxe", 0)));
+        // Blocks with only a preferred tool drop either way.
+        assert!(drops("dirt", None));
+        assert!(drops("gravel", None));
+        assert!(drops("leaves", None));
+    }
+
+    #[test]
+    fn what_each_block_is_mined_with() {
+        let (blocks, _items) = shipped();
+        let of = |name: &str| {
+            let d = blocks.def(blocks.id(name));
+            (d.tool, d.requires_tool)
+        };
+        for name in ["stone", "cobblestone", "bricks", "coal_ore", "iron_ore"] {
+            assert_eq!(of(name), (Some(ToolKind::Pickaxe), true), "{name}");
+        }
+        for name in ["log", "planks", "crafting_bench"] {
+            assert_eq!(of(name), (Some(ToolKind::Axe), true), "{name}");
+        }
+        for name in ["dirt", "grass", "gravel", "sand", "mud", "snow", "salt"] {
+            assert_eq!(of(name), (Some(ToolKind::Shovel), false), "{name}");
+        }
+        assert_eq!(of("leaves"), (None, false));
+        assert_eq!(of("torch"), (None, false));
+    }
+
+    #[test]
+    fn held_tool_reads_a_stacks_speed_at_its_quality() {
+        let (_blocks, items) = shipped();
+        let pick = items.id("stone_pickaxe");
+        let tier = items.tier_of(pick).unwrap();
+        let held = items.held_tool(&ItemStack::new(pick, 1).with_quality(83)).unwrap();
+        assert_eq!(held.kind, ToolKind::Pickaxe);
+        assert!((held.speed - tier.mining_speed_at(83)).abs() < 1e-6);
+        assert_eq!(items.held_tool(&ItemStack::EMPTY), None, "a bare hand");
+        assert_eq!(items.held_tool(&ItemStack::new(items.id("stick"), 3)), None, "a stick is no tool");
+        assert_eq!(items.held_tool(&ItemStack::new(items.id("dirt"), 3)), None);
+    }
+
+    #[test]
+    fn instant_and_zero_hardness_blocks_stay_instant_with_any_tool() {
+        assert_eq!(mining_seconds(0.0, None, false, None), 0.0);
+        assert_eq!(mining_seconds(-1.0, None, false, None), 0.0);
+        let held = Some(HeldTool { kind: ToolKind::Axe, speed: 2.0 });
+        assert_eq!(mining_seconds(0.0, Some(ToolKind::Axe), true, held), 0.0);
     }
 }

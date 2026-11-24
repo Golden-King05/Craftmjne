@@ -3,5 +3,7 @@
   "name": "Log",
   "rotation": "log",
   "texture_scheme": "log",
-  "hardness": 2.0
+  "hardness": 1.125,
+  "tool": "axe",
+  "requires_tool": true
 }

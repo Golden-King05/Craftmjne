@@ -931,6 +931,18 @@ fn streaming_while_moving_keeps_the_light_backlog_small() {
         most = most.max(app.world().resource::<LightQueue>().len());
         std::thread::sleep(Duration::from_millis(2));
     }
+    // How many chunks finish in those frames depends on how busy the machine
+    // is (with the whole suite running in parallel it can fall well short),
+    // so keep the player where they ended up and let generation catch up
+    // before judging - the backlog is still measured the whole time.
+    for _ in 0..3000 {
+        if app.world().resource::<ChunkMap>().stats().0 > 150 {
+            break;
+        }
+        app.update();
+        most = most.max(app.world().resource::<LightQueue>().len());
+        std::thread::sleep(Duration::from_millis(2));
+    }
     let generated = app.world().resource::<ChunkMap>().stats().0;
     assert!(generated > 150, "test setup: only {generated} chunks streamed in");
     assert!(most < 40_000, "the light backlog reached {most} cells");
