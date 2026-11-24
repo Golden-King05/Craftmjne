@@ -1,0 +1,8 @@
+{
+  "id": "stone_longsword",
+  "name": "Stone Longsword",
+  "tool": {
+    "kind": "longsword",
+    "tier": "stone"
+  }
+}

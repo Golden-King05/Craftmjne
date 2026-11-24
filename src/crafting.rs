@@ -487,7 +487,7 @@ mod tests {
             assert!(items.tool(r.output.id).is_some(), "{}", r.id);
             assert!(k.outline.area() >= 20, "{} outline is tiny", r.id);
         }
-        assert_eq!(n, 5, "pickaxe, axe, shovel, hoe, dagger");
+        assert_eq!(n, 7, "pickaxe, axe, shovel, hoe, dagger, longsword, greatsword");
     }
 
     #[test]

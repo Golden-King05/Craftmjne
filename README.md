@@ -202,8 +202,10 @@ one per material):
 ```
 
 Kinds are `axe`, `pickaxe`, `shovel`, `hoe`, `dagger`, `longsword` and
-`greatsword`. Stone has an axe, pickaxe, shovel, hoe and dagger so far, made by
-[knapping](#knapping) (placeholder art).
+`greatsword`. Stone has all seven (the dagger is the light, quick sword; the longsword the
+middle one; the greatsword the slow, heavy one), each made by
+[knapping](#knapping) (placeholder art). There's no combat yet, so swords only
+carry their tier's damage and quality for now.
 
 **Quality** is a whole percent, 0 to 100, stored on the tool's stack (so
 tools never stack; their `max_stack` is forced to 1). It says how good *this*
@@ -307,7 +309,7 @@ the next recipes go.
 ### Knapping
 
 Stone tools aren't crafted at once: clicking one (pickaxe, axe, shovel, hoe,
-dagger; each needs a **pebble** plus sticks/twigs, and no bench) opens the
+dagger, longsword, greatsword; each needs a **pebble** plus sticks/twigs, and no bench) opens the
 **knapping screen** (`src/knap_ui.rs`, rules in `src/knapping.rs`). A 16x16
 stone sits in front of you with the tool head's outline marked in gold.
 

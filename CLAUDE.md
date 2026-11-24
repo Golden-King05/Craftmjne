@@ -2668,3 +2668,14 @@ etc.) instead of inventing a new approach:
     root has `FocusPolicy::Block` and a `GlobalZIndex` so the inventory's
     rebuilds (it respawns when the hotbar changes) can't draw over it or
     take clicks.
+- **Swords were just data, because the tool kinds already existed.** The
+  stone longsword and greatsword are an item file and a knapping recipe each
+  (plus the dagger from before) - no code. The only real constraint is that an
+  outline must fit inside *every* possible stone: `Stone::blob`'s radius is
+  ~7.1-7.7, so a corner cell like (13,12) is outside some seeds' stone. The
+  first greatsword guard was too wide and
+  `every_shipped_outline_fits_inside_every_stone_and_is_one_piece` caught it
+  over 500 seeds; keep guards within ~5 cells of centre. The aggregate
+  difficulty test covers all shipped outlines together, so it needs no edit
+  when shapes are added. Swords have no combat effect yet (damage is on the
+  tier, unused until a combat step).

@@ -432,6 +432,8 @@ mod tests {
             ("stone_shovel", ToolKind::Shovel),
             ("stone_hoe", ToolKind::Hoe),
             ("stone_dagger", ToolKind::Dagger),
+            ("stone_longsword", ToolKind::Longsword),
+            ("stone_greatsword", ToolKind::Greatsword),
         ] {
             let id = items.id(name);
             assert_eq!(items.tool(id).map(|t| t.kind), Some(kind), "{name}");
