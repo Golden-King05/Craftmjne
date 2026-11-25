@@ -9,5 +9,7 @@
   ],
   "hardness": 0.5,
   "drops": false,
-  "tool": "pickaxe"
+  "tool": "pickaxe",
+  "shatters_at": 5.0,
+  "shatter_keep": 0.5
 }

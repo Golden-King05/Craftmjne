@@ -16,7 +16,7 @@
 
 use bevy::prelude::*;
 
-use crate::blocks::{BlockTables, ItemStack, Tables};
+use crate::blocks::{BlockTables, ItemStack, Tables, ThrowSpec};
 use crate::item_registry::ItemRegistry;
 use crate::chat::ChatState;
 use crate::interact::Hotbar;
@@ -69,13 +69,23 @@ pub const DAMAGE_PER_JOULE: f32 = 0.25;
 /// How fast a thing of `mass` kilograms leaves the hand: `THROW_ENERGY`
 /// worth of kinetic energy, `v = sqrt(2E / m)`.
 pub fn throw_speed(mass: f32) -> f32 {
-    (2.0 * THROW_ENERGY / mass.max(1e-3)).sqrt()
+    throw_speed_with(mass, THROW_ENERGY)
+}
+
+/// [`throw_speed`] for something with its own `throw_energy` tag.
+pub fn throw_speed_with(mass: f32, energy: f32) -> f32 {
+    (2.0 * energy / mass.max(1e-3)).sqrt()
 }
 
 /// Damage from a thing of `mass` hitting at `speed`: proportional to its
 /// kinetic energy, so speed counts for more than mass.
 pub fn impact_damage(mass: f32, speed: f32) -> f32 {
-    DAMAGE_PER_JOULE * 0.5 * mass * speed * speed
+    impact_damage_scaled(mass, speed, 1.0)
+}
+
+/// [`impact_damage`] times the thrown thing's own `throw_damage` tag.
+pub fn impact_damage_scaled(mass: f32, speed: f32, scale: f32) -> f32 {
+    DAMAGE_PER_JOULE * scale * 0.5 * mass * speed * speed
 }
 
 /// One step of a thrown thing in flight: gravity and air resistance (heavier
@@ -88,8 +98,20 @@ pub fn step_projectile(
     dt: f32,
     solid: impl Fn(IVec3) -> bool,
 ) -> Option<IVec3> {
+    step_projectile_with(pos, vel, mass, AIR_RESISTANCE, dt, solid)
+}
+
+/// [`step_projectile`] with the thing's own `throw_drag` tag.
+pub fn step_projectile_with(
+    pos: &mut Vec3,
+    vel: &mut Vec3,
+    mass: f32,
+    air_resistance: f32,
+    dt: f32,
+    solid: impl Fn(IVec3) -> bool,
+) -> Option<IVec3> {
     let speed = vel.length();
-    let drag = AIR_RESISTANCE / mass.max(1e-3) * speed;
+    let drag = air_resistance / mass.max(1e-3) * speed;
     *vel += (Vec3::new(0.0, GRAVITY, 0.0) - *vel * drag) * dt;
     let next = *pos + *vel * dt;
     let cell = next.floor().as_ivec3();
@@ -115,6 +137,8 @@ pub struct DroppedItem {
     /// [`step_projectile`]); it lands as an ordinary item when it hits
     /// something.
     pub thrown_mass: Option<f32>,
+    /// The drag and damage tags it was thrown with (meaningful in flight).
+    pub thrown_spec: ThrowSpec,
     /// The light its mesh was last built with - rebuilt when the cell's light
     /// changes (`refresh_item_meshes`).
     lit: Option<LightCell>,
@@ -123,7 +147,7 @@ pub struct DroppedItem {
 
 impl DroppedItem {
     pub fn new(stack: ItemStack, pos: Vec3, vel: Vec3, pickup_delay: f32) -> Self {
-        Self { stack, pos, vel, age: 0.0, pickup_delay, thrown_mass: None, lit: None, mesh: None }
+        Self { stack, pos, vel, age: 0.0, pickup_delay, thrown_mass: None, thrown_spec: ThrowSpec::DEFAULT, lit: None, mesh: None }
     }
 }
 
@@ -144,6 +168,9 @@ pub struct SpawnProjectile {
     pub stack: ItemStack,
     pub vel: Vec3,
     pub mass: f32,
+    /// The item's throw tags (drag and damage scale apply in flight; energy
+    /// and cooldown were already used by the thrower).
+    pub spec: ThrowSpec,
 }
 
 /// A thrown thing hit the solid cell `cell`.
@@ -152,6 +179,7 @@ pub struct ProjectileHit {
     pub cell: IVec3,
     pub speed: f32,
     pub mass: f32,
+    pub damage_scale: f32,
 }
 
 /// Items read from the save by `world::enter_world`, waiting for
@@ -299,6 +327,7 @@ fn spawn_drops(
         if !e.stack.is_empty() {
             let mut item = DroppedItem::new(e.stack, e.pos, e.vel, 0.0);
             item.thrown_mass = Some(e.mass);
+            item.thrown_spec = e.spec;
             commands.spawn(item_bundle(item));
         }
     }
@@ -350,7 +379,7 @@ fn simulate_items(
             if let Some(mass) = item.thrown_mass {
                 let hit = {
                     let m = &*map;
-                    step_projectile(&mut item.pos, &mut item.vel, mass, step, |c| m.is_solid(tables, c))
+                    step_projectile_with(&mut item.pos, &mut item.vel, mass, item.thrown_spec.drag, step, |c| m.is_solid(tables, c))
                 };
                 if let Some(cell) = hit {
                     let id = map.get_block(cell);
@@ -370,7 +399,7 @@ fn simulate_items(
                         });
                         item.vel *= kept / speed;
                     } else {
-                        hits.write(ProjectileHit { cell, speed, mass });
+                        hits.write(ProjectileHit { cell, speed, mass, damage_scale: item.thrown_spec.damage_scale });
                         // Lands where it hit, as an ordinary item that can be picked up again.
                         item.thrown_mass = None;
                         item.vel *= 0.1;
@@ -797,4 +826,21 @@ mod tests {
         assert_eq!(cell.x, 3);
         assert!(pos.x < 3.0, "pos {pos}");
     }
+
+    #[test]
+    fn a_things_own_throw_tags_change_how_it_flies() {
+        // More energy: faster launch. More drag: slower after a while.
+        assert!(throw_speed_with(0.05, 16.0) > throw_speed_with(0.05, 8.0));
+        assert_eq!(throw_speed_with(0.05, THROW_ENERGY), throw_speed(0.05));
+        let fly = |drag: f32| {
+            let (mut pos, mut vel) = (Vec3::ZERO, Vec3::X * 18.0);
+            for _ in 0..60 {
+                step_projectile_with(&mut pos, &mut vel, 0.05, drag, 1.0 / 120.0, |_| false);
+            }
+            vel.length()
+        };
+        assert!(fly(0.02) < fly(0.002));
+        assert!((impact_damage_scaled(0.05, 10.0, 2.0) / impact_damage(0.05, 10.0) - 2.0).abs() < 1e-5);
+    }
+
 }

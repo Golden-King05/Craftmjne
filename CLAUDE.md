@@ -2852,3 +2852,20 @@ etc.) instead of inventing a new approach:
   closure over `&*map` scoped to each call, not one closure held across the
   loop. The headless test waits with `run_until` for the pebble to come to
   rest: a fixed number of `update`s wasn't enough (frame time is tiny).
+- **Modder-friendly means a tag, not a constant: every knob a throwable
+  needs is now per-item data.** `blocks::ThrowSpec` (`energy`, `drag`,
+  `cooldown`, `damage_scale`, `ThrowSpec::DEFAULT` = the old globals) is parsed
+  from `throw_energy`/`throw_drag`/`throw_cooldown`/`throw_damage` by one
+  shared `#[serde(flatten)] ThrowFile`, used by *both* `BlockFile` and
+  `ItemFile`, so block items and plain items accept the same tags and a
+  mod author learns them once. Non-positive or non-finite values fall back to
+  the default rather than being trusted. The spec rides on `SpawnProjectile`
+  into `DroppedItem::thrown_spec`, and `ProjectileHit` carries `damage_scale`;
+  `step_projectile_with`, `throw_speed_with` and `impact_damage_scaled` take
+  the tag values, with the old two/one-argument functions kept as default
+  wrappers so existing tests didn't move. Ice shatters with the same 5 / 0.5
+  as glass (`glass_and_ice_both_shatter_and_stone_does_not`). When adding a
+  gameplay rule from now on, put the number on the block/item file first;
+  a `const` is only right for something no content should ever vary.
+  Still global and *not* tags: `DAMAGE_PER_JOULE`, `ATTACK_COOLDOWN`,
+  `HAND_DAMAGE`, gravity - say so if those should become tags too.

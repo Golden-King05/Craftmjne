@@ -198,6 +198,57 @@ pub const DEFAULT_MAX_STACK: u32 = 124;
 /// Mass (kg) of anything that doesn't say.
 pub const DEFAULT_MASS: f32 = 1.0;
 
+/// Everything about how a thing behaves when thrown, apart from its mass.
+/// The same four tags work in a block file and an item file, and every
+/// field is optional: leave one out and the default below applies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThrowSpec {
+    /// Joules of effort behind a throw (`throw_energy`). Launch speed is
+    /// `sqrt(2 * energy / mass)`.
+    pub energy: f32,
+    /// Air resistance in kg/m (`throw_drag`): deceleration is
+    /// `drag / mass * speed^2`.
+    pub drag: f32,
+    /// Seconds between throws while the button is held (`throw_cooldown`).
+    pub cooldown: f32,
+    /// Multiplier on impact damage (`throw_damage`); 1.0 is the standard
+    /// quarter damage per joule.
+    pub damage_scale: f32,
+}
+
+impl ThrowSpec {
+    pub const DEFAULT: Self = Self { energy: 8.0, drag: 0.002, cooldown: 0.35, damage_scale: 1.0 };
+}
+
+impl Default for ThrowSpec {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The throw tags as they appear in a block or item JSON file (flattened in).
+/// Non-positive values are ignored rather than trusted.
+#[derive(Deserialize, Default, Clone, Copy)]
+pub struct ThrowFile {
+    throw_energy: Option<f32>,
+    throw_drag: Option<f32>,
+    throw_cooldown: Option<f32>,
+    throw_damage: Option<f32>,
+}
+
+impl ThrowFile {
+    pub fn spec(&self) -> ThrowSpec {
+        let d = ThrowSpec::DEFAULT;
+        let pos = |v: Option<f32>, default: f32| v.filter(|x| *x > 0.0 && x.is_finite()).unwrap_or(default);
+        ThrowSpec {
+            energy: pos(self.throw_energy, d.energy),
+            drag: pos(self.throw_drag, d.drag),
+            cooldown: pos(self.throw_cooldown, d.cooldown),
+            damage_scale: pos(self.throw_damage, d.damage_scale),
+        }
+    }
+}
+
 /// A block file's `hardness` when it doesn't give one.
 pub const DEFAULT_HARDNESS: f32 = 1.0;
 
@@ -756,6 +807,8 @@ pub struct BlockDef {
     pub mass: f32,
     /// Left click throws it instead of mining or hitting (a pebble).
     pub throwable: bool,
+    /// How it throws (`throw_energy`, `throw_drag`, `throw_cooldown`, `throw_damage`).
+    pub throw: ThrowSpec,
     /// A block that stands two cells tall: the name of the block placed in
     /// the cell above this one. Placing needs both cells free; breaking
     /// either takes the other with it (and only one drop). See
@@ -830,6 +883,7 @@ impl Default for BlockDef {
             shatter_keep: 1.0,
             mass: DEFAULT_MASS,
             throwable: false,
+            throw: ThrowSpec::DEFAULT,
             upper: None,
             waterloggable: false,
             freezes_to: None,
@@ -913,6 +967,8 @@ struct BlockFile {
     mass: Option<f32>,
     #[serde(default)]
     throwable: bool,
+    #[serde(flatten)]
+    throw: ThrowFile,
     upper: Option<String>,
 }
 
@@ -981,6 +1037,7 @@ impl BlockFile {
             shatter_keep: self.shatter_keep.unwrap_or(1.0).clamp(0.0, 1.0),
             mass: self.mass.filter(|m| *m > 0.0).unwrap_or(DEFAULT_MASS),
             throwable: self.throwable,
+            throw: self.throw.spec(),
             upper: self.upper,
             waterloggable: self.waterloggable,
             freezes_to: self.freezes_to,
@@ -1997,4 +2054,33 @@ mod tests {
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
         reg.compile(&atlas.indices, atlas.tile_size);
     }
+
+    #[test]
+    fn throw_tags_are_optional_and_bad_values_fall_back_to_defaults() {
+        let plain = serde_json::from_str::<BlockFile>(r#"{"id": "rock", "throwable": true}"#).unwrap().into_def();
+        assert_eq!(plain.throw, ThrowSpec::DEFAULT);
+        let custom = serde_json::from_str::<BlockFile>(
+            r#"{"id": "boulder", "throwable": true, "mass": 4.0, "throw_energy": 30.0,
+                "throw_drag": 0.01, "throw_cooldown": 1.5, "throw_damage": 2.0}"#,
+        )
+        .unwrap()
+        .into_def();
+        assert_eq!(custom.throw, ThrowSpec { energy: 30.0, drag: 0.01, cooldown: 1.5, damage_scale: 2.0 });
+        let bad = serde_json::from_str::<BlockFile>(r#"{"id": "x", "throw_energy": -3.0, "throw_cooldown": 0.0}"#)
+            .unwrap()
+            .into_def();
+        assert_eq!(bad.throw, ThrowSpec::DEFAULT);
+    }
+
+    #[test]
+    fn glass_and_ice_both_shatter_and_stone_does_not() {
+        let reg = BlockRegistry::with_defaults();
+        for name in ["glass", "ice"] {
+            let def = reg.def(reg.id(name));
+            assert_eq!(def.shatters_at, Some(5.0), "{name}");
+            assert_eq!(def.shatter_keep, 0.5, "{name}");
+        }
+        assert_eq!(reg.def(reg.id("stone")).shatters_at, None);
+    }
+
 }

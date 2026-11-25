@@ -93,6 +93,7 @@ pub struct ItemDef {
     pub mass: f32,
     /// Left click throws it.
     pub throwable: bool,
+    pub throw: crate::blocks::ThrowSpec,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +112,8 @@ struct ItemFile {
     mass: Option<f32>,
     #[serde(default)]
     throwable: bool,
+    #[serde(flatten)]
+    throw: crate::blocks::ThrowFile,
 }
 
 #[derive(Resource)]
@@ -178,6 +181,7 @@ impl ItemRegistry {
                     tool,
                     mass: file.mass.filter(|m| *m > 0.0).unwrap_or(crate::blocks::DEFAULT_MASS),
                     throwable: file.throwable,
+                    throw: file.throw.spec(),
                     id: file.id,
                 }
             })
@@ -186,7 +190,7 @@ impl ItemRegistry {
     }
 
     pub fn build(blocks: &BlockRegistry, plain: Vec<ItemDef>) -> Self {
-        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false };
+        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false, throw: Default::default() };
         let mut reg = Self {
             defs: vec![empty],
             by_name: HashMap::new(),
@@ -206,6 +210,7 @@ impl ItemRegistry {
                 tool: None,
                 mass: def.mass,
                 throwable: def.throwable,
+                throw: def.throw,
             });
             reg.of_block[block] = id;
         }
@@ -289,6 +294,10 @@ impl ItemRegistry {
     /// Whether left click throws `stack` (it isn't empty and is throwable).
     pub fn throwable(&self, stack: &ItemStack) -> bool {
         !stack.is_empty() && self.def(stack.id).throwable
+    }
+
+    pub fn throw_spec(&self, id: ItemId) -> crate::blocks::ThrowSpec {
+        self.def(id).throw
     }
 
     pub fn mass(&self, id: ItemId) -> f32 {
@@ -453,6 +462,7 @@ mod tests {
             tool: None,
             mass: 1.0,
             throwable: false,
+            throw: Default::default(),
         };
         ItemRegistry::build(&blocks, vec![def]);
     }
@@ -519,6 +529,7 @@ mod tests {
             tool: Some(ToolSpec { kind: ToolKind::Pickaxe, tier: "mithril".into() }),
             mass: 1.0,
             throwable: false,
+            throw: Default::default(),
         };
         ItemRegistry::build(&blocks, vec![def]).with_tiers(TierBook::with_defaults());
     }

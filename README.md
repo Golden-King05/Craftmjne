@@ -196,7 +196,25 @@ and Survival uses one up. Anything with `"throwable": true` in its block or
 item file works the same way; so far that's only the pebble, and holding one
 means left click doesn't mine or hit (right click still places it).
 
-Every throw has the same 8 joules of effort behind it, so **mass decides
+Everything about throwing is a tag in the block or item JSON, so a modder can
+make a new throwable (or retune the pebble) without touching code. All are
+optional; leave one out for the default:
+
+| tag | default | meaning |
+|---|---|---|
+| `throwable` | false | left click throws it |
+| `mass` | 1.0 | kilograms |
+| `throw_energy` | 8 | joules behind a throw (launch speed `sqrt(2E/m)`) |
+| `throw_drag` | 0.002 | air resistance, kg/m |
+| `throw_cooldown` | 0.35 | seconds between throws while held |
+| `throw_damage` | 1.0 | multiplier on impact damage |
+
+Values that aren't positive numbers are ignored. For example a heavy,
+hard-hitting rock is `{"id":"boulder","throwable":true,"mass":4,
+"throw_energy":30,"throw_cooldown":1.5,"throw_damage":2}`. The shatter tags
+below are likewise per block.
+
+With the default 8 joules of effort, **mass decides
 everything else** (`"mass"` in kilograms; a pebble is `0.05`, anything unsaid
 is `1.0`): a lighter thing leaves your hand faster (`v = sqrt(2E/m)`, so a
 pebble goes about 18 m/s and a 1 kg thing 4 m/s) and the air slows it more
@@ -211,10 +229,11 @@ about 1.5, deliberately little (ranged weapons come later). Hit the training
 dummy and the damage number pops up as usual. A long lob that falls a long
 way hits a bit harder, since it's gained speed.
 
-**Glass shatters.** A block with `"shatters_at"` (minimum impact speed in m/s)
+**Glass and ice shatter.** A block with `"shatters_at"` (minimum impact speed in m/s)
 breaks when a thrown thing at least that fast hits it, and `"shatter_keep"`
 (default 1.0) is the fraction of its speed the projectile keeps afterwards.
-Glass is `5.0` and `0.5`: a pebble (~18 m/s) goes through one pane at about 9
+Glass and ice are both `5.0` and `0.5` (a pebble frozen into ice isn't
+shatterable, since that cell is the pebble block): a pebble (~18 m/s) goes through one pane at about 9
 and a second at about 4.5, then is too slow for a third, so a line of three
 panes takes two pebbles. A shatter drops nothing, makes no damage number, and
 is an ordinary block edit, so it's saved like mining it.

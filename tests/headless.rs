@@ -1314,6 +1314,7 @@ fn a_thrown_pebble_hits_the_ground_and_lands_as_an_item() {
         stack: craftmjne::item_registry::ItemStack::new(pebble, 1),
         vel: Vec3::new(0.0, -12.0, 0.0),
         mass: 0.05,
+        spec: Default::default(),
     });
     assert!(run_until(&mut app, |app| !app.world().resource::<Hits>().0.is_empty(), 500), "it hit something");
     let hit = app.world().resource::<Hits>().0[0];
@@ -1350,6 +1351,7 @@ fn a_thrown_pebble_shatters_up_to_two_panes_and_a_second_one_the_third() {
             stack: craftmjne::item_registry::ItemStack::new(pebble, 1),
             vel: Vec3::X * throw_speed(0.05),
             mass: 0.05,
+            spec: Default::default(),
         });
     };
     let in_flight = |app: &mut App| {

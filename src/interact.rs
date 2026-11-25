@@ -23,7 +23,7 @@ use crate::crafting::RecipeBook;
 use crate::inventory::{open_inventory, InventoryState};
 use crate::item_registry::ItemRegistry;
 use bevy::ecs::system::SystemParam;
-use crate::items::{impact_damage, throw_speed, ProjectileHit, SpawnDrop, SpawnProjectile, MINED_PICKUP_DELAY};
+use crate::items::{impact_damage_scaled, throw_speed_with, ProjectileHit, SpawnDrop, SpawnProjectile, MINED_PICKUP_DELAY};
 use crate::light::{LightCell, MAX_LIGHT};
 use crate::player::{cursor_grabbed, Player};
 use crate::render::{bucket_to_mesh, ChunkMaterials};
@@ -286,9 +286,6 @@ fn partner_of(map: &ChunkMap, registry: &BlockRegistry, pos: IVec3, broken: Bloc
     (map.get_block(cell) == block).then_some((cell, block))
 }
 
-/// Seconds between throws while the button is held.
-const THROW_COOLDOWN: f32 = 0.35;
-
 /// Left click with a throwable item (a pebble) in hand throws one: it leaves
 /// the eye along the look direction at the speed its mass allows
 /// (`items::throw_speed`). Survival uses one up; Creative's are free.
@@ -314,14 +311,16 @@ fn throw_on_click(
     if !items.throwable(&held) {
         return;
     }
-    *cooldown = THROW_COOLDOWN;
+    let spec = items.throw_spec(held.id);
+    *cooldown = spec.cooldown;
     let mass = items.mass(held.id);
     let dir = player.look_dir();
     projectiles.write(SpawnProjectile {
         pos: player.eye() - Vec3::Y * 0.1 + dir * 0.4,
         stack: ItemStack { count: 1, ..held },
-        vel: dir * throw_speed(mass),
+        vel: dir * throw_speed_with(mass, spec.energy),
         mass,
+        spec,
     });
     if *mode == GameMode::Survival {
         let slot = &mut hotbar.slots[selected];
@@ -338,7 +337,7 @@ fn projectile_impacts(mut hits: EventReader<ProjectileHit>, mut damage: EventWri
     for hit in hits.read() {
         damage.write(DamageEvent {
             cell: hit.cell,
-            amount: impact_damage(hit.mass, hit.speed),
+            amount: impact_damage_scaled(hit.mass, hit.speed, hit.damage_scale),
             source: DamageSource::Projectile,
         });
     }
