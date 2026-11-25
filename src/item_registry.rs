@@ -130,17 +130,31 @@ pub struct ItemRegistry {
     tiles: Vec<u16>,
     /// The tiers tool items name. Empty until `with_tiers`.
     pub tiers: TierBook,
+    pub rarities: crate::tools::RarityBook,
 }
 
 impl ItemRegistry {
     /// Block items, every `items/*.json` file, and the `tiers/` they name.
     pub fn with_defaults(blocks: &BlockRegistry) -> Self {
-        Self::load_from_dir(blocks, &find_data_dir("items")).with_tiers(TierBook::with_defaults())
+        Self::load_from_dir(blocks, &find_data_dir("items"))
+            .with_tiers(TierBook::with_defaults())
+            .with_rarities(crate::tools::RarityBook::with_defaults())
     }
 
     /// Attaches the tier list, panicking with a clear message if a tool item
     /// names a tier that doesn't exist - startup content, like a missing
     /// texture or an unknown drop.
+    /// Attaches the rarity list (what a tool's quality is called).
+    pub fn with_rarities(mut self, rarities: crate::tools::RarityBook) -> Self {
+        self.rarities = rarities;
+        self
+    }
+
+    /// The rarity a quality percent is.
+    pub fn rarity(&self, quality: u8) -> &crate::tools::Rarity {
+        self.rarities.at(quality)
+    }
+
     pub fn with_tiers(mut self, tiers: TierBook) -> Self {
         for def in &self.defs {
             if let Some(tool) = &def.tool {
@@ -202,6 +216,7 @@ impl ItemRegistry {
             of_block: vec![NO_ITEM; blocks.defs.len()],
             tiles: Vec::new(),
             tiers: TierBook::default(),
+            rarities: crate::tools::RarityBook::default(),
         };
         for (block, def) in blocks.defs.iter().enumerate().skip(1) {
             if !def.item {

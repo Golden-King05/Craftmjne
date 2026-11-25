@@ -80,6 +80,9 @@ jobs:
           cp -r blocks "$stage/blocks"
           cp -r items "$stage/items"
           cp -r recipes "$stage/recipes"
+          cp -r tiers "$stage/tiers"
+          cp -r rarities "$stage/rarities"
+          cp -r entities "$stage/entities"
           cp -r textures "$stage/textures"
 
       - name: Package (Linux/macOS)

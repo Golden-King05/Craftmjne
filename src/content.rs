@@ -29,6 +29,7 @@ pub struct ContentPaths {
     pub items: Vec<KindDir>,
     pub recipes: Vec<KindDir>,
     pub tiers: Vec<KindDir>,
+    pub rarities: Vec<KindDir>,
     pub textures: Vec<KindDir>,
 }
 
@@ -40,6 +41,7 @@ impl ContentPaths {
             items: vec![KindDir::core(find_data_dir("items"))],
             recipes: vec![KindDir::core(find_data_dir("recipes"))],
             tiers: vec![KindDir::core(find_data_dir("tiers"))],
+            rarities: vec![KindDir::core(find_data_dir("rarities"))],
             textures: vec![KindDir::core(find_data_dir("textures").join("blocks"))],
         }
     }
@@ -53,6 +55,7 @@ impl ContentPaths {
             self.items.push(dir("items"));
             self.recipes.push(dir("recipes"));
             self.tiers.push(dir("tiers"));
+            self.rarities.push(dir("rarities"));
             self.textures.push(KindDir { dir: m.path.join("textures").join("blocks"), ..dir("") });
         }
         self
@@ -78,7 +81,8 @@ pub struct Content {
 /// the core game's.
 pub fn build_content(paths: &ContentPaths) -> Content {
     let mut registry = BlockRegistry::load_from_dirs(&paths.blocks);
-    let mut items = ItemRegistry::load_from_dirs(&registry, &paths.items).with_tiers(TierBook::load_from_dirs(&paths.tiers));
+    let mut items = ItemRegistry::load_from_dirs(&registry, &paths.items).with_tiers(TierBook::load_from_dirs(&paths.tiers))
+        .with_rarities(crate::tools::RarityBook::load_from_dirs(&paths.rarities));
     // A texture name with no painter gets the "missing texture" placeholder
     // instead of `compile()` panicking - see `Painters::ensure_registered`.
     let mut painters = default_painters();
@@ -358,5 +362,88 @@ mod tests {
         assert_eq!(c.registry.def(c.registry.id("dirt")).hardness, 8.0, "dirt is slow to dig");
         assert!(c.registry.by_name(&format!("{}:amber", info.id)).is_ok(), "amber was added under the mod's id");
         assert!(c.recipes.recipes.iter().any(|r| r.id == format!("{}:amber", info.id)), "and a recipe for it");
+    }
+
+    /// A data folder the game reads but the release workflows forget to package
+    /// makes every released build panic at startup (this happened with `tiers/` and
+    /// `entities/`, unnoticed because nothing builds a release from a test). So:
+    /// every `find_data_dir("x")` in the source must be copied by both workflows.
+    #[test]
+    fn every_data_folder_the_game_reads_is_packaged_by_the_release_workflows() {
+        let mut wanted = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir("src").unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            // Only code before the test module counts (tests mention other names).
+            let code = text.split("#[cfg(test)]").next().unwrap_or("");
+            for part in code.split("find_data_dir(\"").skip(1) {
+                if let Some(name) = part.split('"').next() {
+                    wanted.insert(name.to_string());
+                }
+            }
+        }
+        assert!(wanted.contains("blocks") && wanted.contains("rarities"), "the scan found the folders: {wanted:?}");
+        for workflow in [".github/workflows/release.yml", ".github/workflows/dev-build.yml"] {
+            let yaml = std::fs::read_to_string(workflow).unwrap();
+            for name in &wanted {
+                assert!(yaml.contains(&format!("cp -r {name} ")), "{workflow} doesn't package `{name}/`");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mod_adds_a_tool_tier_and_a_tool_made_of_it_and_can_change_a_core_tier() {
+        let vanilla = build_content(&ContentPaths::vanilla());
+        let m = Scratch::new();
+        m.file("tiers/copper.json", r#"{"id": "copper", "name": "Copper", "mining_speed": 2.5, "damage": 2.0}"#)
+            .file("tiers/stone.json", r#"{"id": "craftmjne:stone", "mining_speed": 9.0}"#)
+            .file("items/copper_pickaxe.json", r#"{"id": "copper_pickaxe", "tool": {"kind": "pickaxe", "tier": "copper"}}"#)
+            .file("items/hard_axe.json", r#"{"id": "hard_axe", "tool": {"kind": "axe", "tier": "stone"}}"#);
+        let c = build_content(&with(&[m.source("metals")]));
+        let pick = c.items.def(c.items.id("metals:copper_pickaxe"));
+        assert_eq!(pick.tool.as_ref().unwrap().tier, "metals:copper", "its own tier, found by plain name");
+        let copper = c.items.tiers.get("metals:copper").expect("the tier exists");
+        assert_eq!((copper.name.as_str(), copper.mining_speed), ("Copper", 2.5));
+        let axe = c.items.def(c.items.id("metals:hard_axe"));
+        assert_eq!(axe.tool.as_ref().unwrap().tier, "stone", "a plain name that isn't the mod's is the core game's");
+        assert_eq!(c.items.tiers.get("stone").unwrap().mining_speed, 9.0, "the core tier was changed...");
+        assert_eq!(vanilla.items.tiers.get("stone").unwrap().mining_speed, 3.0, "...only while the mod is on");
+        assert!(vanilla.items.tiers.get("metals:copper").is_none());
+    }
+
+    #[test]
+    fn a_tool_naming_a_tier_that_does_not_exist_is_an_error_not_a_crash() {
+        let m = Scratch::new();
+        m.file("items/bad_pick.json", r#"{"id": "bad_pick", "tool": {"kind": "pickaxe", "tier": "unobtainium"}}"#);
+        let err = try_build_content(&with(&[m.source("m")])).err().expect("refused");
+        assert!(err.contains("unobtainium"), "{err}");
+    }
+
+    #[test]
+    fn a_mod_adds_a_rarity_that_splits_an_existing_one_and_can_recolour_a_core_rarity() {
+        let m = Scratch::new();
+        m.file("rarities/mythic.json", r#"{"id": "mythic", "name": "Mythic", "min": 95, "color": [1.0, 0.2, 0.2]}"#)
+            .file("rarities/rare.json", r#"{"id": "craftmjne:rare", "color": [0.0, 1.0, 0.0]}"#);
+        let c = build_content(&with(&[m.source("lore")]));
+        assert_eq!(c.items.rarity(97).name, "Mythic");
+        assert_eq!(c.items.rarity(94).name, "Epic", "below the new one it's still Epic");
+        assert_eq!(c.items.rarity(100).name, "Legendary");
+        assert_eq!(c.items.rarity(70).color, [0.0, 1.0, 0.0], "Rare was recoloured");
+        assert_eq!(c.items.rarity(70).name, "Rare", "and keeps its name");
+        let vanilla = build_content(&ContentPaths::vanilla());
+        assert_eq!(vanilla.items.rarity(97).name, "Epic", "without the mod nothing changed");
+    }
+
+    #[test]
+    fn rarities_that_start_at_the_same_quality_or_make_no_sense_are_refused() {
+        let m = Scratch::new();
+        m.file("rarities/dup.json", r#"{"id": "dup", "min": 20}"#);
+        let err = try_build_content(&with(&[m.source("m")])).err().expect("refused");
+        assert!(err.contains("both start at quality 20"), "{err}");
+        let m2 = Scratch::new();
+        m2.file("rarities/high.json", r#"{"id": "high", "min": 150}"#);
+        assert!(try_build_content(&with(&[m2.source("m")])).err().expect("refused").contains("above 100"));
+        let m3 = Scratch::new();
+        m3.file("rarities/dark.json", r#"{"id": "dark", "min": 50, "color": [2.0, 0.0, 0.0]}"#);
+        assert!(try_build_content(&with(&[m3.source("m")])).err().expect("refused").contains("0..1"));
     }
 }

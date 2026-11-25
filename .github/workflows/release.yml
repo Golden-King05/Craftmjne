@@ -84,6 +84,9 @@ jobs:
           # crafting.rs).
           cp -r items "$stage/items"
           cp -r recipes "$stage/recipes"
+          cp -r tiers "$stage/tiers"
+          cp -r rarities "$stage/rarities"
+          cp -r entities "$stage/entities"
           # The whole directories, not just their READMEs - a past version of
           # this step copied only textures/blocks/README.md, which silently
           # shipped every released build with the procedural placeholder art

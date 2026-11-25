@@ -34,7 +34,6 @@ use crate::items::{give, SpawnDrop, THROWN_PICKUP_DELAY};
 use crate::player::Player;
 use crate::save::{GameMode, InventorySave, SlotSave};
 use crate::state::{AppState, DeathState, PauseState};
-use crate::tools::Quality;
 use crate::ui::ItemIcons;
 use crate::world::ChunkMap;
 
@@ -232,8 +231,8 @@ fn tip_for(registry: &ItemRegistry, id: ItemId, quality: u8) -> Tip {
     if registry.tool(id).is_none() {
         return Tip { text: name, color: [1.0; 3] };
     }
-    let q = Quality::from_percent(quality);
-    Tip { text: format!("{name}\n{}", q.label()), color: q.color() }
+    let r = registry.rarity(quality);
+    Tip { text: format!("{name}\n{}", r.name), color: r.color }
 }
 /// A cell in Creative's item list.
 #[derive(Component)]
@@ -1076,7 +1075,7 @@ mod tests {
         let pick = items.id("stone_pickaxe");
         let tip = tip_for(&items, pick, 100);
         assert_eq!(tip.text, "Stone Pickaxe\nLegendary");
-        assert_eq!(tip.color, Quality::Legendary.color());
+        assert_eq!(tip.color, items.rarity(100).color);
         assert!(!tip_for(&items, pick, 42).text.contains("42"));
         assert_eq!(tip_for(&items, pick, 5).text, "Stone Pickaxe\nTrash");
         let plain = tip_for(&items, items.id("stick"), 0);

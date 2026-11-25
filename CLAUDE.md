@@ -3048,3 +3048,40 @@ etc.) instead of inventing a new approach:
     data preserved rather than dropped, which `enter_world` currently skips);
     no entities/tiers/worldgen in mods; the texture report is replaced per world
     (`TextureReport::remove`), not merged.
+- **Namespaces are a rewrite of references at load time, not a new kind of id.**
+  `overlay.rs` owns it. A mod's `mod.json` must have an `id` (`mods::read_mod`
+  refuses without one; `scan_all` returns the broken ones with a reason for the
+  Mods screen); everything it adds is `ns:name`, and the core game's names stay
+  *bare* (`dirt`; `craftmjne:dirt` is just another spelling, `overlay::normalize`,
+  also applied in `BlockRegistry::by_name`/`ItemRegistry::by_name`) so no saved
+  name or hardcoded `registry.id("water")` changed. Each directory is a `KindDir
+  { ns, dir, locals }`; `locals` (`Locals::scan`) is the set of names that mod
+  defines, which is what turns a *plain reference* into `ns:ref` (the mod's own) or
+  leaves it for the core. `overlay_by_id` qualifies a file's references per kind
+  (`qualify_block_refs`: drops, freezes_to, upper, textures, overlay;
+  `qualify_item_refs`: texture, tool.tier; recipes inline in `crafting.rs`) *before*
+  merging, because each file's plain names mean the mod it came from. A file whose
+  id carries another namespace is a patch and must find its target (a mod can
+  patch one that loads earlier; the reverse is a clear error). The same id twice in
+  one folder is still a mistake (`seen`), distinct from the same id in two sources.
+  Textures: `atlas::load_custom_tile_in` - `ns:granite` is `<mod>/textures/blocks/
+  granite.png`; re-skinning someone else's name is `<mod>/textures/blocks/<their
+  ns>/<name>.png`; a plain `dirt.png` in a mod is the mod's *own* dirt, never a
+  re-skin (tested).
+  **The conflict manager** (`mods::assign_namespaces`) is a pure function and its
+  output is stored on `WorldMeta::mod_ids` (folder -> namespace): clashing newcomers
+  become `id_1`, `id_2` in folder order, an existing assignment is *never* changed
+  (a block saved as `x_1:thing` must stay that after the other `x` mod is removed),
+  and `apply_world_mods` saves new assignments (a branch uses its host's). Worlds
+  remember mods by *folder* (`meta.mods`), not declared id, since ids can clash.
+  **Rarities are data now** (`rarities/*.json`, `tools::RarityBook`, kept on
+  `ItemRegistry` beside the tiers so `tip_for`/`knap_ui` needed no new parameter);
+  the `Quality` enum is gone. Tiers and rarities go through the same overlay, so a mod
+  can add or patch either. **A packaging bug this turned up:** the release and dev
+  workflows never copied `tiers/` or `entities/` (nothing in CI builds a release from a
+  test), so a released build would have panicked at startup reading
+  `tiers/`. They now copy `tiers`, `rarities` and `entities`, and
+  `every_data_folder_the_game_reads_is_packaged_by_the_release_workflows` scans the
+  source for every `find_data_dir("x")` and fails if either workflow doesn't `cp -r x`
+  (break-tested by deleting the `tiers` line). Add the folder to the workflows whenever
+  you add a new `find_data_dir`.

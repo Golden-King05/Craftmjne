@@ -1,0 +1,10 @@
+{
+  "id": "common",
+  "name": "Common",
+  "min": 20,
+  "color": [
+    1.0,
+    1.0,
+    1.0
+  ]
+}

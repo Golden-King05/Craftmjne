@@ -27,7 +27,6 @@ use crate::items::{SpawnDrop, THROWN_PICKUP_DELAY};
 use crate::knapping::{Outcome, Outline, Session, FLAW_INTEGRITY, GRID, MAX_TAPS};
 use crate::player::Player;
 use crate::state::AppState;
-use crate::tools::Quality;
 
 /// A knap in progress.
 pub struct Active {
@@ -215,8 +214,8 @@ pub(crate) fn sync_knap_screen(
     let Some(active) = &knap.active else { return };
     let recipe = &book.recipes[active.recipe];
     let session = &active.session;
-    let quality = Quality::from_percent(session.quality());
-    let [r, g, b] = quality.color();
+    let rarity = registry.rarity(session.quality());
+    let [r, g, b] = rarity.color;
     let tool = registry.def(recipe.output.id).name.clone();
 
     commands
@@ -289,7 +288,7 @@ pub(crate) fn sync_knap_screen(
                         }
                     });
                 panel.spawn(text(
-                    format!("Quality: {}", quality.label()),
+                    format!("Quality: {}", rarity.name),
                     20.0,
                     Color::srgb(r, g, b),
                 ));

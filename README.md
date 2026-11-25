@@ -1253,7 +1253,8 @@ mods/any_folder_name/
   blocks/*.json       same format as the game's own blocks/
   items/*.json
   recipes/*.json
-  tiers/*.json
+  tiers/*.json        tool tiers (material, mining speed, damage)
+  rarities/*.json     what a tool's quality is called: id, name, min percent, colour
   textures/blocks/*.png
 ```
 
@@ -1282,7 +1283,11 @@ even if the other mod is removed later), and the world carries on.
 **Mods sit on top of the game; they never change it.** The game's own files are
 only ever read, so taking a mod off puts everything back exactly as it was:
 
-- **Add** a block, item or tier with a plain id.
+- **Add** a block, item, tool tier or rarity with a plain id. A tier is
+  `{"id": "copper", "mining_speed": 2.5, "damage": 2.0}` and a tool names it
+  (`"tool": {"kind": "pickaxe", "tier": "copper"}`, which means *this mod's* copper
+  if it has one); a rarity is `{"id": "mythic", "min": 95, "color": [1, 0.2, 0.2]}` and
+  splits whichever rarity covers 95+.
 - **Change** one that exists by giving its full name and only the keys to change:
   `{"id": "craftmjne:dirt", "hardness": 20}` makes dirt take 20 times as long to dig
   and leaves everything else about dirt alone. Objects merge key by key, and a key set
@@ -1318,7 +1323,8 @@ the reason (which mods are missing, or that its host is gone). Loading it withou
 would drop their blocks from its next save, so it refuses instead, and nothing writes
 to its save. A mod whose files are broken is reported the same way, naming the file.
 
-Not moddable yet: entities, world generation, and anything needing code.
+Not moddable yet: entities, tool *kinds* (axe, pickaxe, ...; a mod's tools use the
+existing kinds), world generation, and anything needing code.
 
 ## Extending the framework
 

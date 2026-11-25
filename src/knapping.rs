@@ -774,7 +774,6 @@ mod tests {
     use crate::blocks::BlockRegistry;
     use crate::crafting::RecipeBook;
     use crate::item_registry::ItemRegistry;
-    use crate::tools::Quality;
 
     fn shipped_outlines() -> Vec<(String, Outline)> {
         let blocks = BlockRegistry::with_defaults();
@@ -852,6 +851,7 @@ mod tests {
 
     /// Counts of Trash/Common/Rare/Epic/Legendary over `seeds` attempts.
     fn distribution(play: impl Fn(&mut Session, u64), seeds: u64) -> ([u32; 5], f32) {
+        let rarities = crate::tools::RarityBook::with_defaults();
         let mut counts = [0u32; 5];
         let mut total_strikes = 0;
         let mut attempts = 0;
@@ -861,14 +861,7 @@ mod tests {
                 play(&mut session, seed);
                 total_strikes += session.strikes;
                 attempts += 1;
-                let slot = match Quality::from_percent(session.quality()) {
-                    Quality::Trash => 0,
-                    Quality::Common => 1,
-                    Quality::Rare => 2,
-                    Quality::Epic => 3,
-                    Quality::Legendary => 4,
-                };
-                counts[slot] += 1;
+                counts[rarities.index_at(session.quality())] += 1;
             }
         }
         (counts, total_strikes as f32 / attempts as f32)

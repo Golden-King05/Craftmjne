@@ -30,7 +30,7 @@
 //! **Quality** is a whole percent, `0..=100`, stored on the `ItemStack`
 //! itself (so tools never stack - a tool's `max_stack` is forced to 1).
 //! It means "how good is this one, for its tier", and the tooltip shows a
-//! [`Quality`] name instead of the number: Trash, Common, Rare, Epic, and
+//! [`Rarity`] name (data: `rarities/*.json`) instead of the number: Trash, Common, Rare, Epic, and
 //! Legendary only at exactly 100.
 
 use serde::Deserialize;
@@ -214,47 +214,109 @@ impl TierBook {
     }
 }
 
-/// The name a quality is shown as. Bands are fixed: 0-19 Trash, 20-59
-/// Common, 60-84 Rare, 85-99 Epic, and Legendary only at exactly 100.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Quality {
-    Trash,
-    Common,
-    Rare,
-    Epic,
-    Legendary,
+/// A named band of quality - what a tool's percent is *called*. Data
+/// (`rarities/*.json`), one file per rarity:
+///
+/// ```json
+/// { "id": "rare", "name": "Rare", "min": 60, "color": [0.35, 0.55, 1.0] }
+/// ```
+///
+/// A tool's quality belongs to the rarity with the highest `min` that is at or
+/// below it. The core game's are Trash (0), Common (20), Rare (60), Epic (85) and
+/// Legendary (100, so only a perfect tool). A mod can add a rarity (`"min": 95`
+/// splits Epic), or change one with its full name (`{"id": "craftmjne:rare",
+/// "color": [0, 1, 0]}`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rarity {
+    pub id: String,
+    pub name: String,
+    /// The lowest quality percent that is this rarity.
+    pub min: u8,
+    /// The colour the name is drawn in (sRGB).
+    pub color: [f32; 3],
 }
 
-impl Quality {
-    pub fn from_percent(percent: u8) -> Self {
-        match percent {
-            0..=19 => Self::Trash,
-            20..=59 => Self::Common,
-            60..=84 => Self::Rare,
-            85..=99 => Self::Epic,
-            _ => Self::Legendary,
-        }
+#[derive(Deserialize)]
+struct RarityFile {
+    id: String,
+    name: Option<String>,
+    min: u8,
+    color: Option<[f32; 3]>,
+}
+
+/// Every rarity, lowest `min` first.
+#[derive(Clone, Debug, Default)]
+pub struct RarityBook {
+    rarities: Vec<Rarity>,
+}
+
+/// Shown when there are no rarities at all (a hand-built registry in a test).
+fn fallback_rarity() -> &'static Rarity {
+    static FALLBACK: std::sync::OnceLock<Rarity> = std::sync::OnceLock::new();
+    FALLBACK.get_or_init(|| Rarity { id: "common".into(), name: "Common".into(), min: 0, color: [1.0; 3] })
+}
+
+impl RarityBook {
+    /// Every `rarities/*.json` file, found like the other shipped data folders.
+    pub fn with_defaults() -> Self {
+        Self::load_from_dirs(&[crate::overlay::KindDir::core(find_data_dir("rarities"))])
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Trash => "Trash",
-            Self::Common => "Common",
-            Self::Rare => "Rare",
-            Self::Epic => "Epic",
-            Self::Legendary => "Legendary",
+    /// Rarities from the core game's directory and then each mod's `rarities/`.
+    /// Panics, naming the file, on numbers that make no sense, or if nothing is
+    /// the rarity of quality 0 - and two rarities can't start at the same quality.
+    pub fn load_from_dirs(dirs: &[crate::overlay::KindDir]) -> Self {
+        let mut rarities = Vec::new();
+        for (path, value) in crate::overlay::overlay_by_id(dirs, "rarity definitions", None, |_, _| {}) {
+            let file: RarityFile = serde_json::from_value(value)
+                .unwrap_or_else(|err| panic!("failed to parse rarity {path:?}: {err}"));
+            assert!(file.min <= MAX_QUALITY, "rarity {path:?}: min {} is above {MAX_QUALITY}", file.min);
+            let color = file.color.unwrap_or([1.0; 3]);
+            assert!(color.iter().all(|c| (0.0..=1.0).contains(c)), "rarity {path:?}: color {color:?} needs 0..1 values");
+            rarities.push(Rarity {
+                name: file.name.unwrap_or_else(|| crate::blocks::title_case(&file.id)),
+                id: file.id,
+                min: file.min,
+                color,
+            });
         }
+        rarities.sort_by_key(|r| r.min);
+        for pair in rarities.windows(2) {
+            assert!(
+                pair[0].min != pair[1].min,
+                "rarities {:?} and {:?} both start at quality {}",
+                pair[0].id,
+                pair[1].id,
+                pair[0].min
+            );
+        }
+        assert!(
+            rarities.first().is_some_and(|r| r.min == 0),
+            "some rarity has to start at quality 0, or the worst tools have no name"
+        );
+        Self { rarities }
     }
 
-    /// The colour the name is drawn in (sRGB): grey, white, blue, purple, gold.
-    pub fn color(self) -> [f32; 3] {
-        match self {
-            Self::Trash => [0.6, 0.6, 0.6],
-            Self::Common => [1.0, 1.0, 1.0],
-            Self::Rare => [0.35, 0.55, 1.0],
-            Self::Epic => [0.7, 0.35, 0.95],
-            Self::Legendary => [1.0, 0.75, 0.2],
-        }
+    /// The rarity a quality percent is.
+    pub fn at(&self, percent: u8) -> &Rarity {
+        self.rarities.iter().rev().find(|r| r.min <= percent).unwrap_or_else(|| fallback_rarity())
+    }
+
+    /// Its position in the list, lowest first - for code that tallies by rarity.
+    pub fn index_at(&self, percent: u8) -> usize {
+        self.rarities.iter().rposition(|r| r.min <= percent).unwrap_or(0)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Rarity> {
+        self.rarities.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rarities.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rarities.is_empty()
     }
 }
 
@@ -299,14 +361,14 @@ mod tests {
 
     #[test]
     fn quality_names_follow_the_bands_and_legendary_is_only_a_perfect_hundred() {
-        let name = |q| Quality::from_percent(q);
-        assert_eq!((name(0), name(19)), (Quality::Trash, Quality::Trash));
-        assert_eq!((name(20), name(59)), (Quality::Common, Quality::Common));
-        assert_eq!((name(60), name(84)), (Quality::Rare, Quality::Rare));
-        assert_eq!((name(85), name(99)), (Quality::Epic, Quality::Epic));
-        assert_eq!(name(100), Quality::Legendary);
-        assert_eq!(Quality::Legendary.label(), "Legendary");
-        assert_ne!(Quality::Epic.color(), Quality::Legendary.color());
+        let book = RarityBook::with_defaults();
+        let name = |q| book.at(q).name.as_str();
+        assert_eq!((name(0), name(19)), ("Trash", "Trash"));
+        assert_eq!((name(20), name(59)), ("Common", "Common"));
+        assert_eq!((name(60), name(84)), ("Rare", "Rare"));
+        assert_eq!((name(85), name(99)), ("Epic", "Epic"));
+        assert_eq!(name(100), "Legendary");
+        assert_ne!(book.at(85).color, book.at(100).color);
     }
 
     #[test]
