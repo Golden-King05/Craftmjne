@@ -149,7 +149,7 @@ fn main() {
             let store = app.world().resource::<SaveStore>().clone();
             let _ = store.create_world(world, 100 + i as u32, if i == 1 { GameMode::Creative } else { GameMode::Survival });
         }
-        if name == "pause" || name == "game" {
+        if name == "pause" || name == "game" || name == "inventory" {
             app.add_systems(Update, enter_smoke_world.run_if(in_state(AppState::MainMenu)));
         }
         app.insert_resource(ShotScreen(name)).add_systems(Update, ui_shot);
@@ -216,18 +216,19 @@ fn ui_shot(
     mut worlds_mode: ResMut<craftmjne::menu::WorldsScreenMode>,
     mut view: ResMut<craftmjne::settings::SettingsView>,
     mut paused: ResMut<craftmjne::state::PauseState>,
+    mut inventory: ResMut<craftmjne::inventory::InventoryState>,
     mut exit: EventWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     use craftmjne::settings::{ControlsTab, Section};
     let t = time.elapsed_secs();
     let name = shot.0.as_str();
-    let in_game = name == "pause" || name == "game";
+    let in_game = name == "pause" || name == "game" || name == "inventory";
     let out = std::env::var("CRAFT_SHOT_OUT").unwrap_or_else(|_| "shot.png".to_string());
     match *phase {
         0 if t > 1.0 => {
             match name {
-                "worlds" | "create" => next.set(AppState::Worlds),
+                "worlds" | "create" | "world-options" => next.set(AppState::Worlds),
                 "mods" => next.set(AppState::Mods),
                 n if n.starts_with("settings") => next.set(AppState::Settings),
                 _ => {}
@@ -237,6 +238,7 @@ fn ui_shot(
         1 if t > 3.0 => {
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
+                "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
                 "settings-rendering" => view.section = Section::Rendering,
                 "settings-sound" => view.section = Section::Sound,
                 "settings-mods" => view.section = Section::Mods,
@@ -252,6 +254,9 @@ fn ui_shot(
         2 if t > if in_game { 14.0 } else { 5.0 } => {
             if name == "pause" {
                 paused.open = true;
+            }
+            if name == "inventory" {
+                inventory.open = true;
             }
             *phase = 3;
         }

@@ -25,6 +25,7 @@ use bevy::prelude::*;
 use crate::config::WorldSettings;
 use crate::keybinds::{search, Bindings, Capture, CaptureEvent, ControlOptions, FlightMode};
 use crate::mod_controls::ControlNotes;
+use crate::gui_skin::{Element, Skinned};
 use crate::menu::{despawn_all, MenuButton};
 use crate::ui_theme::{self as theme, ButtonOpts, ButtonStyle, TEXT_DIM};
 use crate::save::{GraphicsSettings, ModStorage, SaveStore};
@@ -231,12 +232,10 @@ fn rebuild_settings(
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: Val::Px(10.0),
-                padding: UiRect::all(Val::Px(18.0)),
-                border: UiRect::all(Val::Px(2.0)),
+                padding: UiRect::all(Val::Px(24.0)),
                 ..default()
             },
-            BackgroundColor(theme::CARD_BG),
-            BorderColor(theme::PANEL_BORDER),
+            theme::card_skin(false),
         ))
         .with_children(|body| match view.section {
             Section::Player => {
@@ -292,18 +291,15 @@ fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
 fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes) {
     // Search box + clear + reset all.
     body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), width: Val::Percent(100.0), ..default() }).with_children(|row| {
-        let (bg, border) = theme::button_colors(ButtonStyle::Field, Interaction::None, !capture.active(), None);
         row.spawn((
             Node {
                 flex_grow: 1.0,
                 height: Val::Px(36.0),
-                border: UiRect::all(Val::Px(2.0)),
                 align_items: AlignItems::Center,
-                padding: UiRect::horizontal(Val::Px(12.0)),
+                padding: UiRect::horizontal(Val::Px(16.0)),
                 ..default()
             },
-            BorderColor(border),
-            BackgroundColor(bg),
+            Skinned::new(if capture.active() { Element::Field } else { Element::FieldFocus }),
         ))
         .with_children(|b| {
             let (text, color) = if view.search.is_empty() && capture.active() {
@@ -320,7 +316,7 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
         if !view.search.is_empty() {
             sbutton(row, "Clear", SettingsButton::ClearSearch, ButtonStyle::Normal, 72.0, 36.0, 14.0, false, theme::TEXT, None);
         }
-        sbutton(row, "Reset all", SettingsButton::ResetAll, ButtonStyle::Normal, 96.0, 36.0, 14.0, false, theme::TEXT, None);
+        sbutton(row, "Reset all", SettingsButton::ResetAll, ButtonStyle::Normal, 112.0, 36.0, 14.0, false, theme::TEXT, None);
     });
     dim(body, "key:a = what uses A  -  key:ctrl+left = combos  -  is:conflict, is:unbound, is:changed", 12.0);
 
@@ -365,7 +361,7 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
                 let listening = capture.target.as_deref() == Some(id.as_str());
                 list.spawn((
                     Node { flex_direction: FlexDirection::Column, padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)), ..default() },
-                    BackgroundColor(if n % 2 == 0 { theme::CARD_BG_ALT } else { Color::NONE }),
+                    BackgroundColor(if n % 2 == 0 { Color::srgba(0.0, 0.0, 0.0, 0.22) } else { Color::NONE }),
                 ))
                 .with_children(|entry| {
                     entry.spawn(Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {

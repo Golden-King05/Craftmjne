@@ -1,43 +1,39 @@
-//! The look of every menu, in one place: palette, buttons, panels, the title, and
-//! a pixel-art night-sky backdrop built from plain UI nodes (no image assets).
+//! The look of every menu, in one place: palette, buttons, panels, the title and the
+//! backdrop. The textures themselves live in `gui_skin.rs` (rustic wood, stone and
+//! leather, replaceable by a texture pack or a mod); this module decides *which*
+//! texture each piece of a screen uses.
 //!
-//! Screens build their layout from these pieces instead of picking colours
-//! themselves, so changing the look of the whole game's menus is a change here.
+//! Screens build their layout from these pieces instead of picking colours or
+//! images themselves, so restyling every menu is a change here (or a new skin).
 //!
 //! **Buttons** carry a [`ThemedButton`] (a [`ButtonStyle`], whether it is selected,
-//! and an optional accent colour that replaces the style's border - used for the red
-//! of a conflicting key or the yellow of one being rebound). One system
-//! ([`themed_button_visuals`]) paints them from that plus the `Interaction`, using the
-//! pure [`button_colors`], so a screen never repaints a button by hand: it flips
-//! `selected` and the theme does the rest. Because the button's colours come from the
-//! component rather than from where it was spawned, a screen can be rebuilt from
-//! scratch (the spawn-on-change pattern) without losing hover or selection.
-//!
-//! **Backdrop.** [`spawn_backdrop`] draws banded sky, stars and three layers of blocky
-//! hills as absolutely-positioned nodes behind whatever else the screen holds. It is
-//! deterministic (a seed, not a random call), so a screen looks the same every time.
+//! and an optional accent tint - used for the red of a conflicting key or the yellow
+//! of one being rebound). One system ([`themed_button_visuals`]) picks the skin
+//! element from that plus the `Interaction`, using the pure [`button_element`], so a
+//! screen never repaints a button by hand: it flips `selected` and the theme does the
+//! rest. Because the look comes from the component rather than from where it was
+//! spawned, a screen can be rebuilt from scratch (the spawn-on-change pattern)
+//! without losing hover or selection.
 
 use bevy::prelude::*;
+
+use crate::gui_skin::{apply_skin, Element, GuiSkin, GuiSkinPlugin, Skinned};
 
 // ---------------------------------------------------------------------------
 // Palette
 // ---------------------------------------------------------------------------
 
-pub const TEXT: Color = Color::srgb(0.93, 0.95, 0.98);
-pub const TEXT_DIM: Color = Color::srgb(0.60, 0.65, 0.75);
-pub const ACCENT: Color = Color::srgb(0.40, 0.85, 0.55);
+/// Cream, like lettering on a wooden sign.
+pub const TEXT: Color = Color::srgb(0.97, 0.93, 0.82);
+pub const TEXT_DIM: Color = Color::srgb(0.80, 0.72, 0.58);
+/// Lantern gold.
+pub const ACCENT: Color = Color::srgb(0.93, 0.75, 0.33);
 pub const WARN: Color = Color::srgb(0.97, 0.72, 0.38);
-pub const ERROR: Color = Color::srgb(1.0, 0.38, 0.38);
-
-pub const PANEL_BG: Color = Color::srgba(0.06, 0.07, 0.11, 0.97);
-/// Opaque on purpose: Bevy blends UI in linear space, where a faint white overlay
-/// (alpha 0.05) comes out as a *much* lighter grey than it reads in sRGB.
-pub const PANEL_BORDER: Color = Color::srgb(0.22, 0.25, 0.33);
-pub const CARD_BG: Color = Color::srgb(0.095, 0.105, 0.145);
-pub const CARD_BG_ALT: Color = Color::srgb(0.125, 0.14, 0.19);
-pub const FIELD_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.40);
+pub const ERROR: Color = Color::srgb(1.0, 0.45, 0.40);
+/// Dark text shadow, like carved lettering.
+pub const TEXT_SHADOW: Color = Color::srgba(0.05, 0.03, 0.01, 0.85);
 /// What the game shows behind a menu drawn over the running world.
-pub const OVERLAY: Color = Color::srgba(0.02, 0.03, 0.06, 0.70);
+pub const OVERLAY: Color = Color::srgba(0.04, 0.025, 0.015, 0.66);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ButtonStyle {
@@ -55,46 +51,38 @@ pub enum ButtonStyle {
     Key,
 }
 
-/// `(background, border)` for a button in this state. Pure, so the look can be tested
-/// (selected is distinguishable, hover is distinguishable, pressed is darker...).
-pub fn button_colors(style: ButtonStyle, interaction: Interaction, selected: bool, accent: Option<Color>) -> (Color, Color) {
+/// Which skin element a button shows in this state. Pure, so the look can be tested
+/// (selected is distinguishable, hover is distinguishable, pressed is its own texture...).
+pub fn button_element(style: ButtonStyle, interaction: Interaction, selected: bool) -> Element {
     let hovered = interaction == Interaction::Hovered;
     let pressed = interaction == Interaction::Pressed;
-    let (bg, border) = match style {
-        ButtonStyle::Normal | ButtonStyle::Choice | ButtonStyle::Key => {
-            let bg = match (selected, pressed, hovered) {
-                (_, true, _) => Color::srgb(0.11, 0.13, 0.18),
-                (true, _, true) => Color::srgb(0.17, 0.32, 0.25),
-                (true, _, _) => Color::srgb(0.13, 0.25, 0.20),
-                (_, _, true) => Color::srgb(0.23, 0.27, 0.36),
-                _ => Color::srgb(0.15, 0.17, 0.23),
-            };
-            let border = if selected || hovered || pressed { ACCENT } else { Color::srgb(0.27, 0.30, 0.39) };
-            (bg, border)
-        }
-        ButtonStyle::Primary => {
-            let bg = match (pressed, hovered) {
-                (true, _) => Color::srgb(0.13, 0.36, 0.22),
-                (_, true) => Color::srgb(0.24, 0.58, 0.36),
-                _ => Color::srgb(0.19, 0.46, 0.29),
-            };
-            (bg, Color::srgb(0.45, 0.90, 0.60))
-        }
-        ButtonStyle::Danger => {
-            let bg = match (pressed, hovered) {
-                (true, _) => Color::srgb(0.30, 0.10, 0.10),
-                (_, true) => Color::srgb(0.46, 0.15, 0.15),
-                _ => Color::srgb(0.17, 0.17, 0.22),
-            };
-            (bg, if hovered || pressed { ERROR } else { Color::srgb(0.27, 0.30, 0.39) })
-        }
+    match style {
+        ButtonStyle::Normal | ButtonStyle::Choice | ButtonStyle::Key => match (pressed, selected, hovered) {
+            (true, _, _) => Element::ButtonPressed,
+            (_, true, _) => Element::ButtonSelected,
+            (_, _, true) => Element::ButtonHover,
+            _ => Element::Button,
+        },
+        ButtonStyle::Primary => match (pressed, hovered) {
+            (true, _) => Element::ButtonPrimaryPressed,
+            (_, true) => Element::ButtonPrimaryHover,
+            _ => Element::ButtonPrimary,
+        },
+        ButtonStyle::Danger => match (pressed, hovered) {
+            (true, _) => Element::ButtonDangerPressed,
+            (_, true) => Element::ButtonDangerHover,
+            _ => Element::ButtonDanger,
+        },
         ButtonStyle::Field => {
-            let border = if selected { ACCENT } else if hovered { Color::srgb(0.45, 0.50, 0.62) } else { Color::srgb(0.27, 0.30, 0.39) };
-            (FIELD_BG, border)
+            if selected { Element::FieldFocus } else { Element::Field }
         }
-    };
-    // An accent replaces the border (a conflict stays red whether hovered or not).
-    (bg, accent.unwrap_or(border))
+    }
+}
+
+/// A button's tint: the accent when it has one (a conflict stays red whether hovered or
+/// not), otherwise none. The skin is multiplied by it.
+pub fn button_tint(accent: Option<Color>) -> Color {
+    accent.unwrap_or(Color::WHITE)
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -104,14 +92,31 @@ pub struct ThemedButton {
     pub accent: Option<Color>,
 }
 
-/// Paints every [`ThemedButton`] whenever its interaction or its own state changes.
+/// Gives every [`ThemedButton`] the texture for its current state.
 pub fn themed_button_visuals(
-    mut buttons: Query<(&Interaction, &ThemedButton, &mut BackgroundColor, &mut BorderColor), Or<(Changed<Interaction>, Changed<ThemedButton>)>>,
+    skin: Option<Res<GuiSkin>>,
+    mut buttons: Query<(Entity, &Interaction, &ThemedButton, Option<&mut ImageNode>)>,
+    mut commands: Commands,
 ) {
-    for (interaction, themed, mut bg, mut border) in &mut buttons {
-        let (b, o) = button_colors(themed.style, *interaction, themed.selected, themed.accent);
-        *bg = BackgroundColor(b);
-        *border = BorderColor(o);
+    let Some(skin) = skin else { return };
+    for (entity, interaction, themed, existing) in &mut buttons {
+        let element = button_element(themed.style, *interaction, themed.selected);
+        let tint = button_tint(themed.accent);
+        let Some(handle) = skin.handle(element) else { continue };
+        match existing {
+            Some(mut node) => {
+                if node.image != handle || node.color != tint {
+                    if let Some(new) = skin.node(element, tint) {
+                        *node = new;
+                    }
+                }
+            }
+            None => {
+                if let Some(new) = skin.node(element, tint) {
+                    commands.entity(entity).try_insert(new);
+                }
+            }
+        }
     }
 }
 
@@ -119,7 +124,10 @@ pub struct ThemePlugin;
 
 impl Plugin for ThemePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, themed_button_visuals);
+        if !app.is_plugin_added::<GuiSkinPlugin>() {
+            app.add_plugins(GuiSkinPlugin);
+        }
+        app.add_systems(Update, themed_button_visuals.after(apply_skin));
     }
 }
 
@@ -171,9 +179,13 @@ impl ButtonOpts {
     }
 }
 
+/// Carved-lettering shadow for a piece of text.
+pub fn shadow() -> TextShadow {
+    TextShadow { offset: Vec2::splat(2.0), color: TEXT_SHADOW }
+}
+
 /// Spawns a themed button carrying `action` (a screen's own marker component).
 pub fn button(parent: &mut ChildSpawnerCommands, action: impl Bundle, label: &str, o: ButtonOpts) {
-    let (bg, border) = button_colors(o.style, Interaction::None, o.selected, o.accent);
     parent
         .spawn((
             Button,
@@ -182,17 +194,14 @@ pub fn button(parent: &mut ChildSpawnerCommands, action: impl Bundle, label: &st
             Node {
                 width: Val::Px(o.width),
                 height: Val::Px(o.height),
-                border: UiRect::all(Val::Px(2.0)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
-                padding: UiRect::horizontal(Val::Px(8.0)),
+                padding: UiRect::horizontal(Val::Px(14.0)),
                 ..default()
             },
-            BackgroundColor(bg),
-            BorderColor(border),
         ))
         .with_children(|b| {
-            b.spawn((Text::new(label), TextFont { font_size: o.font, ..default() }, TextColor(o.text)));
+            b.spawn((Text::new(label), TextFont { font_size: o.font, ..default() }, TextColor(o.text), shadow()));
         });
 }
 
@@ -225,24 +234,27 @@ pub fn overlay_root() -> impl Bundle {
     )
 }
 
-/// A bordered panel of the given width: the box a screen's controls sit in.
+/// A framed oak board of the given width: the box a screen's controls sit on.
 pub fn panel(width: f32) -> impl Bundle {
     (
         Node {
             width: Val::Px(width),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
-            padding: UiRect::axes(Val::Px(30.0), Val::Px(24.0)),
+            padding: UiRect::axes(Val::Px(38.0), Val::Px(34.0)),
             row_gap: Val::Px(10.0),
-            border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-        BackgroundColor(PANEL_BG),
-        BorderColor(PANEL_BORDER),
+        Skinned::new(Element::Panel),
     )
 }
 
-/// A panel's heading: bold-ish title with a short accent bar under it.
+/// A leather patch: list entries and the body of a settings page.
+pub fn card_skin(alt: bool) -> Skinned {
+    Skinned::new(if alt { Element::CardAlt } else { Element::Card })
+}
+
+/// A panel's heading: carved title with a short plank under it.
 pub fn heading(parent: &mut ChildSpawnerCommands, text: &str) {
     heading_with(parent, text, ());
 }
@@ -253,8 +265,8 @@ pub fn heading_with(parent: &mut ChildSpawnerCommands, text: &str, extra: impl B
     parent
         .spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: Val::Px(8.0), margin: UiRect::bottom(Val::Px(8.0)), ..default() })
         .with_children(|h| {
-            h.spawn((Text::new(text), TextFont { font_size: 30.0, ..default() }, TextColor(TEXT), extra));
-            h.spawn((Node { width: Val::Px(54.0), height: Val::Px(4.0), ..default() }, BackgroundColor(ACCENT)));
+            h.spawn((Text::new(text), TextFont { font_size: 30.0, ..default() }, TextColor(TEXT), shadow(), extra));
+            h.spawn((Node { width: Val::Px(84.0), height: Val::Px(12.0), ..default() }, Skinned::new(Element::Plank)));
         });
 }
 
@@ -274,27 +286,20 @@ pub fn badge(parent: &mut ChildSpawnerCommands, text: &str, color: Color) {
         .spawn((
             Node { padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)), border: UiRect::all(Val::Px(1.0)), ..default() },
             BorderColor(color),
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
         ))
         .with_children(|b| {
             b.spawn((Text::new(text), TextFont { font_size: 12.0, ..default() }, TextColor(color)));
         });
 }
 
-/// The game's name, big, with a block-shadow, and a line under it.
+/// The game's name, carved in big letters on a hanging oak sign.
 pub fn title_block(parent: &mut ChildSpawnerCommands, subtitle: &str) {
-    parent.spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: Val::Px(6.0), margin: UiRect::bottom(Val::Px(22.0)), ..default() }).with_children(|t| {
-        t.spawn(Node::default()).with_children(|name| {
-            name.spawn((Text::new("CRAFTMJNE"), TextFont { font_size: 76.0, ..default() }, TextColor(TEXT)));
-            name.spawn((
-                Text::new("CRAFTMJNE"),
-                TextFont { font_size: 76.0, ..default() },
-                TextColor(Color::srgb(0.10, 0.45, 0.28)),
-                Node { position_type: PositionType::Absolute, left: Val::Px(5.0), top: Val::Px(5.0), ..default() },
-                ZIndex(-1),
-            ));
+    parent.spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: Val::Px(10.0), margin: UiRect::bottom(Val::Px(22.0)), ..default() }).with_children(|t| {
+        t.spawn((Node { padding: UiRect::axes(Val::Px(44.0), Val::Px(26.0)), ..default() }, Skinned::new(Element::Panel))).with_children(|sign| {
+            sign.spawn((Text::new("CRAFTMJNE"), TextFont { font_size: 72.0, ..default() }, TextColor(ACCENT), TextShadow { offset: Vec2::splat(5.0), color: TEXT_SHADOW }));
         });
-        t.spawn((Text::new(subtitle), TextFont { font_size: 16.0, ..default() }, TextColor(TEXT_DIM)));
+        t.spawn((Text::new(subtitle), TextFont { font_size: 17.0, ..default() }, TextColor(TEXT), shadow()));
     });
 }
 
@@ -302,152 +307,52 @@ pub fn title_block(parent: &mut ChildSpawnerCommands, subtitle: &str) {
 // Backdrop
 // ---------------------------------------------------------------------------
 
-/// A cheap, repeatable pseudo-random number from a seed and an index.
-fn noise(seed: u32, i: u32) -> f32 {
-    let mut x = seed.wrapping_add(i.wrapping_mul(0x9E37_79B9));
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x85EB_CA6B);
-    x ^= x >> 13;
-    x = x.wrapping_mul(0xC2B2_AE35);
-    x ^= x >> 16;
-    (x & 0xFFFF) as f32 / 65535.0
-}
-
-/// Heights (in whole 8-px steps, so the hills look like stacked blocks) of one layer.
-pub fn hill_heights(seed: u32, columns: usize, base: f32, amplitude: f32) -> Vec<f32> {
-    (0..columns)
-        .map(|i| {
-            let x = i as f32;
-            let wave = (x * 0.21 + noise(seed, 1) * 6.0).sin() * 0.55 + (x * 0.07 + noise(seed, 2) * 6.0).sin() * 0.45;
-            let jitter = (noise(seed, 100 + i as u32) - 0.5) * 0.25;
-            let h = base + (wave + jitter) * amplitude;
-            (h / 8.0).round().max(1.0) * 8.0
-        })
-        .collect()
-}
-
-const COLUMNS: usize = 56;
-
-/// Sky, stars and hills, as absolutely-positioned children. Spawn this *first* in a
-/// screen's root so everything else draws over it.
-pub fn spawn_backdrop(root: &mut ChildSpawnerCommands, seed: u32) {
-    // Sky: horizontal bands from deep navy at the top to a faint glow at the horizon.
-    let bands = 12;
-    for i in 0..bands {
-        let t = i as f32 / (bands - 1) as f32;
-        let color = Color::srgb(0.035 + 0.14 * t * t, 0.05 + 0.17 * t * t, 0.11 + 0.28 * t);
-        root.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                width: Val::Percent(100.0),
-                top: Val::Percent(100.0 * i as f32 / bands as f32),
-                height: Val::Percent(100.0 / bands as f32 + 0.5),
-                ..default()
-            },
-            BackgroundColor(color),
-        ));
-    }
-    // Stars, in the upper half.
-    for i in 0..44u32 {
-        let size = if noise(seed, 300 + i) > 0.82 { 4.0 } else { 2.0 };
-        let alpha = 0.35 + 0.55 * noise(seed, 400 + i);
-        root.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Percent(100.0 * noise(seed, 200 + i)),
-                top: Val::Percent(52.0 * noise(seed, 250 + i)),
-                width: Val::Px(size),
-                height: Val::Px(size),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, alpha)),
-        ));
-    }
-    // Hills: far to near, each a row of columns of blocky height.
-    let layers: [(f32, f32, Color); 3] = [
-        (190.0, 70.0, Color::srgb(0.12, 0.17, 0.30)),
-        (130.0, 55.0, Color::srgb(0.08, 0.19, 0.22)),
-        (70.0, 40.0, Color::srgb(0.05, 0.13, 0.13)),
-    ];
-    for (n, (base, amp, color)) in layers.into_iter().enumerate() {
-        let heights = hill_heights(seed.wrapping_add(n as u32 * 7919), COLUMNS, base, amp);
-        root.spawn(Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(0.0),
-            bottom: Val::Px(0.0),
-            width: Val::Percent(100.0),
-            height: Val::Px(base + amp + 16.0),
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::FlexEnd,
-            ..default()
-        })
-        .with_children(|row| {
-            for h in heights {
-                row.spawn((Node { width: Val::Percent(100.0 / COLUMNS as f32 + 0.05), height: Val::Px(h), ..default() }, BackgroundColor(color)));
-            }
-        });
-    }
+/// The tiled dirt that fills the screen behind a menu, darkened. Spawn this *first*
+/// in a screen's root so everything else draws over it. (`_seed` is kept so each
+/// screen can still ask for its own variation; the dirt tile is the same everywhere.)
+pub fn spawn_backdrop(root: &mut ChildSpawnerCommands, _seed: u32) {
+    root.spawn((
+        Node { position_type: PositionType::Absolute, left: Val::Px(0.0), top: Val::Px(0.0), width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+        Skinned::new(Element::Background).tint(Color::srgb(0.50, 0.46, 0.44)),
+    ));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn bg(style: ButtonStyle, i: Interaction, selected: bool) -> Color {
-        button_colors(style, i, selected, None).0
-    }
-
     #[test]
-    fn hover_press_and_selected_all_look_different_from_idle() {
+    fn hover_press_and_selected_all_pick_a_different_texture_from_idle() {
         for style in [ButtonStyle::Normal, ButtonStyle::Primary, ButtonStyle::Danger, ButtonStyle::Choice] {
-            let idle = bg(style, Interaction::None, false);
-            assert_ne!(idle, bg(style, Interaction::Hovered, false), "{style:?} hover");
-            assert_ne!(idle, bg(style, Interaction::Pressed, false), "{style:?} pressed");
-            assert_ne!(bg(style, Interaction::Hovered, false), bg(style, Interaction::Pressed, false), "{style:?} hover vs press");
+            let idle = button_element(style, Interaction::None, false);
+            assert_ne!(idle, button_element(style, Interaction::Hovered, false), "{style:?} hover");
+            assert_ne!(idle, button_element(style, Interaction::Pressed, false), "{style:?} pressed");
+            assert_ne!(button_element(style, Interaction::Hovered, false), button_element(style, Interaction::Pressed, false), "{style:?} hover vs press");
         }
-        let (idle, idle_border) = button_colors(ButtonStyle::Choice, Interaction::None, false, None);
-        let (sel, sel_border) = button_colors(ButtonStyle::Choice, Interaction::None, true, None);
-        assert_ne!(idle, sel);
-        assert_ne!(idle_border, sel_border);
-        assert_eq!(sel_border, ACCENT, "a selected choice is outlined in the accent colour");
+        assert_ne!(button_element(ButtonStyle::Choice, Interaction::None, true), button_element(ButtonStyle::Choice, Interaction::None, false));
     }
 
     #[test]
-    fn an_accent_replaces_the_border_in_every_state_so_a_conflict_stays_red() {
-        for i in [Interaction::None, Interaction::Hovered, Interaction::Pressed] {
-            for selected in [false, true] {
-                assert_eq!(button_colors(ButtonStyle::Key, i, selected, Some(ERROR)).1, ERROR);
+    fn an_accent_tints_in_every_state_so_a_conflict_stays_red() {
+        assert_eq!(button_tint(Some(ERROR)), ERROR);
+        assert_eq!(button_tint(None), Color::WHITE);
+    }
+
+    #[test]
+    fn a_text_field_shows_focus_with_its_own_texture() {
+        assert_eq!(button_element(ButtonStyle::Field, Interaction::None, false), Element::Field);
+        assert_eq!(button_element(ButtonStyle::Field, Interaction::None, true), Element::FieldFocus);
+        assert_eq!(button_element(ButtonStyle::Field, Interaction::Hovered, false), Element::Field);
+    }
+
+    #[test]
+    fn every_button_element_exists_in_the_skin() {
+        for style in [ButtonStyle::Normal, ButtonStyle::Primary, ButtonStyle::Danger, ButtonStyle::Choice, ButtonStyle::Field, ButtonStyle::Key] {
+            for i in [Interaction::None, Interaction::Hovered, Interaction::Pressed] {
+                for sel in [false, true] {
+                    assert!(Element::ALL.contains(&button_element(style, i, sel)));
+                }
             }
-        }
-    }
-
-    #[test]
-    fn a_text_field_shows_focus_with_its_border_not_its_fill() {
-        let (a, ab) = button_colors(ButtonStyle::Field, Interaction::None, false, None);
-        let (b, bb) = button_colors(ButtonStyle::Field, Interaction::None, true, None);
-        assert_eq!(a, b);
-        assert_ne!(ab, bb);
-    }
-
-    #[test]
-    fn the_backdrop_is_deterministic_and_the_hills_are_blocky_and_in_range() {
-        let a = hill_heights(7, COLUMNS, 130.0, 55.0);
-        assert_eq!(a, hill_heights(7, COLUMNS, 130.0, 55.0), "same seed, same hills");
-        assert_ne!(a, hill_heights(8, COLUMNS, 130.0, 55.0));
-        assert_eq!(a.len(), COLUMNS);
-        for h in &a {
-            assert_eq!(h % 8.0, 0.0, "heights are whole 8-px blocks");
-            assert!(*h >= 8.0 && *h <= 130.0 + 55.0 * 1.2 + 8.0, "{h}");
-        }
-        assert!(a.iter().any(|h| *h != a[0]), "not flat");
-    }
-
-    #[test]
-    fn noise_stays_in_the_unit_range() {
-        for i in 0..1000 {
-            let n = noise(3, i);
-            assert!((0.0..=1.0).contains(&n));
         }
     }
 }

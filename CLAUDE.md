@@ -3253,3 +3253,37 @@ etc.) instead of inventing a new approach:
   - The backdrop (`spawn_backdrop(root, seed)`) is banded sky + stars + three parallax-less
     hill layers from seeded noise, quantised to 8px so it stays blocky; each screen passes
     its own seed so they differ.
+
+- **Menus are textured, not coloured: `gui_skin.rs` owns the images, `ui_theme.rs` picks them.**
+  The earlier flat web-style look was replaced because the user wanted rustic wood, stone and
+  leather - and wanted texture packs and mods to be able to retexture menus, crafting and
+  inventory. So there is no colour to override, only named [`Element`]s (panel, card, button
+  and its states, field, slot, plank, background). Facts worth keeping:
+  - **Procedural by default, file-overridable by name.** Each element is painted at a
+    *logical* size (e.g. button 16x12 "skin pixels") and upscaled 3x (4x for the tiled
+    background); `textures/gui/<name>.png` replaces it if it is a whole multiple of that size
+    with the same factor on both axes. The slice border is `border * scale`, derived from the
+    PNG's own size, so a pack never declares a border. A wrong-shaped or undecodable file is
+    skipped (logged), never trusted - same stance as the block-texture `Malformed` handling.
+  - **Why paint big instead of letting Bevy scale:** Bevy's `TextureSlicer` draws a corner at
+    1 image pixel = 1 screen pixel, so a 4-pixel pixel-art corner would be unreadably tiny.
+    Sides and centre use `SliceScaleMode::Tile`, not stretch (stretching a 14px centre across
+    a 600px panel is a smear of giant pixels). The sampler is nearest.
+  - **The look is resolved at draw time by name** (`Skinned { element, hover, tint }` +
+    `apply_skin`, `ThemedButton` + `themed_button_visuals`), not stored in spawn code, so
+    spawn functions never need the `GuiSkin` resource (no signature ripple through every
+    screen) and replacing the resource restyles everything. Both systems run every frame and
+    write only when the image or tint differs. `ThemedButton.accent` is now a *tint* (the
+    texture is multiplied by it): a conflicting key is red stone, an unaffordable recipe is
+    dim stone.
+  - **Mod skins apply game-wide, not per world.** The skin is built once in `PreStartup` from
+    the game's `textures/gui/` plus every *installed* mod's, because the menus exist before
+    any world (and its mod list) is chosen. So a mod that ships `textures/gui/` retextures
+    the menus whenever it is installed, needing a restart. Known simplification.
+  - **A bundle can't hold a component twice.** The death screen tints `overlay_root()` by
+    `.insert`ing a second `BackgroundColor` after spawn; putting two in one tuple panics.
+  - **`textures/gui/README.md` is tested against `Element::ALL`**, so adding an element
+    without documenting it fails a test; add the row when adding the variant.
+  - World Options is a third `WorldsScreenMode` (`Options`) reached from the create form; the
+    mod/branch/storage controls moved there unchanged, and `options_summary` shows the
+    choice back on the create form. Game rules get their own section there when they exist.

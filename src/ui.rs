@@ -271,17 +271,11 @@ fn rebuild_hotbar(
                 Node {
                     width: Val::Px(46.0),
                     height: Val::Px(46.0),
-                    border: UiRect::all(Val::Px(2.0)),
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
-                BorderColor(if selected { Color::WHITE } else { Color::NONE }),
-                BackgroundColor(if selected {
-                    Color::srgba(1.0, 1.0, 1.0, 0.18)
-                } else {
-                    Color::NONE
-                }),
+                crate::gui_skin::Skinned::new(if selected { crate::gui_skin::Element::SlotHover } else { crate::gui_skin::Element::Slot }),
             ))
             .with_children(|parent| {
                 if let Some(icon) = (!stack.is_empty()).then(|| icons.icon(stack.id)).flatten() {

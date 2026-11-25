@@ -25,7 +25,9 @@ use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
+use crate::gui_skin::{Element, Skinned};
 use crate::keybinds::{Action, Actions};
+use crate::ui_theme::{self as theme, ButtonStyle, ThemedButton};
 use crate::chat::ChatState;
 use crate::knap_ui::{abandon_when_inventory_closes, knap_input, sync_knap_screen, KnapState};
 use crate::crafting::{can_start_knapping, craft, stations_near, times_craftable, KnownItems, NearbyStations, RecipeBook};
@@ -253,7 +255,6 @@ struct HeldIcon;
 #[derive(Component)]
 struct CraftButton(usize);
 
-const SLOT_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.4);
 
 fn reset_on_enter(mut inv: ResMut<InventoryState>) {
     inv.open = false;
@@ -455,34 +456,6 @@ fn track_nearby_stations(
     }
 }
 
-fn slot_hover_visuals(
-    mut cells: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<SlotItem>)>,
-) {
-    for (interaction, mut bg) in &mut cells {
-        *bg = BackgroundColor(match interaction {
-            Interaction::Pressed => Color::srgba(1.0, 1.0, 1.0, 0.35),
-            Interaction::Hovered => Color::srgba(1.0, 1.0, 1.0, 0.22),
-            Interaction::None => SLOT_BG,
-        });
-    }
-}
-
-fn button_hover(
-    mut buttons: Query<
-        (&Interaction, &mut BackgroundColor),
-        (Changed<Interaction>, Or<(With<CreativeTabButton>, With<CraftButton>)>),
-    >,
-) {
-    for (interaction, mut bg) in &mut buttons {
-        let base = bg.0.alpha().min(0.15);
-        *bg = BackgroundColor(match interaction {
-            Interaction::Pressed => Color::srgba(1.0, 1.0, 1.0, 0.35),
-            Interaction::Hovered => Color::srgba(1.0, 1.0, 1.0, 0.25),
-            Interaction::None => Color::srgba(1.0, 1.0, 1.0, base.max(0.06)),
-        });
-    }
-}
-
 fn track_hovered_item(
     registry: Res<ItemRegistry>,
     mut inv: ResMut<InventoryState>,
@@ -528,15 +501,13 @@ fn spawn_slot_row(
                     slot,
                     SlotItem(stack.id, stack.quality),
                     Node {
-                        width: Val::Px(46.0),
-                        height: Val::Px(46.0),
-                        border: UiRect::all(Val::Px(2.0)),
+                        width: Val::Px(48.0),
+                        height: Val::Px(48.0),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         ..default()
                     },
-                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.35)),
-                    BackgroundColor(SLOT_BG),
+                    Skinned::new(Element::Slot).hover(Element::SlotHover),
                 ))
                 .with_children(|cell| spawn_stack(cell, icons, stack, 34.0));
             }
@@ -584,15 +555,15 @@ fn spawn_crafting_panel(
         .spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::all(Val::Px(20.0)),
+                padding: UiRect::axes(Val::Px(34.0), Val::Px(30.0)),
                 row_gap: Val::Px(6.0),
-                width: Val::Px(320.0),
+                width: Val::Px(360.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.08, 0.09, 0.12, 0.92)),
+            Skinned::new(Element::Panel),
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("Crafting"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
+            panel.spawn((Text::new("Crafting"), TextFont { font_size: 24.0, ..default() }, TextColor(theme::TEXT), theme::shadow()));
             panel.spawn((
                 Text::new(where_text),
                 TextFont { font_size: 12.0, ..default() },
@@ -613,7 +584,7 @@ fn spawn_crafting_panel(
                             padding: UiRect::all(Val::Px(4.0)),
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, if craftable { 0.12 } else { 0.04 })),
+                        ThemedButton { style: ButtonStyle::Normal, selected: false, accent: if craftable { None } else { Some(Color::srgb(0.55, 0.55, 0.55)) } },
                     ))
                     .with_children(|row| {
                         row.spawn(Node {
@@ -717,7 +688,7 @@ fn sync_inventory_screen(
                 column_gap: Val::Px(12.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            BackgroundColor(theme::OVERLAY),
         ))
         .with_children(|root| {
             let show_crafting = *state.mode == GameMode::Survival || state.inv.creative_tab == CreativeTab::Inventory;
@@ -725,15 +696,15 @@ fn sync_inventory_screen(
                 Node {
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
-                    padding: UiRect::all(Val::Px(20.0)),
+                    padding: UiRect::axes(Val::Px(36.0), Val::Px(32.0)),
                     row_gap: Val::Px(12.0),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.08, 0.09, 0.12, 0.92)),
+                Skinned::new(Element::Panel),
             ))
             .with_children(|panel| match *state.mode {
                 GameMode::Survival => {
-                    panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
+                    panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, TextColor(theme::TEXT), theme::shadow()));
                     spawn_hotbar_and_storage(panel, &icons, &state.hotbar, &state.inventory);
                 }
                 GameMode::Creative => {
@@ -741,7 +712,7 @@ fn sync_inventory_screen(
                         CreativeTab::Blocks => "Items",
                         CreativeTab::Inventory => "Inventory",
                     };
-                    panel.spawn((Text::new(title), TextFont { font_size: 24.0, ..default() }, TextColor(Color::WHITE)));
+                    panel.spawn((Text::new(title), TextFont { font_size: 24.0, ..default() }, TextColor(theme::TEXT), theme::shadow()));
                     let tab_label = match state.inv.creative_tab {
                         CreativeTab::Blocks => "Show Inventory",
                         CreativeTab::Inventory => "Show Items",
@@ -750,8 +721,8 @@ fn sync_inventory_screen(
                         .spawn((
                             Button,
                             CreativeTabButton,
-                            Node { padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)), ..default() },
-                            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
+                            Node { padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)), ..default() },
+                            ThemedButton { style: ButtonStyle::Normal, selected: false, accent: None },
                         ))
                         .with_children(|b| {
                             b.spawn((Text::new(tab_label), TextFont { font_size: 14.0, ..default() }, TextColor(Color::WHITE)));
@@ -786,7 +757,7 @@ fn sync_inventory_screen(
                                                 justify_content: JustifyContent::Center,
                                                 ..default()
                                             },
-                                            BackgroundColor(SLOT_BG),
+                                            Skinned::new(Element::Slot).hover(Element::SlotHover),
                                         ))
                                         .with_children(|cell| {
                                             spawn_stack(cell, &icons, ItemStack::new(id, 1), 34.0)
@@ -882,6 +853,9 @@ pub struct InventoryPlugin;
 
 impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::ui_theme::ThemePlugin>() {
+            app.add_plugins(crate::ui_theme::ThemePlugin);
+        }
         app.init_resource::<Inventory>()
             .init_resource::<InventoryState>()
             .init_resource::<HeldStack>()
@@ -903,8 +877,6 @@ impl Plugin for InventoryPlugin {
                     craft_clicks,
                     toggle_creative_tab,
                     track_nearby_stations,
-                    slot_hover_visuals,
-                    button_hover,
                     track_hovered_item,
                     sync_inventory_screen,
                     sync_cursor_ui,

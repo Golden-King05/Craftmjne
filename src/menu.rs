@@ -11,6 +11,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use crate::mods::{create_world_with_mods, resolve_world_mods, scan_mods, set_world_mods, InstalledMods, MenuNotice, ModSetup};
 use crate::save::{GameMode, ModStorage, SaveStore, WorldMeta};
 use crate::state::{ActiveWorld, AppState, PauseState};
+use crate::gui_skin::{Element, Skinned};
 use crate::ui_theme::{self as theme, ButtonOpts, ButtonStyle, ThemedButton};
 use bevy::input::mouse::MouseWheel;
 
@@ -25,6 +26,10 @@ pub(crate) enum MenuButton {
     Quit,
     BackToMainMenu,
     ShowCreateForm,
+    /// From the create form: the world's options (mods now, game rules later).
+    ShowWorldOptions,
+    /// Back from the options to the create form.
+    CloseWorldOptions,
     CancelCreate,
     SubmitCreate,
     LoadWorld(String),
@@ -56,6 +61,8 @@ pub enum WorldsScreenMode {
     #[default]
     List,
     Create,
+    /// The new world's options: mods now, game rules when they exist.
+    Options,
     /// Changing the mods of an existing world (`CreateWorldForm::editing`).
     EditMods,
 }
@@ -147,13 +154,11 @@ fn card() -> impl Bundle {
         Node {
             width: Val::Percent(100.0),
             flex_direction: FlexDirection::Column,
-            padding: UiRect::axes(Val::Px(16.0), Val::Px(12.0)),
+            padding: UiRect::axes(Val::Px(22.0), Val::Px(18.0)),
             row_gap: Val::Px(3.0),
-            border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-        BackgroundColor(theme::CARD_BG),
-        BorderColor(theme::PANEL_BORDER),
+        theme::card_skin(false),
     )
 }
 
@@ -282,21 +287,17 @@ fn spawn_world_row(p: &mut ChildSpawnerCommands, slug: &str, meta: &WorldMeta, b
             justify_content: JustifyContent::SpaceBetween,
             align_items: AlignItems::Center,
             column_gap: Val::Px(12.0),
-            padding: UiRect::axes(Val::Px(16.0), Val::Px(12.0)),
-            border: UiRect::all(Val::Px(2.0)),
+            padding: UiRect::axes(Val::Px(22.0), Val::Px(16.0)),
             ..default()
         };
         let mut row = if blocked.is_some() {
-            line.spawn((card_node, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.30)), BorderColor(theme::PANEL_BORDER)))
+            line.spawn((card_node, Skinned::new(Element::CardAlt).tint(Color::srgb(0.55, 0.55, 0.55))))
         } else {
-            let (bg, border) = theme::button_colors(ButtonStyle::Normal, Interaction::None, false, None);
             line.spawn((
                 Button,
                 MenuButton::LoadWorld(slug.to_string()),
                 ThemedButton { style: ButtonStyle::Normal, selected: false, accent: None },
                 card_node,
-                BackgroundColor(bg),
-                BorderColor(border),
             ))
         };
         row.with_children(|row| {
@@ -329,7 +330,7 @@ fn spawn_world_row(p: &mut ChildSpawnerCommands, slug: &str, meta: &WorldMeta, b
             theme::button(line, action, label, ButtonOpts::new(ButtonStyle::Normal).size(78.0, 70.0).font(14.0));
         };
         if can_edit {
-            small(line, "Mods", MenuButton::EditMods(slug.to_string()));
+            small(line, "Options", MenuButton::EditMods(slug.to_string()));
         }
         if can_branch {
             small(line, "Branch", MenuButton::BranchFrom(slug.to_string()));
@@ -363,7 +364,7 @@ fn rebuild_worlds_content(
         heading.0 = match *mode {
             WorldsScreenMode::List => "Select World",
             WorldsScreenMode::Create => "Create World",
-            WorldsScreenMode::EditMods => "World Mods",
+            WorldsScreenMode::Options | WorldsScreenMode::EditMods => "World Options",
         }
         .to_string();
     }
@@ -436,12 +437,6 @@ fn rebuild_worlds_content(
             });
         }
         WorldsScreenMode::Create => {
-            let mods = scan_mods(&installed.0);
-            let hosts: Vec<(String, WorldMeta)> = store
-                .list_worlds()
-                .into_iter()
-                .filter(|(_, m)| m.mod_storage == ModStorage::World && m.branch_of.is_none())
-                .collect();
             commands.entity(content).with_children(|p| {
                 spawn_text_field(p, "World name", TextField::Name, form.focus == TextField::Name);
                 spawn_text_field(p, "Seed (blank = random)", TextField::Seed, form.focus == TextField::Seed);
@@ -457,6 +452,21 @@ fn rebuild_worlds_content(
                     }
                 });
 
+                theme::label(p, "World options");
+                theme::button(p, MenuButton::ShowWorldOptions, "World Options...", ButtonOpts::new(ButtonStyle::Normal).size(440.0, 42.0).font(16.0));
+                theme::hint(p, options_summary(&form), 13.0);
+                footer(p, ("Create", MenuButton::SubmitCreate), ("Cancel", MenuButton::CancelCreate));
+            });
+        }
+        WorldsScreenMode::Options => {
+            let mods = scan_mods(&installed.0);
+            let hosts: Vec<(String, WorldMeta)> = store
+                .list_worlds()
+                .into_iter()
+                .filter(|(_, m)| m.mod_storage == ModStorage::World && m.branch_of.is_none())
+                .collect();
+            commands.entity(content).with_children(|p| {
+                theme::label(p, "Mods");
                 // Mods: share another world's, or pick from the installed ones.
                 if !hosts.is_empty() {
                     theme::label(p, "Share the mods of another world (a branch)");
@@ -488,9 +498,22 @@ fn rebuild_worlds_content(
                         }
                     });
                 }
-                footer(p, ("Create", MenuButton::SubmitCreate), ("Cancel", MenuButton::CancelCreate));
+                theme::label(p, "Game rules");
+                theme::hint(p, "Game rules (what's allowed, how fast things happen) will be set here.", 13.0);
+                footer(p, ("Done", MenuButton::CloseWorldOptions), ("Cancel", MenuButton::CancelCreate));
             });
         }
+    }
+}
+
+/// One line saying what the options currently hold, shown on the create form.
+fn options_summary(form: &CreateWorldForm) -> String {
+    if let Some(host) = &form.branch_of {
+        return format!("Mods: shared with the world \"{host}\".");
+    }
+    match form.chosen_mods.len() {
+        0 => "Mods: none. Game rules: defaults.".to_string(),
+        n => format!("Mods: {n} selected. Game rules: defaults."),
     }
 }
 
@@ -500,7 +523,6 @@ struct TextFieldBox(TextField);
 
 fn spawn_text_field(parent: &mut ChildSpawnerCommands, label: &str, field: TextField, focused: bool) {
     theme::label(parent, label);
-    let (bg, border) = theme::button_colors(ButtonStyle::Field, Interaction::None, focused, None);
     parent
         .spawn((
             Button,
@@ -510,14 +532,11 @@ fn spawn_text_field(parent: &mut ChildSpawnerCommands, label: &str, field: TextF
             Node {
                 width: Val::Px(440.0),
                 height: Val::Px(42.0),
-                border: UiRect::all(Val::Px(2.0)),
                 align_items: AlignItems::Center,
-                padding: UiRect::left(Val::Px(12.0)),
+                padding: UiRect::left(Val::Px(18.0)),
                 margin: UiRect::bottom(Val::Px(6.0)),
                 ..default()
             },
-            BackgroundColor(bg),
-            BorderColor(border),
         ))
         .with_children(|p| {
             p.spawn((TextInputDisplay(field), Text::new(""), TextFont { font_size: 17.0, ..default() }, TextColor(theme::TEXT)));
@@ -754,7 +773,8 @@ fn handle_menu_buttons(
             MenuButton::Quit => {
                 exit.write(AppExit::Success);
             }
-            MenuButton::ShowCreateForm => *mode = WorldsScreenMode::Create,
+            MenuButton::ShowCreateForm | MenuButton::CloseWorldOptions => *mode = WorldsScreenMode::Create,
+            MenuButton::ShowWorldOptions => *mode = WorldsScreenMode::Options,
             MenuButton::CancelCreate => *mode = WorldsScreenMode::List,
             MenuButton::FocusField(field) => form.focus = field,
             MenuButton::SetGameMode(game_mode) => form.mode = game_mode,

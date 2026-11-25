@@ -103,19 +103,29 @@ of which Rendering (render distance, applied on next launch), Keybinds and
 Mods (where new worlds keep their mods) do something today and Player and
 Sound are placeholders. **Mods** lists the installed mods.
 
-### How the menus look, and previewing them
+### How the menus look, and retexturing them
 
-Every screen (main menu, worlds, create, mods, settings, pause, death) shares one
-theme in `src/ui_theme.rs`: a painted sky-and-hills backdrop, a block-shadow
-title, dark cards and panels, and buttons in four styles (Primary green, Normal,
-Choice for tabs/toggles, Danger red, plus Key and Field for the controls menu).
-A screen picks a style; hover, press and "selected" colours come from one place.
+Every screen (main menu, worlds, create, mods, settings, pause, death, and the
+inventory, crafting and knapping screens) is drawn from textures: dark oak boards,
+stone-slab buttons, leather cards, dirt behind it all. `src/gui_skin.rs` paints them
+procedurally at startup, so the game needs no art files, and `src/ui_theme.rs` decides
+which texture each part of a screen uses.
+
+**Retexturing.** Put `textures/gui/<name>.png` next to the game, or in `textures/gui/`
+inside an installed mod, and it replaces that element (later wins: the game, then mods
+in folder-name order). PNGs are a whole multiple of the element's size, so a texture pack
+can be hi-res; a bad file is ignored. `textures/gui/README.md` lists every element, its
+size and border. (Texture-pack folders will use the same layout.)
+
+**World Options.** The create-world screen has a **World Options** button: mods (what
+used to sit on the create form) live there now, and game rules will join them. An
+existing world's **Options** button opens the same place.
 
 To see a screen without playing, run with `CRAFT_SHOT=<screen>` and
 `CRAFT_SHOT_OUT=<file.png>`: it opens that screen, saves a screenshot and exits.
-Screens: `main`, `worlds`, `create`, `mods`, `settings-<section>`, `pause`, `game`.
-On a machine with no GPU/display use `xvfb-run` with Mesa's software Vulkan
-(`mesa-vulkan-drivers`, plus `libxkbcommon-x11-0`).
+Screens: `main`, `worlds`, `create`, `world-options`, `mods`, `settings-<section>`,
+`pause`, `inventory`, `game`. On a machine with no GPU/display use `xvfb-run` with Mesa's
+software Vulkan (`mesa-vulkan-drivers`, plus `libxkbcommon-x11-0`).
 
 ### Flight mode
 

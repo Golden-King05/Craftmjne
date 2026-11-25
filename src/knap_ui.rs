@@ -233,18 +233,18 @@ pub(crate) fn sync_knap_screen(
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+            BackgroundColor(crate::ui_theme::OVERLAY),
         ))
         .with_children(|root| {
             root.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
-                    padding: UiRect::all(Val::Px(20.0)),
+                    padding: UiRect::axes(Val::Px(38.0), Val::Px(32.0)),
                     row_gap: Val::Px(10.0),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.08, 0.09, 0.12, 0.96)),
+                crate::gui_skin::Skinned::new(crate::gui_skin::Element::Panel),
             ))
             .with_children(|panel| {
                 let text = |s: String, size: f32, color: Color| {
@@ -311,8 +311,8 @@ pub(crate) fn sync_knap_screen(
                         row.spawn((
                             Button,
                             kind,
-                            Node { padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)), ..default() },
-                            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
+                            Node { padding: UiRect::axes(Val::Px(24.0), Val::Px(10.0)), ..default() },
+                            crate::ui_theme::ThemedButton { style: crate::ui_theme::ButtonStyle::Normal, selected: false, accent: None },
                         ))
                         .with_children(|b| {
                             b.spawn(text(label.into(), 16.0, Color::WHITE));
