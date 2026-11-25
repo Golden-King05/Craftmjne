@@ -972,7 +972,7 @@ pub struct EnterWorldSet;
 #[allow(clippy::too_many_arguments)]
 fn apply_world_mods(
     mut commands: Commands,
-    active: Res<ActiveWorld>,
+    mut active: ResMut<ActiveWorld>,
     store: Res<SaveStore>,
     installed: Res<InstalledMods>,
     mut loaded: ResMut<LoadedContent>,
@@ -987,10 +987,17 @@ fn apply_world_mods(
         notice.0 = Some(why);
         next.set(AppState::MainMenu);
     };
-    let mods = match resolve_world_mods(&store, &active.slug, &active.meta, &installed.0) {
-        Ok(mods) => mods,
+    let resolved = match resolve_world_mods(&store, &active.slug, &active.meta, &installed.0) {
+        Ok(resolved) => resolved,
         Err(err) => return refuse(err.message(), &mut ok, &mut notice, &mut next_state),
     };
+    // Remember which namespace the conflict manager gave each mod, so the names
+    // this world saves keep meaning the same mod (a branch keeps its host's).
+    if active.meta.branch_of.is_none() && resolved.ids != active.meta.mod_ids {
+        active.meta.mod_ids = resolved.ids.clone();
+        let _ = store.save_meta(&active.slug, &active.meta);
+    }
+    let mods = resolved.sources;
     // No mods now and none before: the content is already right. Anything else
     // is rebuilt - including the same mods again, so editing a mod's files and
     // re-entering the world shows the change.

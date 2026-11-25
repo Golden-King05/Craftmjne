@@ -440,9 +440,9 @@ fn rebuild_worlds_content(
                     p.spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(4.0), margin: UiRect::bottom(Val::Px(8.0)), ..default() })
                         .with_children(|list| {
                             for m in &mods {
-                                let on = form.chosen_mods.contains(&m.id);
+                                let on = form.chosen_mods.contains(&m.folder);
                                 let label = format!("[{}] {} {}", if on { "x" } else { " " }, m.name, m.version);
-                                spawn_choice_button(list, label.trim_end(), MenuButton::ToggleMod(m.id.clone()), on, 280.0);
+                                spawn_choice_button(list, label.trim_end(), MenuButton::ToggleMod(m.folder.clone()), on, 280.0);
                             }
                         });
                 }
@@ -680,17 +680,17 @@ fn sync_render_distance_label(settings: Res<WorldSettings>, mut labels: Query<&m
 // ---------------------------------------------------------------------------
 
 fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
-    let mods = scan_mods(&installed.0);
+    let (mods, broken) = crate::mods::scan_all(&installed.0);
     commands.spawn((ModsRoot, full_screen_root())).with_children(|root| {
         root.spawn(panel()).with_children(|p| {
             p.spawn(title("Mods"));
-            if mods.is_empty() {
+            if mods.is_empty() && broken.is_empty() {
                 dim_text(p, format!("No mods installed. Put mod folders in:\n{}", installed.0.display()), 14.0);
             } else {
                 for m in &mods {
                     p.spawn(Node { flex_direction: FlexDirection::Column, width: Val::Px(380.0), ..default() }).with_children(|row| {
                         row.spawn((
-                            Text::new(format!("{} {}", m.name, m.version).trim().to_string()),
+                            Text::new(format!("{} {}  ({})", m.name, m.version, m.id).replace("  (", " (")),
                             TextFont { font_size: 16.0, ..default() },
                             TextColor(Color::WHITE),
                         ));
@@ -699,6 +699,14 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
                         }
                     });
                 }
+            }
+            for (_, why) in &broken {
+                p.spawn((
+                    Text::new(format!("Won't work: {why}")),
+                    TextFont { font_size: 12.0, ..default() },
+                    TextColor(Color::srgb(0.95, 0.6, 0.4)),
+                    Node { width: Val::Px(380.0), ..default() },
+                ));
             }
             dim_text(p, "Pick which mods a world uses when you create it. Mods sit on top of the game and never change its files.", 12.0);
             spawn_button(p, "Back", MenuButton::BackToMainMenu);
@@ -921,6 +929,7 @@ mod tests {
             mods: mods.iter().map(|s| s.to_string()).collect(),
             mod_storage: storage,
             branch_of: branch.map(str::to_string),
+            mod_ids: Default::default(),
             created_at: 0,
             last_played_at: 0,
         }

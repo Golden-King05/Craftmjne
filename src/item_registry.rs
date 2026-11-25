@@ -161,12 +161,17 @@ impl ItemRegistry {
     /// drops an item that doesn't exist - this is startup content, the same
     /// as `BlockRegistry::load_from_dir`.
     pub fn load_from_dir(blocks: &BlockRegistry, dir: &Path) -> Self {
-        Self::load_from_dirs(blocks, &[dir.to_path_buf()])
+        Self::load_from_dirs(blocks, &[crate::overlay::KindDir::core(dir)])
     }
 
     /// Items from the game's directory (`dirs[0]`) then each mod's `items/`.
-    pub fn load_from_dirs(blocks: &BlockRegistry, dirs: &[std::path::PathBuf]) -> Self {
-        let plain = crate::blocks::overlay_by_id(dirs, "item definitions", crate::tags::Scope::Item)
+    pub fn load_from_dirs(blocks: &BlockRegistry, dirs: &[crate::overlay::KindDir]) -> Self {
+        let plain = crate::overlay::overlay_by_id(
+            dirs,
+            "item definitions",
+            Some(crate::tags::Scope::Item),
+            crate::overlay::qualify_item_refs,
+        )
             .into_iter()
             .map(|(path, value)| {
                 let file: ItemFile = serde_json::from_value(value)
@@ -255,7 +260,8 @@ impl ItemRegistry {
 
     /// For untrusted names (save files, recipes).
     pub fn by_name(&self, name: &str) -> Option<ItemId> {
-        self.by_name.get(name).copied()
+        let name = crate::overlay::normalize(name);
+        self.by_name.get(name.as_str()).copied()
     }
 
     /// `Some` if `id` is a tool.

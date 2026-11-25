@@ -170,18 +170,16 @@ impl TierBook {
     /// Panics, with a clear message, on an unreadable or malformed file, a
     /// duplicate id, or numbers that make no sense - startup content.
     pub fn load_from_dir(dir: &Path) -> Self {
-        let mut paths: Vec<_> = std::fs::read_dir(dir)
-            .unwrap_or_else(|err| panic!("could not read tier definitions from {dir:?}: {err}"))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        paths.sort();
+        Self::load_from_dirs(&[crate::overlay::KindDir::core(dir)])
+    }
+
+    /// Tiers from the core game's directory and then each mod's `tiers/`. A tier
+    /// with an id that already exists patches it (`{"id": "craftmjne:stone", ...}`).
+    pub fn load_from_dirs(dirs: &[crate::overlay::KindDir]) -> Self {
         let mut book = Self::default();
-        for path in paths {
-            let text = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("failed to read tier {path:?}: {err}"));
+        for (path, value) in crate::overlay::overlay_by_id(dirs, "tier definitions", None, |_, _| {}) {
             let file: TierFile =
-                serde_json::from_str(&text).unwrap_or_else(|err| panic!("failed to parse tier {path:?}: {err}"));
+                serde_json::from_value(value).unwrap_or_else(|err| panic!("failed to parse tier {path:?}: {err}"));
             book.add(file, &path);
         }
         book

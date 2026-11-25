@@ -199,6 +199,12 @@ pub struct WorldMeta {
     /// branched from, and a branch can't itself be branched from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_of: Option<String>,
+    /// The namespace each of this world's mods runs under, by folder name - what
+    /// the conflict manager decided (`mods::assign_namespaces`). Remembered so a
+    /// name saved as `x_1:granite` is still `x_1:granite` next time, whatever has
+    /// been added or removed since.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mod_ids: std::collections::BTreeMap<String, String>,
     pub created_at: u64,
     pub last_played_at: u64,
 }
@@ -510,6 +516,7 @@ impl SaveStore {
             mods: Vec::new(),
             mod_storage: ModStorage::default(),
             branch_of: None,
+            mod_ids: Default::default(),
             created_at: now,
             last_played_at: now,
         };

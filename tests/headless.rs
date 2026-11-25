@@ -1483,9 +1483,9 @@ fn install_test_mod(root: &std::path::Path, id: &str) -> std::path::PathBuf {
     let installed = root.join("installed-mods");
     let dir = installed.join(id);
     std::fs::create_dir_all(dir.join("blocks")).unwrap();
-    std::fs::write(dir.join("mod.json"), format!(r#"{{"name": "{id}"}}"#)).unwrap();
+    std::fs::write(dir.join("mod.json"), format!(r#"{{"id": "{id}", "name": "{id}"}}"#)).unwrap();
     std::fs::write(dir.join("blocks").join(format!("{id}_block.json")), format!(r#"{{"id": "{id}_block", "hardness": 3.0}}"#)).unwrap();
-    std::fs::write(dir.join("blocks").join("dirt.json"), r#"{"id": "dirt", "hardness": 20.0}"#).unwrap();
+    std::fs::write(dir.join("blocks").join("dirt.json"), r#"{"id": "craftmjne:dirt", "hardness": 20.0}"#).unwrap();
     installed
 }
 
@@ -1537,14 +1537,14 @@ fn a_world_gets_its_own_mods_content_and_the_next_world_gets_it_back_without_the
         r.def(r.id("dirt")).hardness
     };
     assert_eq!(dirt(&app), 0.5, "the core game is loaded before any world");
-    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo_block").is_err());
+    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo:gizmo_block").is_err());
 
     let store = SaveStore::at(temp.0.clone());
     let (slug, meta) = create_world_with_mods(&store, "Modded", 7, GameMode::Survival, &ModSetup::Instance(vec!["gizmo".into()]), &installed).unwrap();
     enter(&mut app, slug, meta);
     assert!(in_game(&app));
     assert_eq!(dirt(&app), 20.0, "the mod changed dirt in this world");
-    let gizmo = app.world().resource::<BlockRegistry>().id("gizmo_block");
+    let gizmo = app.world().resource::<BlockRegistry>().id("gizmo:gizmo_block");
     assert!(app.world().resource::<craftmjne::blocks::BlockTables>().0.solid.len() > gizmo as usize, "tables were rebuilt for it");
     assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 9, 2000), "the modded world streams terrain");
 
@@ -1554,7 +1554,7 @@ fn a_world_gets_its_own_mods_content_and_the_next_world_gets_it_back_without_the
     enter(&mut app, slug2, meta2);
     assert!(in_game(&app));
     assert_eq!(dirt(&app), 0.5, "taking the mod off puts dirt back");
-    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo_block").is_err());
+    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo:gizmo_block").is_err());
 }
 
 /// A world whose mod has gone missing doesn't open, says why, and the rest of the
@@ -1569,13 +1569,13 @@ fn a_world_with_a_missing_mod_goes_back_to_the_menu_with_a_message() {
     let (slug, meta) = create_world_with_mods(&store, "Needs", 7, GameMode::Survival, &ModSetup::Instance(vec!["gizmo".into()]), &installed).unwrap();
     // The world already holds a block only the mod knows about.
     let mut data = store.load_data(&slug);
-    data.edits.push(craftmjne::save::BlockEdit { x: 1, y: 40, z: 1, block: "gizmo_block".into(), axis: 0, state: Some(0), ext: None });
+    data.edits.push(craftmjne::save::BlockEdit { x: 1, y: 40, z: 1, block: "gizmo:gizmo_block".into(), axis: 0, state: Some(0), ext: None });
     store.save_data(&slug, &data).unwrap();
     std::fs::remove_dir_all(installed.join("gizmo")).unwrap();
     enter(&mut app, slug.clone(), meta);
     assert!(!in_game(&app), "refused to open");
     let after = store.load_data(&slug);
-    assert!(after.edits.iter().any(|e| e.block == "gizmo_block"), "the refused world's save was not overwritten");
+    assert!(after.edits.iter().any(|e| e.block == "gizmo:gizmo_block"), "the refused world's save was not overwritten");
     let notice = app.world().resource::<MenuNotice>().0.clone().expect("a message");
     assert!(notice.contains("gizmo"), "{notice}");
     // And a normal world still opens afterwards.
@@ -1599,5 +1599,32 @@ fn a_branch_world_plays_with_its_hosts_mods() {
     assert!(!store.world_mods_dir(&slug).exists());
     enter(&mut app, slug, meta);
     assert!(in_game(&app));
-    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo_block").is_ok());
+    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo:gizmo_block").is_ok());
+}
+
+/// Two mods that declare the same id both work in one world: the conflict manager
+/// renames them, both sets of blocks exist, and the world remembers the names.
+#[test]
+fn two_mods_declaring_the_same_id_both_load_under_numbered_names_and_the_world_remembers() {
+    use craftmjne::mods::{create_world_with_mods, ModSetup};
+    let temp = temp_saves();
+    let installed = temp.0.join("installed-mods");
+    for (folder, hardness) in [("first", 2.0), ("second", 5.0)] {
+        let dir = installed.join(folder);
+        std::fs::create_dir_all(dir.join("blocks")).unwrap();
+        std::fs::write(dir.join("mod.json"), r#"{"id": "granite_pack"}"#).unwrap();
+        std::fs::write(dir.join("blocks").join("granite.json"), format!(r#"{{"id": "granite", "hardness": {hardness}}}"#)).unwrap();
+    }
+    let mut app = app_without_a_world(&temp, &installed);
+    let store = SaveStore::at(temp.0.clone());
+    let setup = ModSetup::Instance(vec!["first".into(), "second".into()]);
+    let (slug, meta) = create_world_with_mods(&store, "Both", 7, GameMode::Survival, &setup, &installed).unwrap();
+    enter(&mut app, slug.clone(), meta);
+    assert!(in_game(&app));
+    let reg = app.world().resource::<BlockRegistry>();
+    assert_eq!(reg.def(reg.id("granite_pack_1:granite")).hardness, 2.0);
+    assert_eq!(reg.def(reg.id("granite_pack_2:granite")).hardness, 5.0);
+    assert!(reg.by_name("granite_pack:granite").is_err(), "the clashing id itself is no one's");
+    let saved = store.load_meta(&slug).unwrap();
+    assert_eq!(saved.mod_ids.get("first").map(String::as_str), Some("granite_pack_1"));
 }

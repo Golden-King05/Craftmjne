@@ -102,6 +102,10 @@ struct KnapFile {
 
 #[derive(Deserialize)]
 struct RecipeFile {
+    /// Another recipe's full id that this one takes the place of (read by the loader).
+    #[serde(default)]
+    #[allow(dead_code)]
+    replaces: Option<String>,
     #[serde(default)]
     station: Option<String>,
     inputs: Vec<StackFile>,
@@ -124,26 +128,59 @@ impl RecipeBook {
     /// unknown item or station, no inputs, a zero count. Startup content,
     /// like blocks and items.
     pub fn load_from_dir(blocks: &BlockRegistry, items: &ItemRegistry, dir: &Path) -> Self {
-        Self::load_from_dirs(blocks, items, &[dir.to_path_buf()])
+        Self::load_from_dirs(blocks, items, &[crate::overlay::KindDir::core(dir)])
     }
 
     /// Recipes from the game's directory (`dirs[0]`) then each mod's `recipes/`.
-    pub fn load_from_dirs(blocks: &BlockRegistry, items: &ItemRegistry, dirs: &[std::path::PathBuf]) -> Self {
-        // A recipe has no id, so a mod replaces a core recipe by giving its
-        // file the same name; a new name adds one.
-        let mut paths: Vec<std::path::PathBuf> = Vec::new();
-        for path in crate::blocks::json_files_in(dirs, "recipes") {
-            match paths.iter().position(|p| p.file_name() == path.file_name()) {
-                Some(i) => paths[i] = path,
-                None => paths.push(path),
+    pub fn load_from_dirs(blocks: &BlockRegistry, items: &ItemRegistry, dirs: &[crate::overlay::KindDir]) -> Self {
+        use crate::overlay::{json_files, normalize, rewrite_str};
+        // Recipes are keyed by file name, qualified by the mod they came from
+        // (`mymod:planks`). A mod replaces someone else's recipe with a
+        // `"replaces": "craftmjne:planks"` entry; the replacement keeps that id.
+        let mut found: Vec<(String, std::path::PathBuf, serde_json::Value)> = Vec::new();
+        for (i, path) in json_files(dirs, "recipes") {
+            let kd = &dirs[i];
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read recipe {path:?}: {err}"));
+            let mut value: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|err| panic!("failed to parse recipe {path:?}: {err}"));
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let mut id = kd.qualify_new(&stem);
+            let thing = |s: &str| kd.qualify_ref(s, |l| &l.things);
+            rewrite_str(&mut value, "station", thing);
+            for list in ["inputs"] {
+                if let Some(serde_json::Value::Array(stacks)) = value.get_mut(list) {
+                    for stack in stacks {
+                        rewrite_str(stack, "item", thing);
+                    }
+                }
+            }
+            if let Some(output) = value.get_mut("output") {
+                rewrite_str(output, "item", thing);
+            }
+            if let Some(knap) = value.get_mut("knap") {
+                rewrite_str(knap, "stone", thing);
+            }
+            let replaces = value.get("replaces").and_then(|v| v.as_str()).map(normalize);
+            let slot = match &replaces {
+                Some(target) => {
+                    let slot = found.iter().position(|(i, _, _)| i == target).unwrap_or_else(|| {
+                        panic!("recipe {path:?} replaces \"{target}\", which doesn't exist (is that mod on, and loaded first?)")
+                    });
+                    id = target.clone();
+                    Some(slot)
+                }
+                None => found.iter().position(|(i, _, _)| *i == id),
+            };
+            match slot {
+                Some(slot) => found[slot] = (id, path, value),
+                None => found.push((id, path, value)),
             }
         }
         let mut book = Self::default();
-        for path in paths {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read recipe {path:?}: {err}"));
+        for (recipe_id, path, value) in found {
             let file: RecipeFile =
-                serde_json::from_str(&text).unwrap_or_else(|err| panic!("failed to parse recipe {path:?}: {err}"));
+                serde_json::from_value(value).unwrap_or_else(|err| panic!("failed to parse recipe {path:?}: {err}"));
             let stack = |s: &StackFile| {
                 let id = items.by_name(&s.item).unwrap_or_else(|| panic!("recipe {path:?}: unknown item {:?}", s.item));
                 assert!(s.count > 0, "recipe {path:?}: {:?} has a count of zero", s.item);
@@ -172,7 +209,7 @@ impl RecipeBook {
                 KnapSpec { stone, outline }
             });
             let recipe = Recipe {
-                id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                id: recipe_id,
                 station,
                 inputs,
                 output,

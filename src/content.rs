@@ -9,7 +9,6 @@
 //! a mod overlays them.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::atlas::{build_atlas_in, default_painters, normalize_tint_mask_tile, AtlasData, TextureStatus};
@@ -17,37 +16,44 @@ use crate::blocks::{find_data_dir, BlockRegistry, Tables};
 use crate::crafting::RecipeBook;
 use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::item_registry::ItemRegistry;
+use crate::mods::ModSource;
+use crate::overlay::{KindDir, Locals};
 use crate::tools::TierBook;
 
-/// Where to read content from. Block, item and recipe directories are in load
-/// order (the core game's first, then each mod's, so later ones patch earlier
-/// ones); texture directories are the reverse, highest priority first.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Where to read content from, one list per kind. Each is in load order: the
+/// core game's directory first, then each mod's, so later ones patch earlier
+/// ones. (Textures are looked up from the end - see `atlas::load_custom_tile_in`.)
+#[derive(Clone, Debug)]
 pub struct ContentPaths {
-    pub blocks: Vec<PathBuf>,
-    pub items: Vec<PathBuf>,
-    pub recipes: Vec<PathBuf>,
-    pub textures: Vec<PathBuf>,
+    pub blocks: Vec<KindDir>,
+    pub items: Vec<KindDir>,
+    pub recipes: Vec<KindDir>,
+    pub tiers: Vec<KindDir>,
+    pub textures: Vec<KindDir>,
 }
 
 impl ContentPaths {
     /// The core game alone.
     pub fn vanilla() -> Self {
         Self {
-            blocks: vec![find_data_dir("blocks")],
-            items: vec![find_data_dir("items")],
-            recipes: vec![find_data_dir("recipes")],
-            textures: vec![find_data_dir("textures").join("blocks")],
+            blocks: vec![KindDir::core(find_data_dir("blocks"))],
+            items: vec![KindDir::core(find_data_dir("items"))],
+            recipes: vec![KindDir::core(find_data_dir("recipes"))],
+            tiers: vec![KindDir::core(find_data_dir("tiers"))],
+            textures: vec![KindDir::core(find_data_dir("textures").join("blocks"))],
         }
     }
 
-    /// The core game with `mods` (mod folders, in load order) laid over it.
-    pub fn with_mods(mut self, mods: &[PathBuf]) -> Self {
+    /// The core game with `mods` laid over it, in load order, each under its namespace.
+    pub fn with_mods(mut self, mods: &[ModSource]) -> Self {
         for m in mods {
-            self.blocks.push(m.join("blocks"));
-            self.items.push(m.join("items"));
-            self.recipes.push(m.join("recipes"));
-            self.textures.insert(0, m.join("textures").join("blocks"));
+            let locals = Arc::new(Locals::scan(&m.path));
+            let dir = |kind: &str| KindDir { ns: m.ns.clone(), dir: m.path.join(kind), locals: locals.clone() };
+            self.blocks.push(dir("blocks"));
+            self.items.push(dir("items"));
+            self.recipes.push(dir("recipes"));
+            self.tiers.push(dir("tiers"));
+            self.textures.push(KindDir { dir: m.path.join("textures").join("blocks"), ..dir("") });
         }
         self
     }
@@ -72,7 +78,7 @@ pub struct Content {
 /// the core game's.
 pub fn build_content(paths: &ContentPaths) -> Content {
     let mut registry = BlockRegistry::load_from_dirs(&paths.blocks);
-    let mut items = ItemRegistry::load_from_dirs(&registry, &paths.items).with_tiers(TierBook::with_defaults());
+    let mut items = ItemRegistry::load_from_dirs(&registry, &paths.items).with_tiers(TierBook::load_from_dirs(&paths.tiers));
     // A texture name with no painter gets the "missing texture" placeholder
     // instead of `compile()` panicking - see `Painters::ensure_registered`.
     let mut painters = default_painters();
@@ -117,11 +123,12 @@ pub fn try_build_content(paths: &ContentPaths) -> Result<Content, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    /// A scratch directory removed on drop; `mod_dir` makes a mod folder in it.
+    /// A scratch mod folder, removed on drop.
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
@@ -142,6 +149,9 @@ mod tests {
             image::RgbaImage::from_pixel(16, 16, image::Rgba(color)).save(path).unwrap();
             self
         }
+        fn source(&self, ns: &str) -> ModSource {
+            ModSource { ns: ns.to_string(), path: self.0.clone() }
+        }
     }
     impl Drop for Scratch {
         fn drop(&mut self) {
@@ -149,8 +159,8 @@ mod tests {
         }
     }
 
-    fn with(mods: &[&Scratch]) -> ContentPaths {
-        ContentPaths::vanilla().with_mods(&mods.iter().map(|m| m.0.clone()).collect::<Vec<_>>())
+    fn with(mods: &[ModSource]) -> ContentPaths {
+        ContentPaths::vanilla().with_mods(mods)
     }
 
     fn tile_pixel(c: &Content, name: &str) -> [u8; 4] {
@@ -162,24 +172,44 @@ mod tests {
     }
 
     #[test]
-    fn a_mod_can_change_one_property_of_a_core_block_and_leave_the_rest() {
+    fn a_mod_changes_one_property_of_a_core_block_by_naming_it_in_full() {
         let vanilla = build_content(&ContentPaths::vanilla());
         let m = Scratch::new();
-        m.file("blocks/dirt.json", r#"{"id": "dirt", "hardness": 8.0}"#);
-        let modded = build_content(&with(&[&m]));
+        m.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 8.0}"#);
+        let modded = build_content(&with(&[m.source("slow")]));
         let (a, b) = (vanilla.registry.def(vanilla.registry.id("dirt")), modded.registry.def(modded.registry.id("dirt")));
-        assert_eq!(b.hardness, 8.0);
-        assert_eq!(a.hardness, 0.5);
-        // Everything it didn't mention is dirt's own.
-        assert_eq!((b.tool, b.tool_response, &b.name), (a.tool, a.tool_response, &a.name));
+        assert_eq!((b.hardness, a.hardness), (8.0, 0.5));
+        assert_eq!((b.tool, b.tool_response, &b.name), (a.tool, a.tool_response, &a.name), "the rest is dirt's own");
+        assert!(modded.registry.by_name("slow:dirt").is_err(), "it patched dirt, it didn't add another");
+    }
+
+    #[test]
+    fn a_plain_id_in_a_mod_is_a_new_thing_under_the_mods_prefix() {
+        let m = Scratch::new();
+        m.file("blocks/dirt.json", r#"{"id": "dirt", "hardness": 8.0}"#);
+        let c = build_content(&with(&[m.source("slow")]));
+        assert_eq!(c.registry.def(c.registry.id("dirt")).hardness, 0.5, "the core dirt is untouched");
+        assert_eq!(c.registry.def(c.registry.id("slow:dirt")).hardness, 8.0, "this is the mod's own dirt");
+        assert_eq!(c.registry.def(c.registry.id("slow:dirt")).name, "Dirt", "named without the prefix");
     }
 
     #[test]
     fn a_null_in_a_mod_puts_a_key_back_to_its_default() {
         let m = Scratch::new();
-        m.file("blocks/dirt.json", r#"{"id": "dirt", "tool": null}"#);
-        let c = build_content(&with(&[&m]));
-        assert_eq!(c.registry.def(c.registry.id("dirt")).tool, None, "dirt no longer wants a shovel");
+        m.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "tool": null}"#);
+        let c = build_content(&with(&[m.source("m")]));
+        assert_eq!(c.registry.def(c.registry.id("dirt")).tool, None);
+    }
+
+    #[test]
+    fn two_mods_can_each_add_a_granite_and_both_exist() {
+        let (a, b) = (Scratch::new(), Scratch::new());
+        a.file("blocks/granite.json", r#"{"id": "granite", "hardness": 2.0}"#);
+        b.file("blocks/granite.json", r#"{"id": "granite", "hardness": 5.0}"#);
+        let c = build_content(&with(&[a.source("alpha"), b.source("beta")]));
+        assert_eq!(c.registry.def(c.registry.id("alpha:granite")).hardness, 2.0);
+        assert_eq!(c.registry.def(c.registry.id("beta:granite")).hardness, 5.0);
+        assert!(c.items.by_name("alpha:granite").is_some() && c.items.by_name("beta:granite").is_some());
     }
 
     #[test]
@@ -187,53 +217,92 @@ mod tests {
         let vanilla = build_content(&ContentPaths::vanilla());
         let m = Scratch::new();
         m.file("blocks/battery.json", r#"{"id": "battery", "hardness": 2.0}"#);
-        let modded = build_content(&with(&[&m]));
+        let modded = build_content(&with(&[m.source("m")]));
         for (id, def) in vanilla.registry.defs.iter().enumerate().filter(|(_, d)| d.layered.is_none()) {
             assert_eq!(modded.registry.def(id as u16).id, def.id, "block {id}");
         }
         // The derived `pebble@water`-style variants come after every file's
         // block, so they may shift - harmless, since nothing saves a block id
         // as a number (saves, snapshots and edits all store the name).
-        assert!(modded.registry.by_name("battery").is_ok());
-        assert!(vanilla.registry.by_name("battery").is_err());
+        assert!(modded.registry.by_name("m:battery").is_ok());
+        assert!(modded.registry.by_name("battery").is_err(), "not the core game's");
+        assert!(vanilla.registry.by_name("m:battery").is_err());
     }
 
     #[test]
-    fn a_mod_adds_an_item_and_a_recipe_and_can_replace_a_core_recipe_by_name() {
+    fn a_mods_own_things_find_each_other_by_plain_name_and_reach_the_core_the_same_way() {
+        let m = Scratch::new();
+        m.file("blocks/ore.json", r#"{"id": "ore", "drops": {"item": "chip", "count": 2}, "textures": {"all": "stone"}}"#)
+            .file("items/chip.json", r#"{"id": "chip"}"#)
+            .file("recipes/chip_pile.json", r#"{"inputs": [{"item": "chip", "count": 4}, {"item": "stick", "count": 1}], "output": {"item": "ore", "count": 1}}"#);
+        let c = build_content(&with(&[m.source("rocks")]));
+        let ore = c.registry.def(c.registry.id("rocks:ore"));
+        assert!(matches!(&ore.drops, crate::blocks::Drops::Item { item, count: 2, .. } if item == "rocks:chip"), "{:?}", ore.drops);
+        let recipe = c.recipes.recipes.iter().find(|r| r.id == "rocks:chip_pile").expect("recipe");
+        assert_eq!(recipe.inputs[0].id, c.items.id("rocks:chip"), "its own chip");
+        assert_eq!(recipe.inputs[1].id, c.items.id("stick"), "the core game's stick");
+        assert_eq!(recipe.output.id, c.items.id("rocks:ore"));
+    }
+
+    #[test]
+    fn a_mod_adds_a_recipe_and_replaces_a_core_one_by_saying_so() {
         let m = Scratch::new();
         m.file("items/widget.json", r#"{"id": "widget"}"#)
             .file("recipes/widget.json", r#"{"inputs": [{"item": "stick", "count": 2}], "output": {"item": "widget", "count": 1}}"#)
-            // Same file name as the core recipe: replaces it.
-            .file("recipes/planks.json", r#"{"inputs": [{"item": "stick", "count": 9}], "output": {"item": "planks", "count": 1}}"#);
-        let c = build_content(&with(&[&m]));
-        assert!(c.items.by_name("widget").is_some());
-        assert!(c.recipes.recipes.iter().any(|r| r.id == "widget"));
+            .file("recipes/better_planks.json", r#"{"replaces": "craftmjne:planks", "inputs": [{"item": "stick", "count": 9}], "output": {"item": "planks", "count": 1}}"#);
+        let c = build_content(&with(&[m.source("w")]));
+        assert!(c.recipes.recipes.iter().any(|r| r.id == "w:widget"));
         let planks: Vec<_> = c.recipes.recipes.iter().filter(|r| r.id == "planks").collect();
         assert_eq!(planks.len(), 1, "replaced, not duplicated");
         assert_eq!(planks[0].inputs[0].count, 9);
+        assert!(!c.recipes.recipes.iter().any(|r| r.id == "w:better_planks"));
     }
 
     #[test]
-    fn a_mod_texture_reskins_a_core_block_and_taking_it_off_restores_it() {
+    fn a_mods_own_texture_is_its_own_and_a_folder_named_for_the_core_reskins_core_blocks() {
         let vanilla = build_content(&ContentPaths::vanilla());
         let m = Scratch::new();
-        m.png("textures/blocks/dirt.png", [1, 2, 3, 255]);
-        let modded = build_content(&with(&[&m]));
-        assert_eq!(tile_pixel(&modded, "dirt"), [1, 2, 3, 255]);
+        m.file("blocks/granite.json", r#"{"id": "granite"}"#)
+            .png("textures/blocks/granite.png", [4, 5, 6, 255])
+            .png("textures/blocks/craftmjne/dirt.png", [1, 2, 3, 255]);
+        let modded = build_content(&with(&[m.source("g")]));
+        assert_eq!(tile_pixel(&modded, "g:granite"), [4, 5, 6, 255], "its own art, by plain file name");
+        assert_eq!(tile_pixel(&modded, "dirt"), [1, 2, 3, 255], "re-skinned from the craftmjne folder");
         assert_ne!(tile_pixel(&vanilla, "dirt"), [1, 2, 3, 255]);
-        assert_eq!(tile_pixel(&build_content(&ContentPaths::vanilla()), "dirt"), tile_pixel(&vanilla, "dirt"));
+        assert_eq!(tile_pixel(&build_content(&ContentPaths::vanilla()), "dirt"), tile_pixel(&vanilla, "dirt"), "taking it off restores it");
     }
 
     #[test]
-    fn with_several_mods_the_later_one_wins() {
+    fn a_plain_texture_file_named_like_a_core_block_does_not_reskin_it() {
+        let m = Scratch::new();
+        m.png("textures/blocks/dirt.png", [9, 9, 9, 255]);
+        let c = build_content(&with(&[m.source("m")]));
+        assert_ne!(tile_pixel(&c, "dirt"), [9, 9, 9, 255], "that file is the mod's own dirt, not the core game's");
+    }
+
+    #[test]
+    fn with_several_mods_the_later_one_wins_a_patch() {
         let (a, b) = (Scratch::new(), Scratch::new());
-        a.file("blocks/dirt.json", r#"{"id": "dirt", "hardness": 3.0, "name": "Mud"}"#).png("textures/blocks/dirt.png", [9, 9, 9, 255]);
-        b.file("blocks/dirt.json", r#"{"id": "dirt", "hardness": 6.0}"#).png("textures/blocks/dirt.png", [7, 7, 7, 255]);
-        let c = build_content(&with(&[&a, &b]));
+        a.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 3.0, "name": "Mud"}"#)
+            .png("textures/blocks/craftmjne/dirt.png", [9, 9, 9, 255]);
+        b.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 6.0}"#)
+            .png("textures/blocks/craftmjne/dirt.png", [7, 7, 7, 255]);
+        let c = build_content(&with(&[a.source("a"), b.source("b")]));
         let dirt = c.registry.def(c.registry.id("dirt"));
-        assert_eq!(dirt.hardness, 6.0, "b is laid over a");
-        assert_eq!(dirt.name, "Mud", "but keeps what a changed and b didn't");
+        assert_eq!((dirt.hardness, dirt.name.as_str()), (6.0, "Mud"), "b over a, keeping what only a changed");
         assert_eq!(tile_pixel(&c, "dirt"), [7, 7, 7, 255]);
+    }
+
+    #[test]
+    fn a_mod_can_patch_another_mods_block_if_it_loads_after_it() {
+        let (a, b) = (Scratch::new(), Scratch::new());
+        a.file("blocks/granite.json", r#"{"id": "granite", "hardness": 2.0}"#);
+        b.file("blocks/tweak.json", r#"{"id": "alpha:granite", "hardness": 9.0}"#);
+        let c = build_content(&with(&[a.source("alpha"), b.source("beta")]));
+        assert_eq!(c.registry.def(c.registry.id("alpha:granite")).hardness, 9.0);
+        // The other way round, the target doesn't exist yet: an error naming the file.
+        let err = try_build_content(&with(&[b.source("beta"), a.source("alpha")])).err().expect("refused");
+        assert!(err.contains("alpha:granite") && err.contains("tweak.json"), "{err}");
     }
 
     /// The point of an overlay: the core files are read and never written.
@@ -261,10 +330,10 @@ mod tests {
         let before = snapshot();
         assert!(!before.is_empty());
         let m = Scratch::new();
-        m.file("blocks/dirt.json", r#"{"id": "dirt", "hardness": 20.0}"#)
-            .file("recipes/planks.json", r#"{"inputs": [{"item": "stick", "count": 9}], "output": {"item": "planks", "count": 1}}"#)
-            .png("textures/blocks/dirt.png", [1, 1, 1, 255]);
-        let _ = build_content(&with(&[&m]));
+        m.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 20.0}"#)
+            .file("recipes/p.json", r#"{"replaces": "craftmjne:planks", "inputs": [{"item": "stick", "count": 9}], "output": {"item": "planks", "count": 1}}"#)
+            .png("textures/blocks/craftmjne/dirt.png", [1, 1, 1, 255]);
+        let _ = build_content(&with(&[m.source("m")]));
         assert!(before == snapshot(), "a core file changed");
     }
 
@@ -272,11 +341,11 @@ mod tests {
     fn a_broken_mod_is_an_error_naming_the_file_not_a_crash() {
         let m = Scratch::new();
         m.file("blocks/oops.json", r#"{"id": "oops", "hardness": "very"}"#);
-        let err = try_build_content(&with(&[&m])).err().expect("refused");
+        let err = try_build_content(&with(&[m.source("m")])).err().expect("refused");
         assert!(err.contains("oops.json"), "{err}");
         let m2 = Scratch::new();
         m2.file("recipes/bad.json", r#"{"inputs": [{"item": "nope", "count": 1}], "output": {"item": "stick", "count": 1}}"#);
-        assert!(try_build_content(&with(&[&m2])).err().expect("refused").contains("nope"));
+        assert!(try_build_content(&with(&[m2.source("m")])).err().expect("refused").contains("nope"));
     }
 
     /// The example mod in `docs/` is what the docs tell people to copy, so it has
@@ -284,10 +353,10 @@ mod tests {
     #[test]
     fn the_example_mod_in_the_docs_works() {
         let path = PathBuf::from("docs").join("example-mod");
-        assert_eq!(crate::mods::read_mod(&path).unwrap().name, "Example mod", "it is a valid mod");
-        let c = build_content(&ContentPaths::vanilla().with_mods(&[path]));
+        let info = crate::mods::read_mod(&path).expect("a valid mod");
+        let c = build_content(&with(&[ModSource { ns: info.id.clone(), path }]));
         assert_eq!(c.registry.def(c.registry.id("dirt")).hardness, 8.0, "dirt is slow to dig");
-        assert!(c.registry.by_name("amber").is_ok(), "amber was added");
-        assert!(c.recipes.recipes.iter().any(|r| r.id == "amber"), "and a recipe for it");
+        assert!(c.registry.by_name(&format!("{}:amber", info.id)).is_ok(), "amber was added under the mod's id");
+        assert!(c.recipes.recipes.iter().any(|r| r.id == format!("{}:amber", info.id)), "and a recipe for it");
     }
 }

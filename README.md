@@ -1248,32 +1248,51 @@ something a block or item file already says (see
 [the two kinds of tags](#the-two-kinds-of-tags)).
 
 ```text
-mods/my_mod/
-  mod.json            { "name": "My Mod", "version": "1.0", "description": "..." }
+mods/any_folder_name/
+  mod.json            { "id": "granite_pack", "name": "Granite Pack", "version": "1.0" }
   blocks/*.json       same format as the game's own blocks/
   items/*.json
   recipes/*.json
+  tiers/*.json
   textures/blocks/*.png
 ```
 
 [`docs/example-mod/`](docs/example-mod) is a complete working one (a test keeps it
-working): copy it into `mods/` to try it. The folder name is the mod's id (letters,
-digits, `_` and `-`).
+working): copy it into `mods/` to try it.
+
+**Every mod needs an `"id"` in `mod.json`, or it doesn't work** (the Mods screen
+lists it as "won't work" and says why). The id is the prefix of everything the mod
+adds: a mod `granite_pack` with a block `granite` adds `granite_pack:granite`. So two
+mods can both add a `granite` and both exist, where before they would have clashed.
+Ids are letters, digits, `_` and `-`; `craftmjne` is the game's own.
+
+**If two mods in a world declare the same id, nothing breaks**: the game renames
+them for that world (`granite_pack_1`, `granite_pack_2`, in folder order), keeps
+those names for good (a block saved as `granite_pack_1:granite` must stay that
+even if the other mod is removed later), and the world carries on.
+
+**Naming inside a mod's files:**
+
+- A new thing is written with its plain name (`"id": "granite"`) and gets the prefix.
+- A reference (a drop, a recipe input, a texture, a tier) written plainly means *this
+  mod's, if it has one by that name, otherwise the core game's*. Write
+  `other_mod:thing` or `craftmjne:thing` to be explicit.
+- The game's own names stay plain (`dirt`); `craftmjne:dirt` is another way to write it.
 
 **Mods sit on top of the game; they never change it.** The game's own files are
-only ever read. A mod is an overlay laid over them, so taking it off puts everything
-back exactly as it was:
+only ever read, so taking a mod off puts everything back exactly as it was:
 
-- **Add** a block or item with a new `id`.
-- **Change** a core block or item with a file of the same `id` containing only the
-  keys to change: `{"id": "dirt", "hardness": 20}` makes dirt take 20 times as long
-  to dig and leaves everything else about dirt alone. Objects merge key by key, and a
-  key set to `null` goes back to its default.
-- **Replace** a core recipe by naming a file the same as the core one (`planks.json`);
-  a new file name adds a recipe.
-- **Re-skin** by shipping a texture with a core block's name.
+- **Add** a block, item or tier with a plain id.
+- **Change** one that exists by giving its full name and only the keys to change:
+  `{"id": "craftmjne:dirt", "hardness": 20}` makes dirt take 20 times as long to dig
+  and leaves everything else about dirt alone. Objects merge key by key, and a key set
+  to `null` goes back to its default. A mod can patch another mod's blocks the same
+  way (`other_mod:granite`) if it loads after it.
+- **Replace** a recipe with `"replaces": "craftmjne:planks"` in the new recipe file.
+- **Re-skin** a core block with `textures/blocks/craftmjne/dirt.png`. A mod's own
+  textures are plain `textures/blocks/granite.png`.
 
-With several mods, later ones (by id) are laid over earlier ones.
+With several mods, later ones (by folder name) are laid over earlier ones.
 
 **Mods are chosen per world.** Not every installed mod is used in every world: when
 you create one, tick the mods it should use. Each world gets its own content when you
@@ -1299,7 +1318,7 @@ the reason (which mods are missing, or that its host is gone). Loading it withou
 would drop their blocks from its next save, so it refuses instead, and nothing writes
 to its save. A mod whose files are broken is reported the same way, naming the file.
 
-Not moddable yet: entities, tool tiers, world generation, and anything needing code.
+Not moddable yet: entities, world generation, and anything needing code.
 
 ## Extending the framework
 

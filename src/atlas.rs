@@ -227,15 +227,32 @@ enum CustomTile {
 /// placeholder via `build_atlas_from_dir` instead of crashing the game.
 #[cfg(test)]
 fn load_custom_tile(dir: &Path, name: &str) -> CustomTile {
-    load_custom_tile_in(&[dir.to_path_buf()], name)
+    load_custom_tile_in(&[crate::overlay::KindDir::core(dir)], name)
 }
 
-/// [`load_custom_tile`] across several directories, highest priority first: the
-/// first one holding `<name>.png` wins. A mod's directory comes before the
-/// game's, so a mod can re-skin a core block by shipping a texture of the same
-/// name (the core file is never touched; take the mod off and it's back).
-fn load_custom_tile_in(dirs: &[PathBuf], name: &str) -> CustomTile {
-    let Some(path) = dirs.iter().map(|d| d.join(format!("{name}.png"))).find(|p| p.is_file()) else {
+/// [`load_custom_tile`] across several directories, given lowest priority first
+/// (the core game's, then each mod's in load order): the highest one holding the
+/// right file wins.
+///
+/// Which file is "right" depends on whose name it is. A mod's own tile
+/// `mymod:granite` is `<mymod>/textures/blocks/granite.png`. A mod re-skins
+/// someone else's by putting the file in a folder named for them:
+/// `<mymod>/textures/blocks/craftmjne/dirt.png` replaces the core game's `dirt`.
+/// The core game's own files are `textures/blocks/<name>.png`, only ever for core names.
+fn load_custom_tile_in(dirs: &[crate::overlay::KindDir], name: &str) -> CustomTile {
+    let (ns, local) = crate::overlay::split_name(name);
+    let file = format!("{local}.png");
+    let found = dirs.iter().rev().find_map(|kd| {
+        let path = if kd.ns == ns {
+            kd.dir.join(&file)
+        } else if kd.is_core() {
+            return None; // the core game only has its own names
+        } else {
+            kd.dir.join(ns).join(&file)
+        };
+        path.is_file().then_some(path)
+    });
+    let Some(path) = found else {
         return CustomTile::Absent;
     };
     let Ok(img) = image::open(&path) else {
@@ -271,12 +288,12 @@ fn upscale_nearest(src: &[u8], src_size: usize, dst_size: usize) -> Vec<u8> {
 }
 
 pub fn build_atlas(painters: &Painters) -> AtlasData {
-    build_atlas_in(painters, &[find_textures_dir()])
+    build_atlas_in(painters, &[crate::overlay::KindDir::core(find_textures_dir())])
 }
 
-/// [`build_atlas`] looking for custom textures in `dirs`, highest priority
-/// first (see `load_custom_tile_in`).
-pub fn build_atlas_in(painters: &Painters, dirs: &[PathBuf]) -> AtlasData {
+/// [`build_atlas`] looking for custom textures in `dirs`, the core game's first
+/// then each mod's (see `load_custom_tile_in`).
+pub fn build_atlas_in(painters: &Painters, dirs: &[crate::overlay::KindDir]) -> AtlasData {
     build_atlas_from_dirs(painters, dirs)
 }
 
@@ -287,10 +304,10 @@ pub fn build_atlas_in(painters: &Painters, dirs: &[PathBuf]) -> AtlasData {
 /// the_whole_atlas_resolution` below). `build_atlas` itself, used
 /// everywhere else, is unaffected - it always resolves the real directory.
 fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
-    build_atlas_from_dirs(painters, &[textures_dir.to_path_buf()])
+    build_atlas_from_dirs(painters, &[crate::overlay::KindDir::core(textures_dir)])
 }
 
-fn build_atlas_from_dirs(painters: &Painters, textures_dirs: &[PathBuf]) -> AtlasData {
+fn build_atlas_from_dirs(painters: &Painters, textures_dirs: &[crate::overlay::KindDir]) -> AtlasData {
     assert!(
         painters.entries.len() <= ATLAS_TILES * ATLAS_TILES,
         "too many textures for a {ATLAS_TILES}x{ATLAS_TILES} atlas"

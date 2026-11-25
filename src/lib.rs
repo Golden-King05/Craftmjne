@@ -28,6 +28,7 @@ pub mod menu;
 pub mod mods;
 pub mod mesher;
 pub mod noise;
+pub mod overlay;
 pub mod particles;
 pub mod player;
 pub mod render;

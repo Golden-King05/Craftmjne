@@ -3,16 +3,21 @@
 //! can do is something a block or item file can already say; see `tags.rs`.
 //!
 //! ```text
-//! mods/<id>/
-//!   mod.json            { "name": "Batteries", "version": "1.0", "description": "..." }
+//! mods/<any folder name>/
+//!   mod.json            { "id": "granite_pack", "name": "Granite Pack", "version": "1.0" }
 //!   blocks/*.json       same format as the game's own blocks/
 //!   items/*.json
 //!   recipes/*.json
+//!   tiers/*.json
 //!   textures/blocks/*.png
 //! ```
 //!
-//! The folder name is the mod's id. Every folder is optional except
-//! `mod.json`, which is what marks a directory as a mod at all.
+//! **`mod.json` must have an `"id"`, or the mod doesn't work.** The id is the
+//! prefix of everything the mod adds (`granite_pack:granite`), which is what lets
+//! two mods each add a `granite` without clashing. See `overlay.rs` for the naming
+//! rules. If two mods in one world declare the same id the game doesn't break: it
+//! renames them there (`granite_pack_1`, `granite_pack_2`) and remembers that
+//! ([`assign_namespaces`]).
 //!
 //! ## Mods sit on top of the game; they never change it
 //!
@@ -20,19 +25,20 @@
 //! mod does edits, replaces or deletes them, so taking a mod off puts everything
 //! back exactly as it was. What an overlay can do:
 //!
-//! - **Add** a block or item: a new `id`.
-//! - **Change** a core block or item: give a file the same `id` and only the
-//!   keys to change. `{"id": "dirt", "hardness": 8}` makes dirt slow to mine and
-//!   leaves every other property of dirt alone. Objects merge key by key, and a
-//!   key set to `null` is removed so it falls back to its default.
-//! - **Replace** a core recipe by naming a file the same as the core one; a new
-//!   name adds a recipe.
-//! - **Re-skin** with a texture of the same name as a core one.
+//! - **Add** a block, item or tier: a plain id, which gets the mod's prefix.
+//! - **Change** one that exists by giving its full name and only the keys to
+//!   change: `{"id": "craftmjne:dirt", "hardness": 8}` makes dirt slow to mine and
+//!   leaves every other property of dirt alone (`other_mod:granite` patches another
+//!   mod's). Objects merge key by key, and a key set to `null` is removed so it
+//!   falls back to its default.
+//! - **Replace** a recipe with `"replaces": "craftmjne:planks"`.
+//! - **Re-skin** with `textures/blocks/craftmjne/dirt.png`; the mod's own textures
+//!   are plain `textures/blocks/granite.png`.
 //!
-//! With several mods, later ones are laid over earlier ones (load order is by
-//! mod id). The blocks the core files define keep their ids whatever mods are on
-//! (derived waterlogged variants may shift, which nothing depends on: saves
-//! store names, never numeric ids).
+//! With several mods, later ones (by folder name) are laid over earlier ones. The
+//! blocks the core files define keep their ids whatever mods are on (derived
+//! waterlogged variants may shift, which nothing depends on: saves store names,
+//! never numeric ids).
 //!
 //! ## Which mods a world uses, and where they live
 //!
@@ -65,9 +71,10 @@ use crate::save::{ModStorage, SaveStore, WorldMeta};
 /// The file that makes a directory a mod.
 pub const MANIFEST: &str = "mod.json";
 
-/// What `mod.json` says. Every field is optional.
+/// What `mod.json` says. Only `id` is required.
 #[derive(Deserialize, Default)]
 struct Manifest {
+    id: Option<String>,
     name: Option<String>,
     version: Option<String>,
     description: Option<String>,
@@ -76,7 +83,9 @@ struct Manifest {
 /// An installed mod.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModInfo {
-    /// The folder name.
+    /// The folder it's in (what worlds remember it by).
+    pub folder: String,
+    /// The id it declares in `mod.json`: the prefix of everything it adds.
     pub id: String,
     pub name: String,
     pub version: String,
@@ -84,10 +93,20 @@ pub struct ModInfo {
     pub path: PathBuf,
 }
 
-/// Whether `id` can be a mod's folder name: letters, digits, `_` and `-`.
-/// (It also names the texture and block ids a mod adds, so no spaces or colons.)
+/// A mod as a world runs it: where it is, and the namespace it was given there.
+/// Usually that's the id it declares; when two of a world's mods declare the same
+/// one, [`assign_namespaces`] renames them (`id_1`, `id_2`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModSource {
+    pub ns: String,
+    pub path: PathBuf,
+}
+
+/// Whether `id` can be a mod's id: letters, digits, `_` and `-`. (It prefixes
+/// every name the mod adds, so no spaces or colons - and `craftmjne` is the core
+/// game's own.)
 pub fn is_valid_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !id.is_empty() && id != crate::overlay::CORE_NS && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Where the game's installed mods live: `mods/` next to the executable, or in
@@ -106,30 +125,99 @@ pub fn installed_mods_dir() -> PathBuf {
     beside_exe.unwrap_or(cwd)
 }
 
-/// Reads the mod in `path`, or says why it isn't one.
+/// Reads the mod in `path`, or says why it won't work. **A mod without an `id`
+/// doesn't work**: the id is what keeps its names from clashing with anyone else's.
 pub fn read_mod(path: &Path) -> Result<ModInfo, String> {
-    let id = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    let folder = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    let text = std::fs::read_to_string(path.join(MANIFEST)).map_err(|_| format!("{folder}: no {MANIFEST}"))?;
+    let manifest: Manifest = serde_json::from_str(&text).map_err(|e| format!("{folder}: bad {MANIFEST}: {e}"))?;
+    let Some(id) = manifest.id else {
+        return Err(format!("{folder}: {MANIFEST} needs an \"id\" (a mod without one doesn't work)"));
+    };
     if !is_valid_id(&id) {
-        return Err(format!("{id:?} isn't a valid mod folder name (letters, digits, _ and - only)"));
+        return Err(format!(
+            "{folder}: the id {id:?} isn't valid (letters, digits, _ and - only, and not \"{}\")",
+            crate::overlay::CORE_NS
+        ));
     }
-    let text = std::fs::read_to_string(path.join(MANIFEST)).map_err(|_| format!("{id}: no {MANIFEST}"))?;
-    let manifest: Manifest = serde_json::from_str(&text).map_err(|e| format!("{id}: bad {MANIFEST}: {e}"))?;
     Ok(ModInfo {
         name: manifest.name.unwrap_or_else(|| id.clone()),
         version: manifest.version.unwrap_or_default(),
         description: manifest.description.unwrap_or_default(),
         id,
+        folder,
         path: path.to_path_buf(),
     })
 }
 
-/// Every mod in `dir`, sorted by id. A folder that isn't a valid mod is skipped.
+/// Every mod in `dir` that works, sorted by folder name, and the folders that
+/// don't (with why), for the Mods screen to show.
+pub fn scan_all(dir: &Path) -> (Vec<ModInfo>, Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return (Vec::new(), Vec::new()) };
+    let (mut good, mut bad) = (Vec::new(), Vec::new());
+    for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        // A folder with no mod.json at all isn't trying to be a mod.
+        if !path.join(MANIFEST).is_file() {
+            continue;
+        }
+        match read_mod(&path) {
+            Ok(m) => good.push(m),
+            Err(why) => bad.push((path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(), why)),
+        }
+    }
+    good.sort_by(|a, b| a.folder.cmp(&b.folder));
+    bad.sort();
+    (good, bad)
+}
+
+/// Every mod in `dir` that works, sorted by folder name.
 pub fn scan_mods(dir: &Path) -> Vec<ModInfo> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut mods: Vec<ModInfo> =
-        entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).filter_map(|p| read_mod(&p).ok()).collect();
-    mods.sort_by(|a, b| a.id.cmp(&b.id));
-    mods
+    scan_all(dir).0
+}
+
+/// The conflict manager. Gives each of a world's mods the namespace it runs under,
+/// so two mods that declare the same id can both be on without their names clashing.
+///
+/// `existing` is what the world already assigned (folder -> namespace) and is kept
+/// as it is: a block saved as `x_1:granite` must still be `x_1:granite` next time,
+/// even if the other `x` mod has since been removed. Mods new to the world get
+/// their declared id - unless another mod new to it, or one it already has, uses
+/// that id too, in which case the newcomers sharing it become `id_1`, `id_2`, ...
+/// (in folder order). Mods that aren't in `mods` any more are forgotten.
+pub fn assign_namespaces(
+    mods: &[ModInfo],
+    existing: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut out: BTreeMap<String, String> =
+        existing.iter().filter(|(folder, _)| mods.iter().any(|m| &m.folder == *folder)).map(|(f, n)| (f.clone(), n.clone())).collect();
+    let mut used: HashSet<String> = out.values().cloned().collect();
+    let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut newcomers: Vec<&ModInfo> = mods.iter().filter(|m| !out.contains_key(&m.folder)).collect();
+    newcomers.sort_by(|a, b| a.folder.cmp(&b.folder));
+    for m in newcomers {
+        groups.entry(m.id.as_str()).or_default().push(m.folder.as_str());
+    }
+    for (declared, folders) in groups {
+        if folders.len() == 1 && !used.contains(declared) {
+            used.insert(declared.to_string());
+            out.insert(folders[0].to_string(), declared.to_string());
+            continue;
+        }
+        let mut n = 1;
+        for folder in folders {
+            let name = loop {
+                let candidate = format!("{declared}_{n}");
+                n += 1;
+                if !used.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            used.insert(name.clone());
+            out.insert(folder.to_string(), name);
+        }
+    }
+    out
 }
 
 /// Copies directory `src` to `dst` (created), recursively.
@@ -182,8 +270,23 @@ impl ModError {
     }
 }
 
-/// The mod folders world `slug` runs, in load order (sorted by id). `installed`
-/// is the game's `mods/` folder.
+/// What a world runs: its mods with the namespace each got, and the full
+/// folder -> namespace assignment to remember in the world's meta
+/// (`WorldMeta::mod_ids`), so the names it saves stay the names it loads.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ResolvedMods {
+    pub sources: Vec<ModSource>,
+    pub ids: std::collections::BTreeMap<String, String>,
+}
+
+fn resolved(infos: Vec<ModInfo>, existing: &std::collections::BTreeMap<String, String>) -> ResolvedMods {
+    let ids = assign_namespaces(&infos, existing);
+    let sources = infos.iter().map(|m| ModSource { ns: ids[&m.folder].clone(), path: m.path.clone() }).collect();
+    ResolvedMods { sources, ids }
+}
+
+/// The mods world `slug` runs, in load order (by folder name), each with its
+/// namespace. `installed` is the game's `mods/` folder.
 ///
 /// See the module docs for the three storage styles. An `Err` means the world
 /// must not open: loading it without those mods would drop their blocks from
@@ -193,41 +296,43 @@ pub fn resolve_world_mods(
     slug: &str,
     meta: &WorldMeta,
     installed: &Path,
-) -> Result<Vec<PathBuf>, ModError> {
+) -> Result<ResolvedMods, ModError> {
     if let Some(host) = &meta.branch_of {
         let host_meta = store.load_meta(host).map_err(|_| ModError::HostMissing(host.clone()))?;
         if host_meta.branch_of.is_some() || host_meta.mod_storage != ModStorage::World {
             return Err(ModError::HostCannotShare(host.clone()));
         }
-        return Ok(scan_mods(&store.world_mods_dir(host)).into_iter().map(|m| m.path).collect());
+        // The host's own assignments, so both worlds name things alike.
+        return Ok(resolved(scan_mods(&store.world_mods_dir(host)), &host_meta.mod_ids));
     }
     match meta.mod_storage {
         ModStorage::Instance => {
             let mut missing = Vec::new();
-            let mut paths = Vec::new();
-            let mut ids = meta.mods.clone();
-            ids.sort();
-            ids.dedup();
-            for id in ids {
-                match read_mod(&installed.join(&id)) {
-                    Ok(m) => paths.push(m.path),
-                    Err(_) => missing.push(id),
+            let mut infos = Vec::new();
+            let mut folders = meta.mods.clone();
+            folders.sort();
+            folders.dedup();
+            for folder in folders {
+                match read_mod(&installed.join(&folder)) {
+                    Ok(m) => infos.push(m),
+                    Err(_) => missing.push(folder),
                 }
             }
             if missing.is_empty() {
-                Ok(paths)
+                Ok(resolved(infos, &meta.mod_ids))
             } else {
                 Err(ModError::NotInstalled(missing))
             }
         }
         ModStorage::World => {
             let dir = store.world_mods_dir(slug);
-            let present: Vec<String> = scan_mods(&dir).into_iter().map(|m| m.id).collect();
-            let missing: Vec<String> = meta.mods.iter().filter(|id| !present.contains(id)).cloned().collect();
+            let infos = scan_mods(&dir);
+            let missing: Vec<String> =
+                meta.mods.iter().filter(|f| !infos.iter().any(|m| &m.folder == *f)).cloned().collect();
             if !missing.is_empty() {
                 return Err(ModError::MissingFromWorld { holder: slug.to_string(), missing });
             }
-            Ok(scan_mods(&dir).into_iter().map(|m| m.path).collect())
+            Ok(resolved(infos, &meta.mod_ids))
         }
     }
 }
@@ -258,7 +363,7 @@ impl Default for InstalledMods {
 /// it for its own and tidy the texture report.
 #[derive(Resource, Default, Debug)]
 pub struct LoadedContent {
-    pub mods: Vec<PathBuf>,
+    pub mods: Vec<ModSource>,
     pub block_textures: Vec<String>,
     /// Bumped every time content is installed, so things built from it (the GPU
     /// atlas) can tell they're out of date.
@@ -319,6 +424,11 @@ pub fn create_world_with_mods(
     meta.mod_storage = storage;
     meta.mods = mods;
     meta.branch_of = branch;
+    // Which namespace each chosen mod runs under here (the conflict manager).
+    if meta.branch_of.is_none() {
+        let infos: Vec<ModInfo> = meta.mods.iter().filter_map(|f| read_mod(&installed.join(f)).ok()).collect();
+        meta.mod_ids = assign_namespaces(&infos, &Default::default());
+    }
     if storage == ModStorage::World && meta.branch_of.is_none() {
         if let Err(err) = copy_mods_into_world(store, &slug, installed, &meta.mods) {
             let _ = std::fs::remove_dir_all(store.world_dir(&slug));
@@ -329,10 +439,12 @@ pub fn create_world_with_mods(
     Ok((slug, meta))
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::save::GameMode;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -351,11 +463,15 @@ mod tests {
             std::fs::create_dir_all(&installed).unwrap();
             Self { store: SaveStore::at(root.join("data")), root, installed }
         }
-        fn install(&self, id: &str) {
-            let dir = self.installed.join(id);
+        /// Installs folder `folder` declaring mod id `id`.
+        fn install_as(&self, folder: &str, id: &str) {
+            let dir = self.installed.join(folder);
             std::fs::create_dir_all(dir.join("blocks")).unwrap();
-            std::fs::write(dir.join(MANIFEST), format!(r#"{{"name": "{id}"}}"#)).unwrap();
-            std::fs::write(dir.join("blocks").join(format!("{id}_block.json")), format!(r#"{{"id": "{id}_block"}}"#)).unwrap();
+            std::fs::write(dir.join(MANIFEST), format!(r#"{{"id": "{id}", "name": "{folder}"}}"#)).unwrap();
+            std::fs::write(dir.join("blocks").join("thing.json"), r#"{"id": "thing"}"#).unwrap();
+        }
+        fn install(&self, id: &str) {
+            self.install_as(id, id);
         }
         fn create(&self, name: &str, setup: &ModSetup) -> (String, WorldMeta) {
             create_world_with_mods(&self.store, name, 1, GameMode::Survival, setup, &self.installed).unwrap()
@@ -363,7 +479,7 @@ mod tests {
         fn resolve(&self, slug: &str) -> Result<Vec<String>, ModError> {
             let meta = self.store.load_meta(slug).unwrap();
             resolve_world_mods(&self.store, slug, &meta, &self.installed)
-                .map(|paths| paths.iter().map(|p| p.file_name().unwrap().to_str().unwrap().to_string()).collect())
+                .map(|r| r.sources.iter().map(|s| s.ns.clone()).collect())
         }
     }
     impl Drop for Env {
@@ -374,18 +490,94 @@ mod tests {
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
+    fn info(folder: &str, id: &str) -> ModInfo {
+        ModInfo {
+            folder: folder.into(),
+            id: id.into(),
+            name: id.into(),
+            version: String::new(),
+            description: String::new(),
+            path: PathBuf::from(folder),
+        }
+    }
 
     #[test]
-    fn only_folders_with_a_manifest_and_a_valid_name_are_mods() {
+    fn a_mod_without_an_id_does_not_work_and_says_why() {
         let env = Env::new();
-        env.install("alpha");
+        let dir = env.installed.join("anon");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(MANIFEST), r#"{"name": "No id"}"#).unwrap();
+        let why = read_mod(&dir).unwrap_err();
+        assert!(why.contains("needs an \"id\""), "{why}");
+        let (good, bad) = scan_all(&env.installed);
+        assert!(good.is_empty());
+        assert_eq!(bad.len(), 1, "it's reported, so the Mods screen can show it");
+        assert!(bad[0].1.contains("doesn't work"));
+    }
+
+    #[test]
+    fn an_id_must_be_plain_and_cannot_be_the_core_games() {
+        for bad in ["", "has space", "a:b", "craftmjne", "über"] {
+            assert!(!is_valid_id(bad), "{bad:?}");
+        }
+        for good in ["granite_pack", "my-mod", "Mod2"] {
+            assert!(is_valid_id(good), "{good:?}");
+        }
+        let env = Env::new();
+        env.install_as("f", "a:b");
+        assert!(read_mod(&env.installed.join("f")).unwrap_err().contains("isn't valid"));
+    }
+
+    #[test]
+    fn only_folders_with_a_manifest_are_considered_and_the_id_not_the_folder_names_the_mod() {
+        let env = Env::new();
+        env.install_as("folder_one", "alpha");
         std::fs::create_dir_all(env.installed.join("no_manifest")).unwrap();
-        std::fs::create_dir_all(env.installed.join("bad name")).unwrap();
-        std::fs::write(env.installed.join("bad name").join(MANIFEST), "{}").unwrap();
         std::fs::write(env.installed.join("stray.txt"), "x").unwrap();
-        let found: Vec<String> = scan_mods(&env.installed).into_iter().map(|m| m.id).collect();
-        assert_eq!(found, names(&["alpha"]));
-        assert_eq!(read_mod(&env.installed.join("alpha")).unwrap().name, "alpha");
+        let (good, bad) = scan_all(&env.installed);
+        assert!(bad.is_empty(), "a folder with no mod.json isn't trying to be a mod");
+        assert_eq!(
+            (good[0].folder.as_str(), good[0].id.as_str(), good[0].name.as_str()),
+            ("folder_one", "alpha", "folder_one")
+        );
+    }
+
+    #[test]
+    fn the_conflict_manager_leaves_unique_ids_alone() {
+        let out = assign_namespaces(&[info("a", "alpha"), info("b", "beta")], &BTreeMap::new());
+        assert_eq!((out["a"].as_str(), out["b"].as_str()), ("alpha", "beta"));
+    }
+
+    #[test]
+    fn two_mods_with_the_same_id_both_get_a_numbered_one_and_nothing_breaks() {
+        let mods = [info("zeta", "x"), info("alpha_folder", "x"), info("other", "y")];
+        let out = assign_namespaces(&mods, &BTreeMap::new());
+        assert_eq!(out["alpha_folder"], "x_1", "in folder order");
+        assert_eq!(out["zeta"], "x_2");
+        assert_eq!(out["other"], "y");
+        let all: std::collections::HashSet<_> = out.values().collect();
+        assert_eq!(all.len(), 3, "every namespace is distinct");
+    }
+
+    #[test]
+    fn an_assignment_is_remembered_even_after_the_conflict_goes_away() {
+        let first = assign_namespaces(&[info("a", "x"), info("b", "x")], &BTreeMap::new());
+        // `b` is removed: `a` keeps `x_1`, because blocks saved as `x_1:thing` need it.
+        let after = assign_namespaces(&[info("a", "x")], &first);
+        assert_eq!(after["a"], "x_1");
+        assert!(!after.contains_key("b"), "a removed mod is forgotten");
+        // A newcomer declaring `x` can't be given a namespace already in use.
+        let later = assign_namespaces(&[info("a", "x"), info("c", "x")], &after);
+        assert_eq!(later["a"], "x_1");
+        assert_ne!(later["c"], "x_1");
+    }
+
+    #[test]
+    fn a_newcomer_declaring_an_id_an_existing_mod_already_uses_gets_a_number() {
+        let existing = BTreeMap::from([("a".to_string(), "x".to_string())]);
+        let out = assign_namespaces(&[info("a", "x"), info("b", "x")], &existing);
+        assert_eq!(out["a"], "x", "the existing one is not renamed");
+        assert_eq!(out["b"], "x_1");
     }
 
     #[test]
@@ -395,10 +587,21 @@ mod tests {
         env.install("beta");
         let (slug, meta) = env.create("W", &ModSetup::Instance(names(&["beta", "alpha"])));
         assert_eq!(meta.mod_storage, ModStorage::Instance);
-        assert_eq!(env.resolve(&slug).unwrap(), names(&["alpha", "beta"]), "load order is by id");
+        assert_eq!(env.resolve(&slug).unwrap(), names(&["alpha", "beta"]), "load order is by folder");
         assert!(!env.store.world_mods_dir(&slug).exists(), "nothing is copied into an instance world");
         std::fs::remove_dir_all(env.installed.join("beta")).unwrap();
         assert_eq!(env.resolve(&slug), Err(ModError::NotInstalled(names(&["beta"]))));
+    }
+
+    #[test]
+    fn a_world_remembers_the_namespaces_its_mods_were_given() {
+        let env = Env::new();
+        env.install_as("one", "dup");
+        env.install_as("two", "dup");
+        let (slug, meta) = env.create("W", &ModSetup::Instance(names(&["one", "two"])));
+        assert_eq!(meta.mod_ids, BTreeMap::from([("one".into(), "dup_1".into()), ("two".into(), "dup_2".into())]));
+        assert_eq!(env.store.load_meta(&slug).unwrap().mod_ids, meta.mod_ids, "saved with the world");
+        assert_eq!(env.resolve(&slug).unwrap(), names(&["dup_1", "dup_2"]));
     }
 
     #[test]
@@ -413,28 +616,26 @@ mod tests {
         // A mod dropped straight into the world's folder - never installed in the game - is used too.
         let drop = env.store.world_mods_dir(&slug).join("gamma");
         std::fs::create_dir_all(&drop).unwrap();
-        std::fs::write(drop.join(MANIFEST), "{}").unwrap();
+        std::fs::write(drop.join(MANIFEST), r#"{"id": "gamma"}"#).unwrap();
         assert_eq!(env.resolve(&slug).unwrap(), names(&["alpha", "gamma"]));
-        // Deleting one it was created with makes it refuse, not quietly shrink.
         std::fs::remove_dir_all(env.store.world_mods_dir(&slug).join("alpha")).unwrap();
         assert!(matches!(env.resolve(&slug), Err(ModError::MissingFromWorld { .. })));
     }
 
     #[test]
-    fn a_branch_uses_its_hosts_mods_without_keeping_copies_and_shares_its_fate() {
+    fn a_branch_uses_its_hosts_mods_and_names_without_keeping_copies_and_shares_its_fate() {
         let env = Env::new();
         env.install("alpha");
         let (host, _) = env.create("Host", &ModSetup::World(names(&["alpha"])));
         let (branch, meta) = env.create("Branch", &ModSetup::Branch(host.clone()));
         assert_eq!(meta.branch_of.as_deref(), Some(host.as_str()));
-        assert!(!env.store.world_mods_dir(&branch).exists(), "a branch keeps nothing of its own");
+        assert!(meta.mod_ids.is_empty(), "a branch decides nothing of its own");
+        assert!(!env.store.world_mods_dir(&branch).exists());
         assert_eq!(env.resolve(&branch).unwrap(), names(&["alpha"]));
-        // A mod added to the host shows up in the branch...
         let extra = env.store.world_mods_dir(&host).join("delta");
         std::fs::create_dir_all(&extra).unwrap();
-        std::fs::write(extra.join(MANIFEST), "{}").unwrap();
+        std::fs::write(extra.join(MANIFEST), r#"{"id": "delta"}"#).unwrap();
         assert_eq!(env.resolve(&branch).unwrap(), names(&["alpha", "delta"]));
-        // ...and if the host goes, so do the branch's mods.
         std::fs::remove_dir_all(env.store.world_dir(&host)).unwrap();
         assert_eq!(env.resolve(&branch), Err(ModError::HostMissing(host)));
     }
@@ -446,12 +647,13 @@ mod tests {
         let (inst, _) = env.create("Inst", &ModSetup::Instance(names(&["alpha"])));
         let (host, _) = env.create("Host", &ModSetup::World(names(&["alpha"])));
         let (branch, _) = env.create("Branch", &ModSetup::Branch(host));
-        let try_branch = |h: &str| create_world_with_mods(&env.store, "X", 1, GameMode::Survival, &ModSetup::Branch(h.into()), &env.installed);
-        assert!(try_branch(&inst).is_err(), "an instance world keeps its mods in the game's folder");
+        let try_branch = |h: &str| {
+            create_world_with_mods(&env.store, "X", 1, GameMode::Survival, &ModSetup::Branch(h.into()), &env.installed)
+        };
+        assert!(try_branch(&inst).is_err());
         assert!(try_branch(&branch).is_err(), "no branches of branches");
         assert!(try_branch("nope").is_err());
-        // Nothing was created by the refusals.
-        assert_eq!(env.store.list_worlds().len(), 3);
+        assert_eq!(env.store.list_worlds().len(), 3, "refusals create nothing");
     }
 
     #[test]
@@ -463,14 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn a_worlds_mod_setup_round_trips_through_its_meta() {
-        let env = Env::new();
-        env.install("alpha");
-        let (slug, _) = env.create("W", &ModSetup::World(names(&["alpha"])));
-        let meta = env.store.load_meta(&slug).unwrap();
-        assert_eq!((meta.mod_storage, meta.mods), (ModStorage::World, names(&["alpha"])));
-        // An older world (no mod fields at all) is an instance world with no mods.
+    fn an_older_world_with_no_mod_fields_is_an_instance_world_with_no_mods() {
         let old: WorldMeta = serde_json::from_str(r#"{"name":"Old","seed":1,"created_at":0,"last_played_at":0}"#).unwrap();
-        assert_eq!((old.mod_storage, old.mods.len(), old.branch_of), (ModStorage::Instance, 0, None));
+        assert_eq!((old.mod_storage, old.mods.len(), old.branch_of, old.mod_ids.len()), (ModStorage::Instance, 0, None, 0));
     }
 }
