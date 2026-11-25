@@ -30,6 +30,7 @@ use std::sync::OnceLock;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::gamepad::{move_keys, PadButton, PadState};
 use crate::save::SaveStore;
 
 // ---------------------------------------------------------------------------
@@ -426,6 +427,8 @@ actions! {
     Attack => ("attack", "Attack / break block", Category::Gameplay, mouse(MouseButton::Left)),
     UseItem => ("use", "Place block / use", Category::Gameplay, mouse(MouseButton::Right)),
     PickBlock => ("pick_block", "Pick block (Creative)", Category::Gameplay, mouse(MouseButton::Middle)),
+    HotbarPrev => ("hotbar_prev", "Previous slot", Category::Inventory, None),
+    HotbarNext => ("hotbar_next", "Next slot", Category::Inventory, None),
     DropItem => ("drop_item", "Drop one item", Category::Inventory, key(KeyCode::KeyQ)),
     DropStack => ("drop_stack", "Drop the whole stack", Category::Inventory, ctrl_key(KeyCode::KeyQ)),
     Inventory => ("inventory", "Open inventory", Category::Inventory, key(KeyCode::KeyE)),
@@ -445,6 +448,27 @@ actions! {
 }
 
 impl Action {
+    /// What each control starts bound to on a controller. The sticks are not here: the
+    /// left one moves and the right one looks whatever is bound (see `gamepad.rs`).
+    pub fn default_pad(self) -> Option<PadButton> {
+        use PadButton as P;
+        match self {
+            Action::Jump => Some(P::South),
+            Action::Sneak => Some(P::East),
+            Action::Sprint => Some(P::LeftStick),
+            Action::ToggleFly => Some(P::Select),
+            Action::Attack => Some(P::RightTrigger),
+            Action::UseItem => Some(P::LeftTrigger),
+            Action::PickBlock => Some(P::West),
+            Action::DropItem => Some(P::DPadDown),
+            Action::Inventory => Some(P::North),
+            Action::HotbarPrev => Some(P::LeftBumper),
+            Action::HotbarNext => Some(P::RightBumper),
+            Action::Pause => Some(P::Start),
+            _ => None,
+        }
+    }
+
     pub fn from_id(id: &str) -> Option<Action> {
         Action::ALL.iter().copied().find(|a| a.id() == id)
     }
@@ -519,6 +543,8 @@ pub struct ControlDef {
     /// The heading it's listed under.
     pub category: String,
     pub default: Option<Chord>,
+    /// What it starts bound to on a controller (`None`: nothing).
+    pub default_pad: Option<PadButton>,
     /// A chat command (`/time set day`, with or without the slash) to run when the
     /// control is pressed in a world. Without one the control only exists for code
     /// that asks about it (`Actions::just_pressed("mymod:thing")`).
@@ -528,11 +554,16 @@ pub struct ControlDef {
 
 impl ControlDef {
     pub fn new(id: impl Into<String>, label: impl Into<String>, category: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into(), category: category.into(), default: None, command: None, source: None }
+        Self { id: id.into(), label: label.into(), category: category.into(), default: None, default_pad: None, command: None, source: None }
     }
 
     pub fn with_default(mut self, chord: Chord) -> Self {
         self.default = Some(chord);
+        self
+    }
+
+    pub fn with_default_pad(mut self, button: PadButton) -> Self {
+        self.default_pad = Some(button);
         self
     }
 
@@ -553,6 +584,8 @@ impl ControlDef {
 pub struct Bindings {
     defs: Vec<ControlDef>,
     chords: HashMap<String, Option<Chord>>,
+    /// The controller button of each control (separate from the keyboard chord).
+    pads: HashMap<String, Option<PadButton>>,
     /// Saved changes (`id -> chord text`) waiting for their control to exist.
     pending: BTreeMap<String, String>,
 }
@@ -565,6 +598,7 @@ fn builtin_defs() -> Vec<ControlDef> {
             label: a.label().to_string(),
             category: a.category().name().to_string(),
             default: a.default_chord(),
+            default_pad: a.default_pad(),
             command: None,
             source: None,
         })
@@ -575,7 +609,8 @@ impl Default for Bindings {
     fn default() -> Self {
         let defs = builtin_defs();
         let chords = defs.iter().map(|d| (d.id.clone(), d.default)).collect();
-        Self { defs, chords, pending: BTreeMap::new() }
+        let pads = defs.iter().map(|d| (d.id.clone(), d.default_pad)).collect();
+        Self { defs, chords, pads, pending: BTreeMap::new() }
     }
 }
 
@@ -585,6 +620,40 @@ fn parse_saved(text: &str) -> Option<Option<Chord>> {
         Some(None)
     } else {
         Chord::parse(text).map(Some)
+    }
+}
+
+/// The key a controller binding is parked/saved under. `@` can't appear in a control id
+/// (ids are letters, digits, `_`, `-` and one `:`), so it never collides with a keyboard entry.
+fn pad_key(id: &str) -> String {
+    format!("@pad:{id}")
+}
+
+/// `none` or a button name; `None` when the text is neither.
+fn parse_saved_pad(text: &str) -> Option<Option<PadButton>> {
+    if text.trim().eq_ignore_ascii_case("none") {
+        Some(None)
+    } else {
+        PadButton::parse(text).map(Some)
+    }
+}
+
+/// Which device the Keybinds screen is editing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Device {
+    #[default]
+    Keyboard,
+    Controller,
+}
+
+impl Device {
+    pub const ALL: [Device; 2] = [Device::Keyboard, Device::Controller];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Device::Keyboard => "Keyboard & Mouse",
+            Device::Controller => "Controller",
+        }
     }
 }
 
@@ -618,6 +687,8 @@ impl Bindings {
         }
         let chord = self.pending.remove(&def.id).and_then(|text| parse_saved(&text)).unwrap_or(def.default);
         self.chords.insert(def.id.clone(), chord);
+        let pad = self.pending.remove(&pad_key(&def.id)).and_then(|text| parse_saved_pad(&text)).unwrap_or(def.default_pad);
+        self.pads.insert(def.id.clone(), pad);
         self.defs.push(def);
         true
     }
@@ -638,6 +709,11 @@ impl Bindings {
                 self.pending.insert(id.clone(), text);
             }
             self.chords.remove(id);
+            if !self.pad_is_default(id.as_str()) {
+                let text = self.pad_get(id.as_str()).map(|b| b.id().to_string()).unwrap_or_else(|| "none".to_string());
+                self.pending.insert(pad_key(id), text);
+            }
+            self.pads.remove(id);
         }
         self.defs.retain(|d| d.source.is_none());
         new.into_iter().filter_map(|d| { let id = d.id.clone(); (!self.register(d)).then_some(id) }).collect()
@@ -669,6 +745,7 @@ impl Bindings {
     pub fn reset_all(&mut self) {
         for d in &self.defs {
             self.chords.insert(d.id.clone(), d.default);
+            self.pads.insert(d.id.clone(), d.default_pad);
         }
         self.pending.clear();
     }
@@ -688,6 +765,84 @@ impl Bindings {
     /// Every control that shares its chord with at least one other.
     pub fn conflicting(&self) -> HashSet<String> {
         self.defs.iter().filter(|d| !self.conflicts_with(d.id.as_str()).is_empty()).map(|d| d.id.clone()).collect()
+    }
+
+    // ---- controller bindings ------------------------------------------------
+
+    pub fn pad_get(&self, control: impl Control) -> Option<PadButton> {
+        self.pads.get(control.control_id()).copied().flatten()
+    }
+
+    /// Binds (or, with `None`, unbinds) a control's controller button.
+    pub fn pad_set(&mut self, control: impl Control, button: Option<PadButton>) {
+        if let Some(slot) = self.pads.get_mut(control.control_id()) {
+            *slot = button;
+        }
+    }
+
+    pub fn pad_default_of(&self, control: impl Control) -> Option<PadButton> {
+        self.def(control.control_id()).and_then(|d| d.default_pad)
+    }
+
+    pub fn pad_reset(&mut self, control: impl Control) {
+        let id = control.control_id();
+        let default = self.pad_default_of(id);
+        self.pad_set(id, default);
+    }
+
+    pub fn pad_is_default(&self, control: impl Control) -> bool {
+        let id = control.control_id();
+        self.pad_get(id) == self.pad_default_of(id)
+    }
+
+    /// Every controller button back to its default, leaving the keyboard alone.
+    pub fn reset_all_pads(&mut self) {
+        for d in &self.defs {
+            self.pads.insert(d.id.clone(), d.default_pad);
+        }
+        self.pending.retain(|k, _| !k.starts_with("@pad:"));
+    }
+
+    /// Every keyboard chord back to its default, leaving the controller alone.
+    pub fn reset_all_keyboard(&mut self) {
+        for d in &self.defs {
+            self.chords.insert(d.id.clone(), d.default);
+        }
+        self.pending.retain(|k, _| k.starts_with("@pad:"));
+    }
+
+    /// Every other control on exactly this one's controller button.
+    pub fn pad_conflicts_with(&self, control: impl Control) -> Vec<String> {
+        let id = control.control_id();
+        let Some(button) = self.pad_get(id) else { return Vec::new() };
+        self.defs.iter().filter(|d| d.id != id && self.pad_get(d.id.as_str()) == Some(button)).map(|d| d.id.clone()).collect()
+    }
+
+    pub fn pad_conflicting(&self) -> HashSet<String> {
+        self.defs.iter().filter(|d| !self.pad_conflicts_with(d.id.as_str()).is_empty()).map(|d| d.id.clone()).collect()
+    }
+
+    /// Conflicts for whichever device is being edited.
+    pub fn conflicts_on(&self, device: Device, control: impl Control) -> Vec<String> {
+        match device {
+            Device::Keyboard => self.conflicts_with(control),
+            Device::Controller => self.pad_conflicts_with(control),
+        }
+    }
+
+    pub fn conflicting_on(&self, device: Device) -> HashSet<String> {
+        match device {
+            Device::Keyboard => self.conflicting(),
+            Device::Controller => self.pad_conflicting(),
+        }
+    }
+
+    pub fn pad_pressed(&self, control: impl Control, pad: &PadState) -> bool {
+        self.pad_get(control).is_some_and(|b| pad.held(b))
+    }
+
+    pub fn pad_just_pressed(&self, control: impl Control, pad: &PadState) -> bool {
+        self.pad_get(control).is_some_and(|b| pad.started(b))
     }
 
     /// A more specific chord on the same input that is held right now wins.
@@ -732,6 +887,31 @@ impl Bindings {
         out
     }
 
+    /// [`Bindings::movement_input`] plus the controller: bound buttons, and the left
+    /// stick held past its threshold counts as W/A/S/D.
+    pub fn movement_input_with_pad(&self, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>, pad: &PadState) -> ButtonInput<KeyCode> {
+        let mut out = self.movement_input(keys, mouse);
+        for (action, key) in [
+            (Action::Forward, KeyCode::KeyW),
+            (Action::Back, KeyCode::KeyS),
+            (Action::Left, KeyCode::KeyA),
+            (Action::Right, KeyCode::KeyD),
+            (Action::Jump, KeyCode::Space),
+            (Action::Sneak, KeyCode::ShiftLeft),
+            (Action::Sprint, KeyCode::ControlLeft),
+        ] {
+            if self.pad_pressed(action, pad) {
+                out.press(key);
+            }
+        }
+        for (held, key) in move_keys(pad.left).into_iter().zip([KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD]) {
+            if held {
+                out.press(key);
+            }
+        }
+        out
+    }
+
     /// What differs from the defaults, as `id -> chord text` (`none` = unbound),
     /// including parked changes for controls that aren't registered right now.
     pub fn overrides(&self) -> BTreeMap<String, String> {
@@ -739,6 +919,9 @@ impl Bindings {
         for d in &self.defs {
             if !self.is_default(d.id.as_str()) {
                 out.insert(d.id.clone(), self.get(d.id.as_str()).map(|c| c.display()).unwrap_or_else(|| "none".to_string()));
+            }
+            if !self.pad_is_default(d.id.as_str()) {
+                out.insert(pad_key(&d.id), self.pad_get(d.id.as_str()).map(|b| b.id().to_string()).unwrap_or_else(|| "none".to_string()));
             }
         }
         out
@@ -757,7 +940,15 @@ impl Bindings {
     /// Applies saved changes to what is registered and parks the rest.
     pub fn apply_saved(&mut self, saved: &BTreeMap<String, String>) {
         for (id, text) in saved {
-            if self.chords.contains_key(id) {
+            if let Some(control) = id.strip_prefix("@pad:") {
+                if self.pads.contains_key(control) {
+                    if let Some(button) = parse_saved_pad(text) {
+                        self.pads.insert(control.to_string(), button);
+                    }
+                } else {
+                    self.pending.insert(id.clone(), text.clone());
+                }
+            } else if self.chords.contains_key(id) {
                 if let Some(chord) = parse_saved(text) {
                     self.chords.insert(id.clone(), chord);
                 }
@@ -811,6 +1002,15 @@ fn segment_has(chord: &Chord, segment: &str) -> bool {
 /// - `is:conflict`, `is:unbound`, `is:changed`
 /// - anything else: every word must appear in the action's name, category or id
 pub fn search(bindings: &Bindings, query: &str) -> Vec<String> {
+    search_on(bindings, query, Device::Keyboard)
+}
+
+/// [`search`] for whichever device is being edited. On a controller `key:` (or `btn:`)
+/// takes one button - `key:a`, `btn:right bumper`, or a prefix like `btn:dpad`.
+pub fn search_on(bindings: &Bindings, query: &str, device: Device) -> Vec<String> {
+    if device == Device::Controller {
+        return search_pad(bindings, query);
+    }
     let q = query.trim().to_lowercase();
     let all = bindings.defs().iter().map(|d| d.id.as_str());
     if let Some(rest) = q.strip_prefix("key:") {
@@ -829,6 +1029,11 @@ pub fn search(bindings: &Bindings, query: &str) -> Vec<String> {
             _ => Vec::new(),
         };
     }
+    search_words(bindings, &q)
+}
+
+/// Every word must appear in the control's name, category, id or mod name.
+fn search_words(bindings: &Bindings, q: &str) -> Vec<String> {
     let words: Vec<&str> = q.split_whitespace().collect();
     bindings
         .defs()
@@ -840,6 +1045,38 @@ pub fn search(bindings: &Bindings, query: &str) -> Vec<String> {
         })
         .map(|d| d.id.clone())
         .collect()
+}
+
+fn pad_matches(button: PadButton, token: &str) -> bool {
+    if let Some(b) = PadButton::parse(token) {
+        return b == button;
+    }
+    token.len() >= 2 && {
+        let t: String = token.chars().filter(|c| c.is_alphanumeric()).collect();
+        let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        norm(button.id()).starts_with(&t) || norm(button.label()).starts_with(&t)
+    }
+}
+
+fn search_pad(bindings: &Bindings, query: &str) -> Vec<String> {
+    let q = query.trim().to_lowercase();
+    let all = bindings.defs().iter().map(|d| d.id.as_str());
+    for prefix in ["key:", "btn:", "button:"] {
+        if let Some(rest) = q.strip_prefix(prefix) {
+            let token = rest.trim();
+            return all.filter(|a| bindings.pad_get(*a).is_some_and(|b| token.is_empty() || pad_matches(b, token))).map(str::to_string).collect();
+        }
+    }
+    if let Some(rest) = q.strip_prefix("is:") {
+        let conflicting = bindings.pad_conflicting();
+        return match rest.trim() {
+            "conflict" | "conflicts" => all.filter(|a| conflicting.contains(*a)).map(str::to_string).collect(),
+            "unbound" | "none" => all.filter(|a| bindings.pad_get(*a).is_none()).map(str::to_string).collect(),
+            "changed" | "custom" => all.filter(|a| !bindings.pad_is_default(*a)).map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+    }
+    search_words(bindings, &q)
 }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +1101,15 @@ pub struct Capture {
     /// modifier by itself (`Shift` to sneak); pressing anything else first makes
     /// it part of a combo instead.
     pending: Option<KeyCode>,
+    /// Waiting for a controller button rather than a key.
+    pub pad: bool,
+}
+
+/// What happened while waiting for a controller button.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PadCaptureEvent {
+    Cancelled,
+    Chosen(PadButton),
 }
 
 impl Capture {
@@ -871,6 +1117,34 @@ impl Capture {
         self.target = Some(control.control_id().to_string());
         self.warmup = 1;
         self.pending = None;
+        self.pad = false;
+    }
+
+    /// Wait for a controller button instead.
+    pub fn start_pad(&mut self, control: impl Control) {
+        self.start(control);
+        self.pad = true;
+    }
+
+    /// The controller version of [`Capture::step`]: the first button pressed is the binding.
+    /// Escape on the keyboard cancels (a controller user can't get stuck: any button binds).
+    pub fn step_pad(&mut self, keys: &ButtonInput<KeyCode>, pad: &PadState) -> Option<PadCaptureEvent> {
+        self.target.as_ref()?;
+        if self.warmup > 0 {
+            self.warmup -= 1;
+            return None;
+        }
+        let done = |c: &mut Self, e| {
+            c.target = None;
+            c.pad = false;
+            Some(e)
+        };
+        if keys.just_pressed(KeyCode::Escape) {
+            return done(self, PadCaptureEvent::Cancelled);
+        }
+        // Lowest button first so two pressed in one frame resolve the same way every time.
+        let first = PadButton::ALL.into_iter().find(|b| pad.started(*b));
+        first.and_then(|b| done(self, PadCaptureEvent::Chosen(b)))
     }
 
     pub fn active(&self) -> bool {
@@ -879,6 +1153,7 @@ impl Capture {
 
     fn finish(&mut self, event: CaptureEvent) -> Option<CaptureEvent> {
         self.target = None;
+        self.pad = false;
         self.pending = None;
         Some(event)
     }
@@ -941,9 +1216,19 @@ pub struct Actions<'w> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     mouse: Option<Res<'w, ButtonInput<MouseButton>>>,
     bindings: Option<Res<'w, Bindings>>,
+    pad: Option<Res<'w, PadState>>,
+}
+
+fn no_pad() -> &'static PadState {
+    static NONE: OnceLock<PadState> = OnceLock::new();
+    NONE.get_or_init(PadState::default)
 }
 
 impl Actions<'_> {
+    fn pad_state(&self) -> &PadState {
+        self.pad.as_deref().unwrap_or_else(|| no_pad())
+    }
+
     fn parts(&self) -> (&Bindings, &ButtonInput<KeyCode>, &ButtonInput<MouseButton>) {
         (
             self.bindings.as_deref().unwrap_or_else(|| default_bindings()),
@@ -952,20 +1237,23 @@ impl Actions<'_> {
         )
     }
 
+    /// Held on the keyboard/mouse *or* the controller.
     pub fn pressed(&self, control: impl Control) -> bool {
         let (b, k, m) = self.parts();
-        b.pressed(control, k, m)
+        let id = control.control_id();
+        b.pressed(id, k, m) || b.pad_pressed(id, self.pad_state())
     }
 
     pub fn just_pressed(&self, control: impl Control) -> bool {
         let (b, k, m) = self.parts();
-        b.just_pressed(control, k, m)
+        let id = control.control_id();
+        b.just_pressed(id, k, m) || b.pad_just_pressed(id, self.pad_state())
     }
 
     /// The fixed-key view of the movement actions (see [`Bindings::movement_input`]).
     pub fn movement_input(&self) -> ButtonInput<KeyCode> {
         let (b, k, m) = self.parts();
-        b.movement_input(k, m)
+        b.movement_input_with_pad(k, m, self.pad_state())
     }
 }
 
@@ -1067,6 +1355,9 @@ impl Plugin for KeybindPlugin {
             .unwrap_or_default();
         let options = app.world().get_resource::<SaveStore>().map(|store| store.load_control_options()).unwrap_or_default();
         app.insert_resource(bindings).insert_resource(options).init_resource::<Capture>();
+        if !app.is_plugin_added::<crate::gamepad::GamepadPlugin>() {
+            app.add_plugins(crate::gamepad::GamepadPlugin);
+        }
     }
 }
 
@@ -1258,7 +1549,7 @@ mod tests {
     fn plain_search_matches_names_categories_and_words_together() {
         let b = Bindings::default();
         assert_eq!(search(&b, "jump"), ids(&[Action::Jump]));
-        assert!(search(&b, "HOTBAR").len() == 9);
+        assert_eq!(search(&b, "HOTBAR").len(), 11, "nine slots plus previous/next (matched by id)");
         assert_eq!(search(&b, "hotbar 3"), ids(&[Action::Hotbar3]));
         assert!(search(&b, "movement").contains(&Action::Sprint.id().to_string()));
         assert!(search(&b, "zzz").is_empty());
@@ -1277,7 +1568,7 @@ mod tests {
         assert_eq!(search(&b, "key:left click"), ids(&[Action::Attack]));
         assert_eq!(search(&b, "key:1"), ids(&[Action::Hotbar1]));
         assert!(search(&b, "key:zzz").is_empty());
-        assert_eq!(search(&b, "key:").len(), Action::ALL.len(), "everything here is bound");
+        assert_eq!(search(&b, "key:").len(), Action::ALL.len() - 2, "everything but the two scroll-only hotbar controls is bound");
     }
 
     #[test]
@@ -1296,7 +1587,7 @@ mod tests {
         b.set(Action::Command, None);
         assert_eq!(search(&b, "key:e"), ids(&[Action::Inventory, Action::Chat]));
         assert_eq!(search(&b, "is:conflict"), ids(&[Action::Inventory, Action::Chat]));
-        assert_eq!(search(&b, "is:unbound"), ids(&[Action::Command]));
+        assert_eq!(search(&b, "is:unbound"), ids(&[Action::HotbarPrev, Action::HotbarNext, Action::Command]), "previous/next slot are on the wheel and the bumpers, not a key");
         assert_eq!(search(&b, "is:changed"), ids(&[Action::Chat, Action::Command]));
         assert!(search(&b, "is:wat").is_empty());
         assert!(!search(&b, "key:/").contains(&Action::Command.id().to_string()), "unbound means not found by key");
@@ -1499,5 +1790,194 @@ mod tests {
         assert_eq!(serde_json::from_str::<ControlOptions>(&saved).unwrap().flight_mode, FlightMode::DoubleTapJump);
         assert_eq!(serde_json::from_str::<ControlOptions>("{}").unwrap(), ControlOptions::default(), "a file from before the option existed");
         assert!(serde_json::from_str::<ControlOptions>("{\"flight_mode\": \"nope\"}").is_err(), "load_control_options turns that into the default");
+    }
+
+    // ---- controller bindings -------------------------------------------------
+
+    fn pad_with(buttons: &[PadButton]) -> PadState {
+        let mut p = PadState::default();
+        for b in buttons {
+            p.pressed.insert(*b);
+            p.just_pressed.insert(*b);
+        }
+        p
+    }
+
+    #[test]
+    fn the_default_controller_layout_has_no_clashes_and_covers_the_essentials() {
+        let b = Bindings::default();
+        assert!(b.pad_conflicting().is_empty(), "{:?}", b.pad_conflicting());
+        for (a, button) in [(Action::Jump, PadButton::South), (Action::Attack, PadButton::RightTrigger), (Action::UseItem, PadButton::LeftTrigger), (Action::Pause, PadButton::Start), (Action::Inventory, PadButton::North)] {
+            assert_eq!(b.pad_get(a), Some(button), "{}", a.id());
+        }
+        // The sticks move and look; those four actions have no default button.
+        for a in [Action::Forward, Action::Back, Action::Left, Action::Right] {
+            assert_eq!(b.pad_get(a), None);
+        }
+    }
+
+    #[test]
+    fn a_controller_binding_is_independent_of_the_keyboard_one() {
+        let mut b = Bindings::default();
+        b.pad_set(Action::Jump, Some(PadButton::East));
+        assert_eq!(b.pad_get(Action::Jump), Some(PadButton::East));
+        assert_eq!(b.get(Action::Jump), Chord::parse("Space"), "the keyboard binding did not move");
+        assert!(!b.pad_is_default(Action::Jump) && b.is_default(Action::Jump));
+        b.pad_reset(Action::Jump);
+        assert!(b.pad_is_default(Action::Jump));
+        b.set(Action::Jump, None);
+        assert_eq!(b.pad_get(Action::Jump), Some(PadButton::South), "unbinding the key leaves the button");
+    }
+
+    #[test]
+    fn two_controls_on_one_button_are_a_controller_conflict_only() {
+        let mut b = Bindings::default();
+        b.pad_set(Action::Sneak, Some(PadButton::South)); // Jump's button
+        let clash = b.pad_conflicting();
+        assert!(clash.contains("jump") && clash.contains("sneak"));
+        assert!(b.conflicting().is_empty(), "the keyboard side is untouched");
+        assert_eq!(b.conflicts_on(Device::Controller, Action::Jump), vec!["sneak".to_string()]);
+        assert!(b.conflicts_on(Device::Keyboard, Action::Jump).is_empty());
+    }
+
+    #[test]
+    fn controller_changes_save_with_a_prefix_and_load_back_without_touching_the_keyboard() {
+        let mut b = Bindings::default();
+        b.pad_set(Action::Jump, Some(PadButton::East));
+        b.pad_set(Action::Attack, None);
+        b.set(Action::Chat, Chord::parse("Ctrl+C"));
+        let saved = b.overrides();
+        assert_eq!(saved["@pad:jump"], "east");
+        assert_eq!(saved["@pad:attack"], "none");
+        assert_eq!(saved["chat"], "Ctrl+C");
+        assert_eq!(saved.len(), 3, "defaults are not saved");
+        assert_eq!(Bindings::from_overrides(&saved), b);
+        // An unreadable button is ignored rather than breaking the load.
+        let mut junk = saved.clone();
+        junk.insert("@pad:jump".into(), "nope".into());
+        assert_eq!(Bindings::from_overrides(&junk).pad_get(Action::Jump), Some(PadButton::South));
+    }
+
+    #[test]
+    fn a_saved_button_for_a_control_that_isnt_there_waits_for_it() {
+        let mut saved = BTreeMap::new();
+        saved.insert("@pad:mymod:zap".to_string(), "west".to_string());
+        let mut b = Bindings::from_overrides(&saved);
+        assert_eq!(b.overrides().get("@pad:mymod:zap").map(String::as_str), Some("west"), "parked, so saving doesn't lose it");
+        assert!(b.register(ControlDef::new("mymod:zap", "Zap", "My Mod").with_default_pad(PadButton::North)));
+        assert_eq!(b.pad_get("mymod:zap"), Some(PadButton::West), "the player's choice beats the mod's default");
+        // Removing the mod again parks the change instead of dropping it.
+        b.set_mod_controls(Vec::new());
+        // (the control wasn't from a mod source, so it stays; emulate a mod one)
+        let mut with_source = ControlDef::new("m:q", "Q", "M").with_default_pad(PadButton::North);
+        with_source.source = Some(ControlSource { mod_id: "m".into(), mod_name: "M".into(), path: ".".into() });
+        assert!(b.register(with_source));
+        b.pad_set("m:q", Some(PadButton::East));
+        b.set_mod_controls(Vec::new());
+        assert_eq!(b.overrides().get("@pad:m:q").map(String::as_str), Some("east"));
+    }
+
+    #[test]
+    fn reset_all_is_per_device_and_both_together() {
+        let mut b = Bindings::default();
+        b.set(Action::Jump, Chord::parse("J"));
+        b.pad_set(Action::Jump, Some(PadButton::East));
+        let mut only_pads = b.clone();
+        only_pads.reset_all_pads();
+        assert!(only_pads.pad_is_default(Action::Jump) && !only_pads.is_default(Action::Jump));
+        let mut only_keys = b.clone();
+        only_keys.reset_all_keyboard();
+        assert!(only_keys.is_default(Action::Jump) && !only_keys.pad_is_default(Action::Jump));
+        b.reset_all();
+        assert_eq!(b, Bindings::default());
+    }
+
+    #[test]
+    fn buttons_and_the_left_stick_become_the_fixed_movement_keys() {
+        let b = Bindings::default();
+        let (keys, mouse) = input(&[], &[]);
+        let mut pad = pad_with(&[PadButton::South]);
+        let out = b.movement_input_with_pad(&keys, &mouse, &pad);
+        assert!(out.pressed(KeyCode::Space), "A jumps");
+        pad.left = Vec2::new(0.0, 1.0);
+        let out = b.movement_input_with_pad(&keys, &mouse, &pad);
+        assert!(out.pressed(KeyCode::KeyW) && !out.pressed(KeyCode::KeyS), "stick up walks forward");
+        pad.left = Vec2::new(-0.9, -0.9);
+        let out = b.movement_input_with_pad(&keys, &mouse, &pad);
+        assert!(out.pressed(KeyCode::KeyS) && out.pressed(KeyCode::KeyA));
+        // Rebinding Jump to another button moves it.
+        let mut b = b;
+        b.pad_set(Action::Jump, Some(PadButton::West));
+        assert!(!b.movement_input_with_pad(&keys, &mouse, &pad_with(&[PadButton::South])).pressed(KeyCode::Space));
+        assert!(b.movement_input_with_pad(&keys, &mouse, &pad_with(&[PadButton::West])).pressed(KeyCode::Space));
+    }
+
+    #[test]
+    fn capturing_a_button_waits_a_frame_takes_the_first_press_and_escape_cancels() {
+        let keys = ButtonInput::<KeyCode>::default();
+        let mut c = Capture::default();
+        c.start_pad("jump");
+        assert!(c.pad && c.active());
+        // The click on "Rebind" is a frame old: a button held through it must not bind.
+        assert_eq!(c.step_pad(&keys, &pad_with(&[PadButton::East])), None, "warm-up frame");
+        assert_eq!(c.step_pad(&keys, &PadState::default()), None, "still waiting");
+        assert_eq!(c.step_pad(&keys, &pad_with(&[PadButton::East])), Some(PadCaptureEvent::Chosen(PadButton::East)));
+        assert!(!c.active() && !c.pad, "done");
+        c.start_pad("jump");
+        c.step_pad(&keys, &PadState::default());
+        let mut esc = ButtonInput::<KeyCode>::default();
+        esc.press(KeyCode::Escape);
+        assert_eq!(c.step_pad(&esc, &PadState::default()), Some(PadCaptureEvent::Cancelled));
+        // The keyboard capture is a different mode and clears the flag.
+        c.start("jump");
+        assert!(!c.pad);
+    }
+
+    #[test]
+    fn controller_search_finds_by_button_and_by_state() {
+        let mut b = Bindings::default();
+        assert_eq!(search_on(&b, "btn:a", Device::Controller), vec!["jump".to_string()]);
+        assert_eq!(search_on(&b, "key:south", Device::Controller), vec!["jump".to_string()], "key: works too");
+        assert!(search_on(&b, "btn:dpad", Device::Controller).contains(&"drop_item".to_string()), "a prefix finds the D-pad");
+        assert!(search_on(&b, "is:conflict", Device::Controller).is_empty());
+        b.pad_set(Action::Sneak, Some(PadButton::South));
+        let mut clash = search_on(&b, "is:conflict", Device::Controller);
+        clash.sort();
+        assert_eq!(clash, vec!["jump".to_string(), "sneak".to_string()]);
+        assert!(search_on(&b, "is:unbound", Device::Controller).contains(&"forward".to_string()));
+        assert!(search_on(&b, "is:changed", Device::Controller).contains(&"sneak".to_string()));
+        assert_eq!(search_on(&b, "hotbar prev", Device::Controller), vec!["hotbar_prev".to_string()], "plain words work on both devices");
+        assert!(search(&b, "btn:a").is_empty(), "the keyboard search doesn't know btn:");
+    }
+
+    /// `Actions` is what the game systems actually ask; it must see the controller too.
+    #[test]
+    fn actions_answer_for_the_controller_as_well_as_the_keyboard() {
+        #[derive(Resource, Default)]
+        struct Seen {
+            jump_held: bool,
+            jump_started: bool,
+            fwd: bool,
+        }
+        fn probe(act: Actions, mut seen: ResMut<Seen>) {
+            seen.jump_held = act.pressed(Action::Jump);
+            seen.jump_started = act.just_pressed(Action::Jump);
+            seen.fwd = act.movement_input().pressed(KeyCode::KeyW);
+        }
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>().init_resource::<Seen>().add_systems(Update, probe);
+        app.update();
+        assert!(!app.world().resource::<Seen>().jump_held);
+        // No PadState resource at all behaves as "nothing pressed" (headless apps).
+        app.insert_resource(pad_with(&[PadButton::South]));
+        app.update();
+        let seen = app.world().resource::<Seen>();
+        assert!(seen.jump_held && seen.jump_started, "A is Jump's default button");
+        let mut p = PadState::default();
+        p.left = Vec2::new(0.0, 1.0);
+        app.insert_resource(p);
+        app.update();
+        assert!(app.world().resource::<Seen>().fwd, "left stick up is forward");
+        assert!(!app.world().resource::<Seen>().jump_held);
     }
 }

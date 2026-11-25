@@ -13,6 +13,7 @@ pub mod content;
 pub mod crafting;
 pub mod damage;
 pub mod drainage;
+pub mod gamepad;
 pub mod gui_skin;
 pub mod health;
 pub mod icons;

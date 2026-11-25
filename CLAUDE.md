@@ -3302,3 +3302,42 @@ etc.) instead of inventing a new approach:
   Settings type into text boxes, where Space/arrows/Enter mean something else - extend there only
   with that in mind. Keys are fixed, not `Action`s: menus must work before the controls screen
   is ever opened. Not done: scrolling a long list to keep the highlighted button in view.
+
+- **Controllers are a second binding per control, not a third kind of key.** `Bindings` keeps
+  `pads: id -> Option<PadButton>` beside `chords`, `ControlDef::default_pad` beside `default`, and
+  every keyboard method has a `pad_*` twin (`pad_get/set/reset/is_default/conflicts_with`).
+  The Keybinds screen's `Device` switch (`SettingsView::device`) picks which set it shows and edits;
+  `conflicting_on(device)` etc. are the device-parametrised forms, and the Controls tab/section label
+  counts clashes on *either* device. Things worth keeping:
+  - **Saved in the same file under an `@pad:<id>` key.** `@` can't be in a control id (ids are letters,
+    digits, `_`, `-` and one `:`), so it can't collide with a keyboard entry or a mod whose id happens
+    to be `pad`. An older build treats those entries as unknown ids and *parks* them (that's the
+    existing rule), so a downgrade-and-back loses nothing. `@pad:` entries for controls that aren't
+    registered are parked and re-applied on `register`, and `set_mod_controls` parks a leaving mod's
+    button - the same shelf discipline as keys. `reset_all_keyboard`/`reset_all_pads` are the
+    per-device resets the screen uses; `reset_all` does both.
+  - **`gamepad.rs` owns `PadButton` (the game's own list, with stable ids and friendly labels) and
+    `PadState`.** `read_pads` (PreUpdate) merges every `Gamepad` entity into one resource, so two pads act
+    as one and tests just fill the resource. A test that goes through `read_pads` has to *spawn a
+    `Gamepad`* (`digital_mut().press(..)`): inserting a `PadState` by hand is overwritten by the
+    system the next PreUpdate.
+  - **`Actions` asks both devices** (`pressed`/`just_pressed` = key chord OR pad button), and
+    `movement_input` adds the pad buttons plus the left stick held past `MOVE_THRESHOLD` as W/A/S/D, so
+    `Player::step` still reads only fixed keys. Stick movement is therefore digital (full speed) -
+    analog walking speed would need a change inside `Player::step`; deliberately not done.
+  - **The right stick turns the camera in `mouse_look`**, gated on the cursor being captured exactly
+    like the mouse (so it can't spin the view behind the pause menu), scaled by `delta_secs`, with
+    `apply_deadzone` rescaling so look speed ramps from nothing.
+  - **Menu navigation reuses `menu_nav`**: the D-pad is a fresh-press direction, the left stick a
+    *flick* (`MenuFocus::stick` remembers last frame's direction so holding doesn't repeat), A presses.
+    Pause is just `Action::Pause`'s default button (Start).
+  - **Two controls were added because the wheel isn't a chord:** `hotbar_prev`/`hotbar_next` (no
+    keyboard default, bumpers on a pad). Four existing search tests counted "everything bound" and had
+    to learn that two controls are intentionally key-unbound.
+  - **`bevy_gilrs` is now on, which needs `libudev-dev` to build on Linux**; `release.yml` and
+    `dev-build.yml` install it (the launcher doesn't use Bevy, so its workflow doesn't).
+  - **Not done:** the inventory/crafting/knapping screens are mouse-only (needs a virtual cursor or
+    slot-grid focus), analog stick speed, adjustable sensitivity/dead zone, a "which controller" choice,
+    and showing button glyphs instead of names. The layout is verified from a screenshot; actual
+    hardware input is not (no controller here) - the logic is tested through `PadState`/`Gamepad`
+    entities, not through `bevy_gilrs`.

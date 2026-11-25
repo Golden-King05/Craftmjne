@@ -244,10 +244,19 @@ fn select_slot(
             hotbar.selected = i;
         }
     }
+    let mut step = 0;
     let scroll: f32 = wheel.read().map(|e| e.y).sum();
     if scroll != 0.0 {
+        step = if scroll < 0.0 { 1 } else { -1 };
+    }
+    // Controller bumpers (or any keys bound to these) step the same way.
+    if act.just_pressed(Action::HotbarNext) {
+        step = 1;
+    } else if act.just_pressed(Action::HotbarPrev) {
+        step = -1;
+    }
+    if step != 0 {
         let n = hotbar.slots.len() as i32;
-        let step = if scroll < 0.0 { 1 } else { -1 };
         hotbar.selected = ((hotbar.selected as i32 + step).rem_euclid(n)) as usize;
     }
 }

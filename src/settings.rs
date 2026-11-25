@@ -23,7 +23,8 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use crate::config::WorldSettings;
-use crate::keybinds::{search, Bindings, Capture, CaptureEvent, ControlOptions, FlightMode};
+use crate::gamepad::PadState;
+use crate::keybinds::{search_on, Bindings, Capture, CaptureEvent, ControlOptions, Device, FlightMode, PadCaptureEvent};
 use crate::mod_controls::ControlNotes;
 use crate::gui_skin::{Element, Skinned};
 use crate::menu::{despawn_all, MenuButton};
@@ -75,13 +76,15 @@ pub struct SettingsView {
     /// Which part of the Controls section is open.
     pub controls_tab: ControlsTab,
     pub search: String,
+    /// Whether the Keybinds tab shows the keyboard/mouse bindings or the controller's.
+    pub device: Device,
     /// The keybind list's scroll offset, kept so rebuilding doesn't jump it to the top.
     pub scroll: f32,
 }
 
 impl Default for SettingsView {
     fn default() -> Self {
-        Self { section: Section::Player, controls_tab: ControlsTab::Keybinds, search: String::new(), scroll: 0.0 }
+        Self { section: Section::Player, controls_tab: ControlsTab::Keybinds, search: String::new(), device: Device::Keyboard, scroll: 0.0 }
     }
 }
 
@@ -96,6 +99,7 @@ struct KeybindList;
 enum SettingsButton {
     Section(Section),
     ControlsTab(ControlsTab),
+    SetDevice(Device),
     SetFlightMode(FlightMode),
     RenderDistanceDelta(i32),
     ToggleDefaultModStorage,
@@ -120,7 +124,11 @@ pub(crate) fn mod_storage_label(storage: ModStorage) -> String {
 /// The search results grouped by category, in the screen's order (the game's own
 /// headings first, then each mod's), leaving out headings with nothing under them.
 pub(crate) fn keybind_rows(bindings: &Bindings, query: &str) -> Vec<(String, Vec<String>)> {
-    let found = search(bindings, query);
+    keybind_rows_on(bindings, query, Device::Keyboard)
+}
+
+pub(crate) fn keybind_rows_on(bindings: &Bindings, query: &str, device: Device) -> Vec<(String, Vec<String>)> {
+    let found = search_on(bindings, query, device);
     bindings
         .categories()
         .into_iter()
@@ -133,7 +141,11 @@ pub(crate) fn keybind_rows(bindings: &Bindings, query: &str) -> Vec<(String, Vec
 
 /// "Also used by: Open chat, Open inventory", or `None` if this control's chord is its own.
 pub(crate) fn also_used_by(bindings: &Bindings, id: &str) -> Option<String> {
-    let others = bindings.conflicts_with(id);
+    also_used_by_on(bindings, id, Device::Keyboard)
+}
+
+pub(crate) fn also_used_by_on(bindings: &Bindings, id: &str, device: Device) -> Option<String> {
+    let others = bindings.conflicts_on(device, id);
     (!others.is_empty()).then(|| {
         let names: Vec<&str> = others.iter().map(|o| bindings.def(o).map(|d| d.label.as_str()).unwrap_or(o.as_str())).collect();
         format!("Also used by: {}", names.join(", "))
@@ -142,13 +154,25 @@ pub(crate) fn also_used_by(bindings: &Bindings, id: &str) -> Option<String> {
 
 /// How many controls are in a conflict, as a sentence, or `None` when none are.
 pub(crate) fn conflict_summary(bindings: &Bindings) -> Option<String> {
-    let n = bindings.conflicting().len();
-    (n > 0).then(|| format!("{n} controls share a key with another (shown in red)."))
+    conflict_summary_on(bindings, Device::Keyboard)
+}
+
+pub(crate) fn conflict_summary_on(bindings: &Bindings, device: Device) -> Option<String> {
+    let n = bindings.conflicting_on(device).len();
+    (n > 0).then(|| match device {
+        Device::Keyboard => format!("{n} controls share a key with another (shown in red)."),
+        Device::Controller => format!("{n} controls share a button with another (shown in red)."),
+    })
+}
+
+/// How many controls clash on either device (the tab and section labels count both).
+pub(crate) fn conflicts_anywhere(bindings: &Bindings) -> usize {
+    bindings.conflicting().union(&bindings.pad_conflicting()).count()
 }
 
 /// The label on a section tab: Controls says how many controls clash.
 pub(crate) fn tab_label(section: Section, bindings: &Bindings) -> String {
-    let n = bindings.conflicting().len();
+    let n = conflicts_anywhere(bindings);
     if section == Section::Controls && n > 0 {
         format!("Controls ({n} in conflict)")
     } else {
@@ -196,11 +220,17 @@ fn rebuild_settings(
     options: Res<ControlOptions>,
     world_settings: Res<WorldSettings>,
     store: Res<SaveStore>,
+    pad: Option<Res<PadState>>,
+    mut pad_was_connected: Local<bool>,
     content: Query<(Entity, Option<&Children>), With<SettingsContent>>,
 ) {
     let Ok((root, children)) = content.single() else { return };
     let empty = children.is_none_or(|c| c.is_empty());
-    if !(empty || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || world_settings.is_changed()) {
+    // Plugging a controller in or out changes a line of text; nothing else about it matters here.
+    let pad_state = pad.as_deref().cloned().unwrap_or_default();
+    let pad_changed = *pad_was_connected != pad_state.connected;
+    *pad_was_connected = pad_state.connected;
+    if !(empty || pad_changed || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || world_settings.is_changed()) {
         return;
     }
     commands.entity(root).despawn_related::<Children>();
@@ -262,20 +292,20 @@ fn rebuild_settings(
                 sbutton(body, &mod_storage_label(storage), SettingsButton::ToggleDefaultModStorage, ButtonStyle::Normal, 440.0, 44.0, 16.0, false, theme::TEXT, None);
                 dim(body, "Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't.", 13.0);
             }
-            Section::Controls => spawn_controls(body, &view, &bindings, &capture, &notes, &options),
+            Section::Controls => spawn_controls(body, &view, &bindings, &capture, &notes, &options, &pad_state),
         });
     });
 }
 
-fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes, options: &ControlOptions) {
+fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes, options: &ControlOptions, pad: &PadState) {
     body.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
         for (tab, label) in [(ControlsTab::Keybinds, "Keybinds"), (ControlsTab::Options, "Options")] {
-            let clash = tab == ControlsTab::Keybinds && !bindings.conflicting().is_empty();
+            let clash = tab == ControlsTab::Keybinds && conflicts_anywhere(bindings) > 0;
             sbutton(row, label, SettingsButton::ControlsTab(tab), ButtonStyle::Choice, 130.0, 32.0, 15.0, tab == view.controls_tab, if clash { RED } else { theme::TEXT }, clash.then_some(RED));
         }
     });
     match view.controls_tab {
-        ControlsTab::Keybinds => spawn_keybinds(body, view, bindings, capture, notes),
+        ControlsTab::Keybinds => spawn_keybinds(body, view, bindings, capture, notes, pad),
         ControlsTab::Options => {
             body.spawn((Text::new("Flight (Creative mode)"), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }));
             body.spawn(Node { column_gap: Val::Px(10.0), ..default() }).with_children(|row| {
@@ -288,7 +318,15 @@ fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
     }
 }
 
-fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes) {
+fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes, pad: &PadState) {
+    let device = view.device;
+    // Which device these bindings are for.
+    body.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
+        for d in Device::ALL {
+            let clash = !bindings.conflicting_on(d).is_empty();
+            sbutton(row, d.label(), SettingsButton::SetDevice(d), ButtonStyle::Choice, 190.0, 30.0, 14.0, d == device, if clash { RED } else { theme::TEXT }, clash.then_some(RED));
+        }
+    });
     // Search box + clear + reset all.
     body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), width: Val::Percent(100.0), ..default() }).with_children(|row| {
         row.spawn((
@@ -305,7 +343,7 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
             let (text, color) = if view.search.is_empty() && capture.active() {
                 ("Search".to_string(), TEXT_DIM)
             } else if view.search.is_empty() {
-                ("Search...  (try key:a)_".to_string(), TEXT_DIM)
+                (format!("Search...  (try {}:a)_", if device == Device::Keyboard { "key" } else { "btn" }), TEXT_DIM)
             } else if capture.active() {
                 (view.search.clone(), theme::TEXT)
             } else {
@@ -316,25 +354,39 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
         if !view.search.is_empty() {
             sbutton(row, "Clear", SettingsButton::ClearSearch, ButtonStyle::Normal, 72.0, 36.0, 14.0, false, theme::TEXT, None);
         }
-        sbutton(row, "Reset all", SettingsButton::ResetAll, ButtonStyle::Normal, 112.0, 36.0, 14.0, false, theme::TEXT, None);
+        sbutton(row, if device == Device::Keyboard { "Reset all" } else { "Reset all" }, SettingsButton::ResetAll, ButtonStyle::Normal, 112.0, 36.0, 14.0, false, theme::TEXT, None);
     });
-    dim(body, "key:a = what uses A  -  key:ctrl+left = combos  -  is:conflict, is:unbound, is:changed", 12.0);
+    match device {
+        Device::Keyboard => dim(body, "key:a = what uses A  -  key:ctrl+left = combos  -  is:conflict, is:unbound, is:changed", 12.0),
+        Device::Controller => dim(
+            body,
+            if pad.connected {
+                "btn:a = what uses A  -  btn:dpad  -  is:conflict, is:unbound, is:changed  -  the left stick moves and the right looks"
+            } else {
+                "No controller detected - plug one in to try it. You can still set buttons now.  -  btn:a, is:conflict"
+            },
+            12.0,
+        ),
+    }
 
-    if let Some(summary) = conflict_summary(bindings) {
+    if let Some(summary) = conflict_summary_on(bindings, device) {
         body.spawn((Text::new(summary), TextFont { font_size: 14.0, ..default() }, TextColor(RED)));
     }
     if let Some(id) = &capture.target {
         let label = bindings.def(id).map(|d| d.label.as_str()).unwrap_or(id.as_str());
         body.spawn((
-            Text::new(format!("Binding \"{label}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels.")),
+            Text::new(match device {
+                Device::Keyboard => format!("Binding \"{label}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels."),
+                Device::Controller => format!("Binding \"{label}\": press a controller button. Esc on the keyboard cancels."),
+            }),
             TextFont { font_size: 14.0, ..default() },
             TextColor(YELLOW),
             Node { max_width: Val::Px(700.0), ..default() },
         ));
     }
 
-    let rows = keybind_rows(bindings, &view.search);
-    let conflicting = bindings.conflicting();
+    let rows = keybind_rows_on(bindings, &view.search, device);
+    let conflicting = bindings.conflicting_on(device);
     body.spawn((
         KeybindList,
         ScrollPosition { offset_x: 0.0, offset_y: view.scroll },
@@ -367,20 +419,26 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
                     entry.spawn(Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
                         row.spawn((Text::new(def.label.clone()), TextFont { font_size: 16.0, ..default() }, TextColor(if clash { RED } else { theme::TEXT })));
                         row.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).with_children(|buttons| {
-                            let (text, color) = match (listening, bindings.get(&id)) {
-                                (true, _) => ("Press a key...".to_string(), YELLOW),
-                                (false, Some(chord)) => (chord.display(), if clash { RED } else { theme::TEXT }),
+                            let shown = match device {
+                                Device::Keyboard => bindings.get(&id).map(|c| c.display()),
+                                Device::Controller => bindings.pad_get(&id).map(|b| b.label().to_string()),
+                            };
+                            let (text, color) = match (listening, shown) {
+                                (true, _) => (if device == Device::Keyboard { "Press a key..." } else { "Press a button..." }.to_string(), YELLOW),
+                                (false, Some(shown)) => (shown, if clash { RED } else { theme::TEXT }),
                                 (false, None) => ("Unbound".to_string(), TEXT_DIM),
                             };
                             let accent = if listening { Some(YELLOW) } else if clash { Some(RED) } else { None };
                             sbutton(buttons, &text, SettingsButton::Rebind(id.clone()), ButtonStyle::Key, 200.0, 32.0, 15.0, false, color, accent);
-                            let changed = if bindings.is_default(&id) { TEXT_DIM } else { theme::TEXT };
+                            let is_default = if device == Device::Keyboard { bindings.is_default(&id) } else { bindings.pad_is_default(&id) };
+                            let changed = if is_default { TEXT_DIM } else { theme::TEXT };
                             sbutton(buttons, "Reset", SettingsButton::Reset(id.clone()), ButtonStyle::Normal, 62.0, 32.0, 13.0, false, changed, None);
-                            let bound = if bindings.get(&id).is_some() { theme::TEXT } else { TEXT_DIM };
+                            let is_bound = if device == Device::Keyboard { bindings.get(&id).is_some() } else { bindings.pad_get(&id).is_some() };
+                            let bound = if is_bound { theme::TEXT } else { TEXT_DIM };
                             sbutton(buttons, "Unbind", SettingsButton::Unbind(id.clone()), ButtonStyle::Normal, 72.0, 32.0, 13.0, false, bound, None);
                         });
                     });
-                    if let Some(note) = also_used_by(bindings, &id) {
+                    if let Some(note) = also_used_by_on(bindings, &id, device) {
                         entry.spawn((Text::new(note), TextFont { font_size: 12.0, ..default() }, TextColor(RED)));
                     }
                     if let Some(command) = &def.command {
@@ -451,6 +509,10 @@ fn handle_settings_buttons(
                 view.controls_tab = tab;
                 view.scroll = 0.0;
             }
+            SettingsButton::SetDevice(device) => {
+                view.device = device;
+                view.scroll = 0.0;
+            }
             SettingsButton::SetFlightMode(mode) => {
                 options.flight_mode = mode;
                 let _ = store.save_control_options(&options);
@@ -468,17 +530,29 @@ fn handle_settings_buttons(
                 let _ = store.save_graphics_settings(&saved);
                 view.set_changed();
             }
-            SettingsButton::Rebind(id) => capture.start(id),
+            SettingsButton::Rebind(id) => match view.device {
+                Device::Keyboard => capture.start(id),
+                Device::Controller => capture.start_pad(id),
+            },
             SettingsButton::Unbind(id) => {
-                bindings.set(id, None);
+                match view.device {
+                    Device::Keyboard => bindings.set(id, None),
+                    Device::Controller => bindings.pad_set(id, None),
+                }
                 save_bindings(&store, &bindings);
             }
             SettingsButton::Reset(id) => {
-                bindings.reset(id);
+                match view.device {
+                    Device::Keyboard => bindings.reset(id),
+                    Device::Controller => bindings.pad_reset(id),
+                }
                 save_bindings(&store, &bindings);
             }
             SettingsButton::ResetAll => {
-                bindings.reset_all();
+                match view.device {
+                    Device::Keyboard => bindings.reset_all_keyboard(),
+                    Device::Controller => bindings.reset_all_pads(),
+                }
                 save_bindings(&store, &bindings);
             }
             SettingsButton::ClearSearch => {
@@ -496,8 +570,22 @@ fn capture_binding(
     mut capture: ResMut<Capture>,
     mut bindings: ResMut<Bindings>,
     store: Res<SaveStore>,
+    pad: Option<Res<PadState>>,
 ) {
     let Some(target) = capture.target.clone() else { return };
+    if capture.pad {
+        let state = pad.as_deref().cloned().unwrap_or_default();
+        match capture.bypass_change_detection().step_pad(&keys, &state) {
+            Some(PadCaptureEvent::Chosen(button)) => {
+                bindings.pad_set(target, Some(button));
+                save_bindings(&store, &bindings);
+                capture.set_changed();
+            }
+            Some(PadCaptureEvent::Cancelled) => capture.set_changed(),
+            None => {}
+        }
+        return;
+    }
     // Stepping every frame is not a change worth redrawing the screen for;
     // only an outcome is.
     let event = capture.bypass_change_detection().step(&keys, &mouse);
@@ -797,7 +885,7 @@ mod tests {
         s.click(SettingsButton::ClearSearch);
         assert_eq!(s.rebind_buttons().len(), Action::ALL.len());
         s.type_text("hotbar");
-        assert_eq!(s.rebind_buttons().len(), 9);
+        assert_eq!(s.rebind_buttons().len(), 11, "nine slots plus previous/next");
         s.type_text("zzz");
         assert!(s.rebind_buttons().is_empty());
         assert!(s.texts().iter().any(|t| t == "No controls match."));
@@ -980,5 +1068,47 @@ mod tests {
     fn mod_storage_has_a_label_for_each_choice() {
         assert!(mod_storage_label(ModStorage::Instance).contains("game folder"));
         assert!(mod_storage_label(ModStorage::World).contains("in the world"));
+    }
+
+    #[test]
+    fn the_device_switch_shows_controller_buttons_and_rebinds_them_separately() {
+        use crate::gamepad::PadButton;
+        let mut s = screen();
+        s.click(SettingsButton::Section(Section::Controls));
+        assert!(s.texts().iter().any(|t| t == "Space"), "starts on the keyboard");
+        s.click(SettingsButton::SetDevice(Device::Controller));
+        let texts = s.texts();
+        assert!(texts.iter().any(|t| t == "A (Cross)"), "Jump shows its controller button: {texts:?}");
+        assert!(!texts.iter().any(|t| t == "Space"), "and not its key");
+
+        s.click(SettingsButton::Rebind(id(Action::Jump)));
+        assert!(s.app.world().resource::<Capture>().pad, "waiting for a button, not a key");
+        assert!(s.texts().iter().any(|t| t == "Press a button..."));
+        // A real controller entity, so the path through `read_pads` is exercised too.
+        let mut gamepad = Gamepad::default();
+        gamepad.digital_mut().press(GamepadButton::West);
+        s.app.world_mut().spawn(gamepad);
+        s.app.update();
+        assert_eq!(s.bindings().pad_get(Action::Jump), Some(PadButton::West));
+        assert_eq!(s.bindings().get(Action::Jump), crate::keybinds::Chord::parse("Space"), "the key is untouched");
+        assert_eq!(s.app.world().resource::<SaveStore>().load_keybinds()["@pad:jump"], "west", "saved");
+        assert!(s.texts().iter().any(|t| t == "X (Square)"));
+
+        s.click(SettingsButton::Unbind(id(Action::Jump)));
+        assert_eq!(s.bindings().pad_get(Action::Jump), None);
+        s.click(SettingsButton::Reset(id(Action::Jump)));
+        assert_eq!(s.bindings().pad_get(Action::Jump), Some(PadButton::South));
+    }
+
+    #[test]
+    fn a_controller_clash_is_flagged_on_the_controller_tab_and_the_section_label() {
+        use crate::gamepad::PadButton;
+        let mut s = screen();
+        s.app.world_mut().resource_mut::<Bindings>().pad_set(Action::Sneak, Some(PadButton::South));
+        s.click(SettingsButton::Section(Section::Controls));
+        assert!(s.texts().iter().any(|t| t.starts_with("Controls (2 in conflict)")), "counted even while looking at the keyboard");
+        s.click(SettingsButton::SetDevice(Device::Controller));
+        assert!(s.texts().iter().any(|t| t.contains("share a button")));
+        assert!(s.texts().iter().any(|t| t.starts_with("Also used by")));
     }
 }

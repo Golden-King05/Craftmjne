@@ -243,6 +243,10 @@ fn ui_shot(
                 "settings-sound" => view.section = Section::Sound,
                 "settings-mods" => view.section = Section::Mods,
                 "settings-controls" => view.section = Section::Controls,
+                "settings-controller" => {
+                    view.section = Section::Controls;
+                    view.device = craftmjne::keybinds::Device::Controller;
+                }
                 "settings-options" => {
                     view.section = Section::Controls;
                     view.controls_tab = ControlsTab::Options;

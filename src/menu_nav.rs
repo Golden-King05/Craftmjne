@@ -4,7 +4,8 @@
 //! The highlight is [`MenuFocus`]; `ui_theme` draws a focused button with its hover
 //! texture, so it looks exactly like the mouse is on it. Pressing is done by setting the
 //! button's `Interaction` to `Pressed` for one frame, which is what every screen's own
-//! click handler already reacts to - no screen needed any change. Moving the mouse onto a
+//! click handler already reacts to - no screen needed any change. A controller does the
+//! same: D-pad or a flick of the left stick moves, A (south) presses. Moving the mouse onto a
 //! button drops the keyboard highlight so the two never disagree.
 //!
 //! It runs only where it can't fight something else for the keys: the main menu, the mods
@@ -16,6 +17,7 @@
 use bevy::prelude::*;
 use bevy::ui::UiSystem;
 
+use crate::gamepad::{PadButton, PadState};
 use crate::menu::WorldsScreenMode;
 use crate::state::{AppState, PauseState};
 use crate::ui_theme::ThemedButton;
@@ -26,6 +28,8 @@ pub struct MenuFocus {
     pub entity: Option<Entity>,
     /// A button this system pressed last frame; released at the start of the next.
     pressed: Option<Entity>,
+    /// The direction the left stick was held in last frame, so a held stick moves once.
+    stick: Option<Dir>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -89,6 +93,30 @@ pub fn navigate(spots: &[Spot], current: Option<usize>, dir: Dir) -> Option<usiz
     }
 }
 
+/// A direction from a fresh D-pad press.
+fn pad_direction(pad: &PadState) -> Option<Dir> {
+    for (b, d) in [(PadButton::DPadUp, Dir::Up), (PadButton::DPadDown, Dir::Down), (PadButton::DPadLeft, Dir::Left), (PadButton::DPadRight, Dir::Right)] {
+        if pad.started(b) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// The dominant direction of a stick pushed well off centre.
+pub fn stick_direction(v: Vec2) -> Option<Dir> {
+    if v.length() < 0.6 {
+        return None;
+    }
+    Some(if v.x.abs() > v.y.abs() {
+        if v.x > 0.0 { Dir::Right } else { Dir::Left }
+    } else if v.y > 0.0 {
+        Dir::Up
+    } else {
+        Dir::Down
+    })
+}
+
 /// Where keyboard navigation applies right now.
 fn nav_active(state: Option<Res<State<AppState>>>, mode: Option<Res<WorldsScreenMode>>, paused: Option<Res<PauseState>>) -> bool {
     let Some(state) = state else { return false };
@@ -102,6 +130,7 @@ fn nav_active(state: Option<Res<State<AppState>>>, mode: Option<Res<WorldsScreen
 
 fn menu_nav(
     keys: Option<Res<ButtonInput<KeyCode>>>,
+    pad: Option<Res<PadState>>,
     mut focus: ResMut<MenuFocus>,
     mut buttons: Query<(Entity, &GlobalTransform, &ComputedNode, Mut<Interaction>), With<ThemedButton>>,
 ) {
@@ -120,7 +149,13 @@ fn menu_nav(
     if focus.entity.is_some_and(|e| buttons.get(e).is_err()) {
         focus.entity = None;
     }
-    let Some(keys) = keys else { return };
+    let stick = pad.as_deref().and_then(|p| stick_direction(p.left));
+    let flick = if stick.is_some() && stick != focus.stick { stick } else { None };
+    focus.stick = stick;
+    let pad_dir = pad.as_deref().and_then(pad_direction).or(flick);
+    let pad_confirm = pad.as_deref().is_some_and(|p| p.started(PadButton::South));
+    let keys_default = ButtonInput::<KeyCode>::default();
+    let keys = keys.as_deref().unwrap_or(&keys_default);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let dir = if keys.just_pressed(KeyCode::ArrowDown) {
         Some(Dir::Down)
@@ -135,6 +170,7 @@ fn menu_nav(
     } else {
         None
     };
+    let dir = dir.or(pad_dir);
     if let Some(dir) = dir {
         let list: Vec<(Entity, Spot)> = buttons
             .iter()
@@ -146,7 +182,7 @@ fn menu_nav(
             focus.entity = Some(list[i].0);
         }
     }
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) || pad_confirm {
         if let Some(e) = focus.entity {
             if let Ok((.., mut i)) = buttons.get_mut(e) {
                 *i = Interaction::Pressed;
@@ -229,6 +265,15 @@ mod tests {
         assert_eq!(navigate(&layout(), Some(99), Dir::Down), Some(0));
     }
 
+    #[test]
+    fn the_stick_picks_its_dominant_direction_past_a_threshold() {
+        assert_eq!(stick_direction(Vec2::new(0.2, 0.3)), None);
+        assert_eq!(stick_direction(Vec2::new(0.0, 0.9)), Some(Dir::Up), "stick up is +y, like the left-stick movement");
+        assert_eq!(stick_direction(Vec2::new(0.0, -0.9)), Some(Dir::Down));
+        assert_eq!(stick_direction(Vec2::new(-0.9, 0.3)), Some(Dir::Left));
+        assert_eq!(stick_direction(Vec2::new(0.7, -0.5)), Some(Dir::Right));
+    }
+
     /// The whole path through Bevy: keys move the highlight, Enter presses for one frame.
     #[test]
     fn keys_highlight_and_press_a_real_button() {
@@ -265,5 +310,51 @@ mod tests {
         *app.world_mut().get_mut::<Interaction>(a).unwrap() = Interaction::Hovered;
         app.update();
         assert_eq!(app.world().resource::<MenuFocus>().entity, None);
+    }
+
+    #[test]
+    fn the_dpad_and_a_button_drive_the_menu_like_the_keyboard() {
+        use crate::ui_theme::{ButtonStyle, ThemedButton};
+        let mut app = App::new();
+        app.init_resource::<MenuFocus>().init_resource::<PadState>().add_systems(Update, menu_nav);
+        let mk = |app: &mut App, y: f32| {
+            app.world_mut()
+                .spawn((
+                    Button,
+                    ThemedButton { style: ButtonStyle::Normal, selected: false, accent: None },
+                    GlobalTransform::from_xyz(100.0, y, 0.0),
+                    ComputedNode { size: Vec2::new(100.0, 40.0), ..default() },
+                ))
+                .id()
+        };
+        let (a, b) = (mk(&mut app, 100.0), mk(&mut app, 160.0));
+        let tap = |app: &mut App, button: PadButton| {
+            let mut p = PadState::default();
+            p.just_pressed.insert(button);
+            p.pressed.insert(button);
+            *app.world_mut().resource_mut::<PadState>() = p;
+            app.update();
+            *app.world_mut().resource_mut::<PadState>() = PadState::default();
+        };
+        tap(&mut app, PadButton::DPadDown);
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(a));
+        tap(&mut app, PadButton::DPadDown);
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(b));
+        tap(&mut app, PadButton::South);
+        assert_eq!(*app.world().get::<Interaction>(b).unwrap(), Interaction::Pressed, "A presses it");
+        // A flick of the left stick moves once, however long it is held.
+        app.update();
+        let stick = |app: &mut App, v: Vec2| {
+            app.world_mut().resource_mut::<PadState>().left = v;
+            app.update();
+        };
+        stick(&mut app, Vec2::new(0.0, 0.9));
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(a), "stick up moved up");
+        stick(&mut app, Vec2::new(0.0, 0.9));
+        stick(&mut app, Vec2::new(0.0, 0.9));
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(a), "held, it doesn't keep going");
+        stick(&mut app, Vec2::ZERO);
+        stick(&mut app, Vec2::new(0.0, -0.9));
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(b), "a second flick moves again");
     }
 }

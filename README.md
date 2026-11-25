@@ -148,6 +148,31 @@ software Vulkan (`mesa-vulkan-drivers`, plus `libxkbcommon-x11-0`).
 Survival never flies in either mode, and taps typed into chat or an open inventory
 don't count. Like your keybinds, the choice is saved per launcher instance.
 
+### Controller support
+
+Plug in a controller (Xbox, PlayStation and most others) and it works in game and in the
+menus. **Each control has two bindings, one for the keyboard/mouse and one for a
+controller**, and the Keybinds screen has a **Keyboard & Mouse / Controller** switch to
+edit either. Both work at the same time, so you can switch between them mid-game.
+
+- **Left stick** moves, **right stick** looks (fixed; the buttons below are rebindable).
+- Defaults: **A** jump, **B** sneak, **L-stick click** sprint, **Right Trigger** attack /
+  break, **Left Trigger** place / use, **Y** inventory, **X** pick block, **D-pad Down**
+  drop, **Bumpers** previous / next hotbar slot, **Back** toggle flying, **Start** pause.
+- Menus: **D-pad** or a flick of the **left stick** moves the highlight, **A** presses.
+- Rebinding works like the keyboard: click **Rebind**, then press the button. Conflicts
+  show in red (per device, and the Controls tab is red if either has one). Search takes
+  `btn:a`, `btn:dpad`, `is:conflict`, `is:unbound`, `is:changed`.
+- Mods can give a control a controller default with `"default_pad": "south"` in their
+  `keybinds/*.json` (button names as shown on the screen, any case: `south`, `a`,
+  `right bumper`, `dpad up`, `none`).
+- Not done yet: the inventory and crafting screens are still mouse-driven (Y opens
+  them, but you can't move items with a controller), and stick sensitivity/dead zone
+  aren't adjustable.
+
+Building on Linux needs `libudev-dev` (the controller backend); the release and dev-build
+workflows install it.
+
 ### Rebinding controls
 
 **Settings → Controls → Keybinds** lists every control by category with the key it uses.

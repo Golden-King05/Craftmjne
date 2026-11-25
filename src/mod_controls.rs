@@ -44,6 +44,8 @@ struct ControlFile {
     name: Option<String>,
     category: Option<String>,
     default: Option<String>,
+    /// A controller button (`south`, `right bumper`, `none`).
+    default_pad: Option<String>,
     command: Option<String>,
 }
 
@@ -95,11 +97,23 @@ pub fn controls_of(info: &ModInfo) -> (Vec<ControlDef>, Vec<String>) {
                     }
                 },
             };
+            let default_pad = match entry.default_pad.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(text) if text.eq_ignore_ascii_case("none") => None,
+                Some(text) => match crate::gamepad::PadButton::parse(text) {
+                    Some(button) => Some(button),
+                    None => {
+                        notes.push(format!("{file}: \"{text}\" isn't a controller button I know, so {local} starts unbound on a controller"));
+                        None
+                    }
+                },
+            };
             defs.push(ControlDef {
                 id: format!("{}:{local}", info.id),
                 label: entry.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| local.to_string()),
                 category: entry.category.filter(|c| !c.trim().is_empty()).unwrap_or_else(|| info.name.clone()),
                 default,
+                default_pad,
                 command: entry.command.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
                 source: Some(ControlSource { mod_id: info.id.clone(), mod_name: info.name.clone(), path: info.path.clone() }),
             });

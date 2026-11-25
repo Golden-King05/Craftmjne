@@ -428,12 +428,23 @@ fn mouse_look(
     mut motion: EventReader<MouseMotion>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut players: Query<&mut Player>,
+    pad: Option<Res<crate::gamepad::PadState>>,
+    time: Res<Time>,
 ) {
     let grabbed = windows
         .single()
         .map(|w| w.cursor_options.grab_mode != CursorGrabMode::None)
         .unwrap_or(false);
     let Ok(mut player) = players.single_mut() else { return };
+    // The right stick turns the view (same rule as the mouse: only while the cursor is captured,
+    // so it doesn't spin the camera behind the pause menu or the inventory).
+    if grabbed {
+        if let Some(pad) = pad {
+            let (dyaw, dpitch) = crate::gamepad::look_delta(pad.right, time.delta_secs());
+            player.yaw += dyaw;
+            player.pitch = (player.pitch + dpitch).clamp(-1.553, 1.553);
+        }
+    }
     for ev in motion.read() {
         if !grabbed {
             continue;
