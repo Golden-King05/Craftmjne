@@ -1,6 +1,5 @@
-//! Main menu, Worlds (list + create, with a mod picker and branching), Settings
-//! (including where new worlds keep their mods), and Mods (the installed list)
-//! screens. Each screen is a Bevy UI tree spawned `OnEnter` its `AppState`
+//! Main menu, Worlds (list + create, with a mod picker and branching), and Mods
+//! (the installed list) screens. (Settings has its own module, `settings`.) Each screen is a Bevy UI tree spawned `OnEnter` its `AppState`
 //! and despawned `OnExit`; buttons carry a [`MenuButton`] action component
 //! and one handler system matches on it.
 
@@ -9,19 +8,18 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
-use crate::config::WorldSettings;
 use crate::mods::{create_world_with_mods, resolve_world_mods, scan_mods, set_world_mods, InstalledMods, MenuNotice, ModSetup};
-use crate::save::{GameMode, GraphicsSettings, ModStorage, SaveStore, WorldMeta};
+use crate::save::{GameMode, ModStorage, SaveStore, WorldMeta};
 use crate::state::{ActiveWorld, AppState, PauseState};
 
-const PANEL_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.82);
-const BUTTON_IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
-const BUTTON_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.22);
-const BUTTON_PRESS: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
-const TEXT_DIM: Color = Color::srgba(1.0, 1.0, 1.0, 0.6);
+pub(crate) const PANEL_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.82);
+pub(crate) const BUTTON_IDLE: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
+pub(crate) const BUTTON_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.22);
+pub(crate) const BUTTON_PRESS: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
+pub(crate) const TEXT_DIM: Color = Color::srgba(1.0, 1.0, 1.0, 0.6);
 
 #[derive(Component, Clone, PartialEq)]
-enum MenuButton {
+pub(crate) enum MenuButton {
     GoWorlds,
     GoSettings,
     GoMods,
@@ -32,7 +30,6 @@ enum MenuButton {
     SubmitCreate,
     LoadWorld(String),
     FocusField(TextField),
-    RenderDistanceDelta(i32),
     SetGameMode(GameMode),
     /// Tick or untick an installed mod for the world being created.
     ToggleMod(String),
@@ -41,8 +38,6 @@ enum MenuButton {
     SetBranch(Option<String>),
     /// From the worlds list: start a new world that branches this one.
     BranchFrom(String),
-    /// Settings: where newly created worlds keep their mods.
-    ToggleDefaultModStorage,
     /// From the worlds list: change which mods an existing world uses.
     EditMods(String),
     ApplyEditMods,
@@ -51,7 +46,7 @@ enum MenuButton {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum TextField {
+pub(crate) enum TextField {
     #[default]
     Name,
     Seed,
@@ -94,23 +89,17 @@ struct WorldsRoot;
 #[derive(Component)]
 struct WorldsContent;
 #[derive(Component)]
-struct SettingsRoot;
-#[derive(Component)]
 struct ModsRoot;
-#[derive(Component)]
-struct RenderDistanceLabel;
-#[derive(Component)]
-struct ModStorageLabel;
 #[derive(Component)]
 struct PauseRoot;
 
-fn despawn_all<T: Component>(mut commands: Commands, q: Query<Entity, With<T>>) {
+pub(crate) fn despawn_all<T: Component>(mut commands: Commands, q: Query<Entity, With<T>>) {
     for e in &q {
         commands.entity(e).despawn();
     }
 }
 
-fn full_screen_root() -> impl Bundle {
+pub(crate) fn full_screen_root() -> impl Bundle {
     Node {
         width: Val::Percent(100.0),
         height: Val::Percent(100.0),
@@ -135,7 +124,7 @@ fn panel() -> impl Bundle {
     )
 }
 
-fn title(text: &str) -> impl Bundle {
+pub(crate) fn title(text: &str) -> impl Bundle {
     (
         Text::new(text),
         TextFont { font_size: 32.0, ..default() },
@@ -144,7 +133,7 @@ fn title(text: &str) -> impl Bundle {
     )
 }
 
-fn spawn_button(parent: &mut ChildSpawnerCommands, label: &str, action: MenuButton) {
+pub(crate) fn spawn_button(parent: &mut ChildSpawnerCommands, label: &str, action: MenuButton) {
     parent
         .spawn((
             Button,
@@ -675,98 +664,6 @@ fn random_seed() -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Settings screen
-// ---------------------------------------------------------------------------
-
-fn mod_storage_label(storage: ModStorage) -> String {
-    match storage {
-        ModStorage::Instance => "New worlds keep mods: in the game folder".to_string(),
-        ModStorage::World => "New worlds keep mods: in the world".to_string(),
-    }
-}
-
-fn setup_settings(mut commands: Commands, settings: Res<WorldSettings>, store: Res<SaveStore>) {
-    let mod_storage = store.load_graphics_settings().mod_storage;
-    commands.spawn((SettingsRoot, full_screen_root())).with_children(|root| {
-        root.spawn(panel()).with_children(|p| {
-            p.spawn(title("Settings"));
-            p.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(14.0), ..default() })
-                .with_children(|row| {
-                    spawn_small_button(row, "-", MenuButton::RenderDistanceDelta(-1));
-                    row.spawn((
-                        RenderDistanceLabel,
-                        Text::new(format!("Render distance: {}", settings.render_distance)),
-                        TextFont { font_size: 16.0, ..default() },
-                        TextColor(Color::WHITE),
-                    ));
-                    spawn_small_button(row, "+", MenuButton::RenderDistanceDelta(1));
-                });
-            p.spawn((
-                Text::new("Takes effect after restart"),
-                TextFont { font_size: 12.0, ..default() },
-                TextColor(TEXT_DIM),
-            ));
-            // Where a newly created world keeps its mods.
-            p.spawn((
-                Button,
-                MenuButton::ToggleDefaultModStorage,
-                Node {
-                    width: Val::Px(360.0),
-                    height: Val::Px(40.0),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                BackgroundColor(BUTTON_IDLE),
-            ))
-            .with_children(|b| {
-                b.spawn((
-                    ModStorageLabel,
-                    Text::new(mod_storage_label(mod_storage)),
-                    TextFont { font_size: 15.0, ..default() },
-                    TextColor(Color::WHITE),
-                ));
-            });
-            p.spawn((
-                Text::new("Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't."),
-                TextFont { font_size: 12.0, ..default() },
-                TextColor(TEXT_DIM),
-                Node { width: Val::Px(360.0), ..default() },
-            ));
-            spawn_button(p, "Back", MenuButton::BackToMainMenu);
-        });
-    });
-}
-
-fn spawn_small_button(parent: &mut ChildSpawnerCommands, label: &str, action: MenuButton) {
-    parent
-        .spawn((
-            Button,
-            action,
-            Node {
-                width: Val::Px(36.0),
-                height: Val::Px(36.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            BackgroundColor(BUTTON_IDLE),
-        ))
-        .with_children(|p| {
-            p.spawn((Text::new(label), TextFont { font_size: 20.0, ..default() }, TextColor(Color::WHITE)));
-        });
-}
-
-fn sync_render_distance_label(settings: Res<WorldSettings>, mut labels: Query<&mut Text, With<RenderDistanceLabel>>) {
-    if !settings.is_changed() {
-        return;
-    }
-    for mut text in &mut labels {
-        text.0 = format!("Render distance: {}", settings.render_distance);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Mods screen (placeholder)
 // ---------------------------------------------------------------------------
 
@@ -865,13 +762,11 @@ fn handle_menu_buttons(
     mut next_state: ResMut<NextState<AppState>>,
     mut mode: ResMut<WorldsScreenMode>,
     mut form: ResMut<CreateWorldForm>,
-    mut settings: ResMut<WorldSettings>,
     mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     store: Res<SaveStore>,
     installed: Res<InstalledMods>,
     mut notice: ResMut<MenuNotice>,
-    mut storage_labels: Query<&mut Text, With<ModStorageLabel>>,
     mut exit: EventWriter<AppExit>,
 ) {
     for (interaction, action) in &mut interactions {
@@ -927,17 +822,6 @@ fn handle_menu_buttons(
                 }
                 *mode = WorldsScreenMode::List;
             }
-            MenuButton::ToggleDefaultModStorage => {
-                let mut saved = store.load_graphics_settings();
-                saved.mod_storage = match saved.mod_storage {
-                    ModStorage::Instance => ModStorage::World,
-                    ModStorage::World => ModStorage::Instance,
-                };
-                let _ = store.save_graphics_settings(&saved);
-                for mut text in &mut storage_labels {
-                    text.0 = mod_storage_label(saved.mod_storage);
-                }
-            }
             MenuButton::SubmitCreate => {
                 let seed = form.seed_text.trim().parse().unwrap_or_else(|_| random_seed());
                 let setup = match &form.branch_of {
@@ -980,10 +864,6 @@ fn handle_menu_buttons(
                     }
                 }
             }
-            MenuButton::RenderDistanceDelta(d) => {
-                settings.render_distance = (settings.render_distance + d).clamp(2, 16);
-                let _ = store.save_graphics_settings(&GraphicsSettings { render_distance: settings.render_distance, ..store.load_graphics_settings() });
-            }
             MenuButton::Resume => {
                 paused.open = false;
                 if let Ok(mut window) = windows.single_mut() {
@@ -1009,8 +889,6 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(AppState::MainMenu), despawn_all::<MainMenuRoot>)
             .add_systems(OnEnter(AppState::Worlds), setup_worlds)
             .add_systems(OnExit(AppState::Worlds), despawn_all::<WorldsRoot>)
-            .add_systems(OnEnter(AppState::Settings), setup_settings)
-            .add_systems(OnExit(AppState::Settings), despawn_all::<SettingsRoot>)
             .add_systems(OnEnter(AppState::Mods), setup_mods)
             .add_systems(OnExit(AppState::Mods), despawn_all::<ModsRoot>)
             .add_systems(OnExit(AppState::InGame), despawn_pause)
@@ -1023,7 +901,6 @@ impl Plugin for MenuPlugin {
                     handle_text_input.run_if(in_state(AppState::Worlds)),
                     sync_text_inputs.run_if(in_state(AppState::Worlds)),
                     sync_mode_buttons.run_if(in_state(AppState::Worlds)),
-                    sync_render_distance_label.run_if(in_state(AppState::Settings)),
                     sync_pause_screen.run_if(in_state(AppState::InGame)),
                 ),
             );
@@ -1056,12 +933,6 @@ mod tests {
         assert_eq!(mods_summary(&meta(ModStorage::Instance, &["a"], None)).unwrap(), "1 mod (from the game folder)");
         assert_eq!(mods_summary(&meta(ModStorage::World, &["a", "b"], None)).unwrap(), "2 mods (kept in the world)");
         assert_eq!(mods_summary(&meta(ModStorage::World, &["a"], Some("host"))).unwrap(), "mods shared from host");
-    }
-
-    #[test]
-    fn the_storage_setting_label_names_the_current_choice() {
-        assert!(mod_storage_label(ModStorage::Instance).contains("game folder"));
-        assert!(mod_storage_label(ModStorage::World).contains("in the world"));
     }
 
     fn scratch(tag: &str) -> std::path::PathBuf {

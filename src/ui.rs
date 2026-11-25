@@ -8,6 +8,7 @@ use bevy::window::PrimaryWindow;
 
 use bevy::ecs::system::SystemParam;
 
+use crate::keybinds::{Action, Actions};
 use crate::blocks::{BlockId, BlockRegistry, BlockTables, ItemModel};
 use crate::item_registry::{ItemId, ItemRegistry, NO_ITEM};
 use crate::config::ATLAS_TILES;
@@ -356,7 +357,7 @@ fn hint_visibility(
 
 fn debug_panel(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     mut state: ResMut<DebugState>,
     diagnostics: Res<DiagnosticsStore>,
     map: Res<ChunkMap>,
@@ -364,7 +365,7 @@ fn debug_panel(
     players: Query<&Player>,
     mut texts: Query<(&mut Text, &mut Visibility), With<DebugText>>,
 ) {
-    if keys.just_pressed(KeyCode::F3) {
+    if act.just_pressed(Action::DebugOverlay) {
         state.visible = !state.visible;
         state.timer = 0.0;
     }

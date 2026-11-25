@@ -596,6 +596,26 @@ impl SaveStore {
         fs::rename(&temp, &path)
     }
 
+    fn keybinds_path(&self) -> PathBuf {
+        self.root.join("keybinds.json")
+    }
+
+    /// The controls the player changed, as `action id -> chord text` (see
+    /// `keybinds::Bindings::overrides`). Missing or unreadable reads as "no changes".
+    pub fn load_keybinds(&self) -> std::collections::BTreeMap<String, String> {
+        fs::read_to_string(self.keybinds_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_keybinds(&self, changes: &std::collections::BTreeMap<String, String>) -> io::Result<()> {
+        fs::create_dir_all(&self.root)?;
+        let temp = self.keybinds_path().with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string_pretty(changes).map_err(io::Error::other)?)?;
+        fs::rename(&temp, self.keybinds_path())
+    }
+
     pub fn load_graphics_settings(&self) -> GraphicsSettings {
         fs::read_to_string(self.settings_path())
             .ok()

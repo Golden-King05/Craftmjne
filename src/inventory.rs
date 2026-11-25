@@ -25,6 +25,7 @@ use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
+use crate::keybinds::{Action, Actions};
 use crate::chat::ChatState;
 use crate::knap_ui::{abandon_when_inventory_closes, knap_input, sync_knap_screen, KnapState};
 use crate::crafting::{can_start_knapping, craft, stations_near, times_craftable, KnownItems, NearbyStations, RecipeBook};
@@ -270,7 +271,7 @@ fn despawn_inventory_ui(mut commands: Commands, roots: Query<Entity, With<Invent
 /// up) and frees the cursor; closing restores whatever grab state it found,
 /// same pattern as `chat::toggle_chat`.
 fn toggle_inventory(
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
     death: Res<DeathState>,
@@ -278,7 +279,7 @@ fn toggle_inventory(
     mut inv: ResMut<InventoryState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if chat.open || paused.open || death.open || knap.is_open() || !keys.just_pressed(KeyCode::KeyE) {
+    if chat.open || paused.open || death.open || knap.is_open() || !act.just_pressed(Action::Inventory) {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };

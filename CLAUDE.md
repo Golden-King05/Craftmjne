@@ -3141,4 +3141,45 @@ etc.) instead of inventing a new approach:
   author may simply not have bumped the line yet. Tests that go red without it:
   the "any one of several will do" and world-warning tests (break-tested by forcing the
   match). A test mod without `target_ver` now shows `(!)` in `edit_candidates`.
+- **Controls are `Action`s bound to `Chord`s, and the game asks `Actions`, never `KeyCode`.**
+  `keybinds.rs` is pure logic (all tested without an `App`): `Chord` = optional
+  Ctrl/Alt/Shift + one key *or* mouse button, parsed from and shown as `Ctrl+Alt+A`;
+  `Bindings` = `Action -> Option<Chord>`; `search` (plain words, `key:`, `is:`);
+  `Capture` = the "press the new combo" state machine. `Actions` is a `SystemParam`
+  (keys + optional mouse + optional `Bindings`) that systems take *instead of*
+  `Res<ButtonInput<..>>`: it falls back to the default bindings when those
+  resources are missing, which is what lets `ItemsPlugin` run in the headless app
+  unchanged. **Adding a control is one row in the `actions!` table plus asking
+  `Actions` where it is used**; the screen, search, conflicts and saving follow.
+  Things worth knowing:
+  - **`Player::step` still reads fixed keys.** Rather than thread bindings through
+    its nine tests, `Bindings::movement_input` turns the movement actions into a
+    `ButtonInput<KeyCode>` of the default keys (W/A/S/D/Space/Shift/Ctrl) each
+    frame - the same trick the overlays already use to hand it an empty input.
+  - **Modifiers are "required", not "exact"**, so W works while Ctrl is held. The
+    only tie-break is `shadowed`: a held chord with *strictly more* modifiers on the
+    same input suppresses the plainer one (`Q` vs `Ctrl+Q`). Identical chords are a
+    *conflict* (red in the UI), both fire. Don't "fix" that by silently picking one.
+  - **Right-hand modifiers are folded into left-hand ones** (`canon_key`), and a chord
+    whose input is a modifier drops that modifier from its flags, so `Shift` is never
+    `Shift+Shift`.
+  - **Capturing needs a warm-up frame.** The click on "Rebind" is itself a mouse press
+    that frame; without `Capture::warmup` it binds Left Click. A lone modifier binds
+    on *release* (so `Ctrl` can still become `Ctrl+A`). The settings systems run
+    search -> button handler -> capture, in that order, so the click that ends a
+    capture isn't also obeyed as a button, and the key being bound isn't typed into
+    the search box (all three are covered by break-tested app-level tests).
+  - **`key:a` means the A key exactly**, not "starts with a" (that would pull in Alt);
+    only a token that isn't a whole key name falls back to a prefix (`spa` -> Space).
+  - Saved as *differences from the defaults* (`keybinds.json`, `Bindings::overrides`),
+    not a full dump, so a default changed in a later version still reaches players
+    who never touched it. Unknown ids / unreadable chords are skipped, never an error.
+  - **Not done:** `Action` is a closed enum, so a mod can't add a control yet (it would
+    become an id registry like `CommandRegistry`); the Settings screen is only reachable
+    from the main menu, not the pause menu; Player and Sound sections are empty shells.
+    UI layout is unverified from a session with no display - the app-level tests prove
+    the tree builds, clicks, rebinds, searches and saves, not how it looks.
+  - `menu.rs` lost its Settings code to `settings.rs` (its helpers went `pub(crate)`).
+    The Rebinding screen rebuilds wholesale on change (spawn-on-change), carrying the
+    list's scroll offset across in `SettingsView::scroll`.
 

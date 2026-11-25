@@ -32,6 +32,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::collections::VecDeque;
 
+use crate::keybinds::{Action, Actions};
 use crate::commands::{CommandContext, CommandRegistry, CommandSuggestion, WorldRequests};
 use crate::entities::{ClearEntities, SpawnEntity};
 use crate::inventory::InventoryState;
@@ -178,7 +179,7 @@ fn despawn_chat(mut commands: Commands, roots: Query<Entity, With<ChatRoot>>) {
 /// closing restores it exactly, whether the mouse was locked or already
 /// released.
 fn toggle_chat(
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     paused: Res<PauseState>,
     inventory: Res<InventoryState>,
     death: Res<DeathState>,
@@ -188,8 +189,8 @@ fn toggle_chat(
     if chat.open || paused.open || inventory.open || death.open {
         return;
     }
-    let opens_with_slash = keys.just_pressed(KeyCode::Slash);
-    if !keys.just_pressed(KeyCode::KeyT) && !opens_with_slash {
+    let opens_with_slash = act.just_pressed(Action::Command);
+    if !act.just_pressed(Action::Chat) && !opens_with_slash {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };

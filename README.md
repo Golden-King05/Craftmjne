@@ -62,6 +62,10 @@ makensis -DAPP_VERSION=1.0.0 \
 
 The mouse locks automatically the moment you enter a world — no click needed.
 
+These are the **defaults**; every one except the mouse wheel and a few
+screen conventions can be changed in **Settings → Keybinds** (see
+[Rebinding controls](#rebinding-controls)).
+
 | Input | Action |
 |---|---|
 | W A S D | move |
@@ -94,8 +98,42 @@ The game boots into a main menu (**Worlds**, **Settings**, **Mods**, **Quit
 Game**) rather than straight into a world. **Worlds** lists your saves and has
 a **Create World** button (name, optional seed, and a **Survival / Creative**
 game mode picker) at the bottom, Minecraft-style; clicking a saved world loads
-it. **Settings** currently exposes render distance (persisted, applied on next
-launch); **Mods** is a placeholder for future mod support.
+it. **Settings** has sections - Player, Rendering, Sound, Keybinds and Mods -
+of which Rendering (render distance, applied on next launch), Keybinds and
+Mods (where new worlds keep their mods) do something today and Player and
+Sound are placeholders. **Mods** lists the installed mods.
+
+### Rebinding controls
+
+**Settings → Keybinds** lists every control by category with the key it uses.
+Click a control's button, then press the new input:
+
+- a key (`J`), a mouse button (`Middle Click`), or a **combo** - hold modifiers
+  and press a key or click: `Ctrl+Alt+A`, `Ctrl+Left Click`.
+- a modifier on its own (`Shift`, `Ctrl`) binds when you release it without
+  pressing anything else.
+- `Esc` cancels. **Reset** puts one control back, **Unbind** clears it, and
+  **Reset all** restores everything.
+
+**Search** the list by typing: words match the control's name or category
+(`hotbar`), `key:` finds what uses a key (`key:a` for A, `key:ctrl+left` for a
+combo, `key:spa` finds Space), and `is:conflict`, `is:unbound` and
+`is:changed` filter by state.
+
+**Conflicts are shown in red** - the control, its key, and a line naming the
+other control - and the Keybinds tab says how many are in conflict. Two controls
+on exactly the same chord both fire; the game doesn't pick one for you. The one
+exception is deliberate: a chord with no modifiers still works while Ctrl/Alt/
+Shift are held (walking while sprinting), but gives way to a *more specific*
+chord on the same key, so `Q` (drop one) and `Ctrl+Q` (drop the stack) don't both
+fire.
+
+Only your *changes* are saved, in `keybinds.json` next to `settings.json`, so a
+default we change later still reaches you unless you'd customised that control.
+A bad or unknown entry is ignored rather than stopping the game.
+
+Not rebindable on purpose: Esc closing an open screen, Enter/Tab/Backspace in text
+boxes, the mouse wheel for the hotbar, and Shift-click in the inventory.
 
 Worlds save to the per-user app-data directory
 (`%LOCALAPPDATA%\Craftmjne\saves\<name>` on Windows,

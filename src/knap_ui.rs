@@ -19,6 +19,7 @@
 use bevy::prelude::*;
 use bevy::ui::{FocusPolicy, GlobalZIndex};
 
+use crate::keybinds::{Action, Actions};
 use crate::crafting::{consume_knap_stone, finish_knapping, RecipeBook};
 use crate::interact::Hotbar;
 use crate::inventory::{Inventory, InventoryState};
@@ -106,7 +107,7 @@ pub(crate) fn abandon_when_inventory_closes(inv: Res<InventoryState>, mut knap: 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn knap_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    act: Actions,
     book: Res<RecipeBook>,
     registry: Res<ItemRegistry>,
     mut knap: ResMut<KnapState>,
@@ -161,8 +162,8 @@ pub(crate) fn knap_input(
         }
     }
 
-    let tap = mouse.just_pressed(MouseButton::Right);
-    if !(mouse.just_pressed(MouseButton::Left) || tap) {
+    let tap = act.just_pressed(Action::UseItem);
+    if !(act.just_pressed(Action::Attack) || tap) {
         return;
     }
     let Some((_, &KnapCell(x, y))) = cells.iter().find(|(i, _)| **i != Interaction::None) else { return };

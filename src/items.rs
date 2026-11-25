@@ -16,6 +16,7 @@
 
 use bevy::prelude::*;
 
+use crate::keybinds::{Action, Actions};
 use crate::blocks::{BlockTables, ItemStack, Tables, ThrowSpec};
 use crate::item_registry::ItemRegistry;
 use crate::chat::ChatState;
@@ -496,7 +497,7 @@ fn pick_up_items(
 /// the way you're looking.
 #[allow(clippy::too_many_arguments)]
 fn throw_selected(
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     chat: Res<ChatState>,
     inventory: Res<InventoryState>,
@@ -505,7 +506,8 @@ fn throw_selected(
     players: Query<&Player>,
     mut drops: EventWriter<SpawnDrop>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyQ) || chat.open || inventory.open || death.open || !cursor_grabbed(windows) {
+    let whole = act.just_pressed(Action::DropStack);
+    if !(whole || act.just_pressed(Action::DropItem)) || chat.open || inventory.open || death.open || !cursor_grabbed(windows) {
         return;
     }
     let Ok(player) = players.single() else { return };
@@ -514,7 +516,6 @@ fn throw_selected(
     if slot.is_empty() {
         return;
     }
-    let whole = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let count = if whole { slot.count } else { 1 };
     let thrown = ItemStack { count, ..*slot };
     slot.count -= count;

@@ -21,6 +21,7 @@ use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;
 use crate::crafting::RecipeBook;
 use crate::inventory::{open_inventory, InventoryState};
+use crate::keybinds::{Action, Actions};
 use crate::item_registry::ItemRegistry;
 use bevy::ecs::system::SystemParam;
 use crate::items::{impact_damage_scaled, throw_speed_with, ProjectileHit, SpawnDrop, SpawnProjectile, MINED_PICKUP_DELAY};
@@ -226,7 +227,7 @@ struct ActionTimers {
 /// open, so typing a digit or scrolling doesn't also swap the selected
 /// hotbar slot (or, with the inventory open, scroll its block list instead).
 fn select_slot(
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     mut wheel: EventReader<MouseWheel>,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
@@ -238,12 +239,8 @@ fn select_slot(
         wheel.clear();
         return;
     }
-    const DIGITS: [KeyCode; 9] = [
-        KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5,
-        KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,
-    ];
-    for (i, key) in DIGITS.iter().enumerate() {
-        if keys.just_pressed(*key) && i < hotbar.slots.len() {
+    for (i, action) in Action::HOTBAR.iter().enumerate() {
+        if act.just_pressed(*action) && i < hotbar.slots.len() {
             hotbar.selected = i;
         }
     }
@@ -291,7 +288,7 @@ fn partner_of(map: &ChunkMap, registry: &BlockRegistry, pos: IVec3, broken: Bloc
 #[allow(clippy::too_many_arguments)]
 fn throw_on_click(
     time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    act: Actions,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mode: Res<GameMode>,
     items: Res<ItemRegistry>,
@@ -301,7 +298,7 @@ fn throw_on_click(
     mut projectiles: EventWriter<SpawnProjectile>,
 ) {
     *cooldown -= time.delta_secs();
-    if !mouse.pressed(MouseButton::Left) || *cooldown > 0.0 || !cursor_grabbed(windows) {
+    if !act.pressed(Action::Attack) || *cooldown > 0.0 || !cursor_grabbed(windows) {
         return;
     }
     let Ok(player) = players.single() else { return };
@@ -363,9 +360,8 @@ fn upper_fits(map: &ChunkMap, registry: &BlockRegistry, id: BlockId, place_pos: 
 #[allow(clippy::too_many_arguments)]
 fn interact(
     time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    act: Actions,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    keys: Res<ButtonInput<KeyCode>>,
     mut map: ResMut<ChunkMap>,
     content: Content,
     mode: Res<GameMode>,
@@ -407,10 +403,10 @@ fn interact(
     timers.break_t -= dt;
     timers.place_t -= dt;
     timers.attack_t -= dt;
-    if !mouse.pressed(MouseButton::Left) {
+    if !act.pressed(Action::Attack) {
         timers.break_t = 0.0;
     }
-    if !mouse.pressed(MouseButton::Right) {
+    if !act.pressed(Action::UseItem) {
         timers.place_t = 0.0;
     }
     if !cursor_grabbed(windows) {
@@ -426,14 +422,14 @@ fn interact(
     // held; Survival mines for a while and drops what the block drops.
     // A block that `requires_crouch` (the training dummy) ignores a plain
     // click: hold Shift to mine it.
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let shift = act.pressed(Action::Sneak);
     let aimed = map.get_block(hit.pos);
     // Holding something throwable, left click throws it (`throw_on_click`),
     // so it neither mines nor hits.
     let throwing = content.items.throwable(&hotbar.slots[hotbar.selected]);
     let breakable = mineable(registry.def(aimed), shift) && !throwing;
     // A plain click on something hittable hits it, with whatever is in hand.
-    if !throwing && registry.def(aimed).hittable && !shift && mouse.pressed(MouseButton::Left) && timers.attack_t <= 0.0 {
+    if !throwing && registry.def(aimed).hittable && !shift && act.pressed(Action::Attack) && timers.attack_t <= 0.0 {
         timers.attack_t = content.items.attack_cooldown(&hotbar.slots[hotbar.selected]);
         damage.write(DamageEvent {
             cell: hit.pos,
@@ -442,7 +438,7 @@ fn interact(
         });
     }
     if *mode == GameMode::Creative {
-        if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
+        if act.pressed(Action::Attack) && timers.break_t <= 0.0 {
             if breakable {
                 let after = registry.left_behind(aimed);
                 if let Some(prev) = map.set_block_keep_level(hit.pos, after) {
@@ -459,7 +455,7 @@ fn interact(
         let in_hand = content.items.held_tool(&hotbar.slots[hotbar.selected]);
         let seconds = mining_seconds(def, in_hand);
         let mined = breakable.then_some((hit.pos, aimed));
-        if mining.advance(mined, mouse.pressed(MouseButton::Left), dt, seconds) {
+        if mining.advance(mined, act.pressed(Action::Attack), dt, seconds) {
             // Mining a waterlogged pebble takes the pebble and leaves the
             // water (or the ice) it was sitting in.
             let after = registry.left_behind(aimed);
@@ -480,7 +476,7 @@ fn interact(
     // Right-clicking a crafting station opens it instead (`open_station`);
     // hold shift to place a block against one.
     let on_station = content.book.is_station(aimed) && !shift;
-    if mouse.pressed(MouseButton::Right) && timers.place_t <= 0.0 && !on_station {
+    if act.pressed(Action::UseItem) && timers.place_t <= 0.0 && !on_station {
         let place_pos = hit.pos + hit.normal;
         // An empty hand, or an item that isn't a block (a stick), places
         // nothing.
@@ -551,7 +547,7 @@ fn interact(
     // block you don't already have would defeat starting with nothing.
     // `item: false` blocks (air, and anything similarly hidden) can't be
     // picked either - there's nothing to hold.
-    if *mode == GameMode::Creative && mouse.just_pressed(MouseButton::Middle) {
+    if *mode == GameMode::Creative && act.just_pressed(Action::PickBlock) {
         if let Some(id) = content.items.of_block(map.get_block(hit.pos)) {
             if let Some(existing) = hotbar.slots.iter().position(|s| !s.is_empty() && s.id == id) {
                 hotbar.selected = existing;
@@ -613,8 +609,7 @@ fn drop_roll(pos: IVec3, breaks: u32) -> f32 {
 /// screen, where its recipes are listed while it's within reach.
 #[allow(clippy::too_many_arguments)]
 fn open_station(
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     target: Res<Target>,
     map: Res<ChunkMap>,
     book: Res<RecipeBook>,
@@ -622,8 +617,8 @@ fn open_station(
     mut inv: ResMut<InventoryState>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    if !mouse.just_pressed(MouseButton::Right) || shift || inv.open || death.open {
+    let shift = act.pressed(Action::Sneak);
+    if !act.just_pressed(Action::UseItem) || shift || inv.open || death.open {
         return;
     }
     let Some(hit) = &target.0 else { return };

@@ -13,6 +13,7 @@ use crate::chat::ChatState;
 use crate::entities::{Aabb, EntityColliders};
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
 use crate::inventory::InventoryState;
+use crate::keybinds::{Action, Actions};
 use crate::health::Vitals;
 use crate::save::GameMode;
 use crate::state::{AppState, DeathState, PauseState};
@@ -382,7 +383,7 @@ fn exit_game_release_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>
 /// closed by respawning).
 fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     chat: Res<ChatState>,
     inventory: Res<InventoryState>,
     death: Res<DeathState>,
@@ -394,7 +395,7 @@ fn cursor_grab(
     }
     let Ok(mut window) = windows.single_mut() else { return };
 
-    if keys.just_pressed(KeyCode::Escape) {
+    if act.just_pressed(Action::Pause) {
         paused.open = !paused.open;
         if paused.open {
             window.cursor_options.grab_mode = CursorGrabMode::None;
@@ -445,7 +446,7 @@ fn mouse_look(
 #[allow(clippy::too_many_arguments)]
 fn player_update(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    act: Actions,
     map: Res<ChunkMap>,
     tables: Option<Res<BlockTables>>,
     mode: Res<GameMode>,
@@ -475,7 +476,7 @@ fn player_update(
             // both feet (eventually) on the ground.
             if !frozen {
                 if *mode == GameMode::Creative {
-                    if keys.just_pressed(KeyCode::KeyF) {
+                    if act.just_pressed(Action::ToggleFly) {
                         player.fly = !player.fly;
                         player.vel.y = 0.0;
                     }
@@ -484,9 +485,11 @@ fn player_update(
                 }
             }
 
-            let real_keys: &ButtonInput<KeyCode> = &keys;
+            // The movement actions as the fixed keys the physics reads, so a
+            // rebound Forward still walks forward.
+            let moving = act.movement_input();
             let no_keys = ButtonInput::<KeyCode>::default();
-            let input = if frozen { &no_keys } else { real_keys };
+            let input = if frozen { &no_keys } else { &moving };
 
             player.accumulator = (player.accumulator + time.delta_secs()).min(0.25);
             while player.accumulator >= STEP {
