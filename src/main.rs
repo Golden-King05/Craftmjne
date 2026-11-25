@@ -4,7 +4,7 @@
 //! the built-in ones; register blocks/painters from your plugin's `build()`
 //! (see README "Extending the framework").
 //!
-//! CLI: `craftmjne [--seed N] [--render-distance N] [--version]`
+//! CLI: `craftmjne [--seed N] [--render-distance N] [--instance ID] [--version]`
 //!
 //! There is no update flag any more: versions are managed by the launcher
 //! (`launcher/`), which installs each build into its own folder rather than
@@ -27,11 +27,15 @@ use craftmjne::{block_models, chat, commands, damage, health, interact, entities
 struct Args {
     seed: u32,
     render_distance: Option<i32>, // CLI override; None means "use the saved graphics setting"
+    /// Set by the launcher: which of its instances this is. Controls are saved per
+    /// instance, so they follow it through a rename or a game update.
+    instance: Option<String>,
 }
 
 fn parse_args() -> Args {
     let mut seed = WorldSettings::default().seed;
     let mut render_distance = None;
+    let mut instance = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -45,6 +49,7 @@ fn parse_args() -> Args {
                     render_distance = Some(v);
                 }
             }
+            "--instance" => instance = args.next(),
             "--version" | "-V" => {
                 println!("craftmjne {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -52,7 +57,7 @@ fn parse_args() -> Args {
             other => eprintln!("unknown argument: {other}"),
         }
     }
-    Args { seed, render_distance }
+    Args { seed, render_distance, instance }
 }
 
 /// Reconnects stdout/stderr to whatever terminal launched this process, if
@@ -87,7 +92,8 @@ fn main() {
         SaveStore::at(dir)
     } else {
         SaveStore::default()
-    };
+    }
+    .with_instance(args.instance.clone());
 
     let graphics = store.load_graphics_settings();
     let settings = WorldSettings {
@@ -129,7 +135,7 @@ fn main() {
             menu::MenuPlugin,
         ))
         .add_plugins((entities::EntitiesPlugin, block_models::BlockModelsPlugin, particles::ParticlesPlugin, damage::DamagePlugin, states::StatesPlugin))
-        .add_plugins((craftmjne::keybinds::KeybindPlugin, craftmjne::settings::SettingsPlugin));
+        .add_plugins((craftmjne::keybinds::KeybindPlugin, craftmjne::mod_controls::ModControlsPlugin, craftmjne::settings::SettingsPlugin));
 
     // CI / smoke mode: skip the menu, drop straight into a throwaway world,
     // let it stream in, save a screenshot, and exit. Run with:

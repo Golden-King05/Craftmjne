@@ -101,6 +101,6 @@ mod tests {
         let command = command_for(&library, &instance).unwrap();
         let args: Vec<String> =
             command.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        assert_eq!(args, vec!["--render-distance", "4", "--some-future-flag"]);
+        assert_eq!(args, vec!["--instance", instance.id.as_str(), "--render-distance", "4", "--some-future-flag"]);
     }
 }

@@ -101,7 +101,13 @@ pub struct LauncherApp {
 
 impl LauncherApp {
     pub fn new(paths: Paths) -> Self {
-        let instances = Instances::load(&paths.instances_file());
+        let mut instances = Instances::load(&paths.instances_file());
+        // Old entries have no id yet. They must be saved now, not later: an id that
+        // is only in memory is invented afresh next launch, orphaning whatever the
+        // game saved under it in between.
+        if instances.ensure_ids() {
+            let _ = instances.save(&paths.instances_file());
+        }
         let jobs = Jobs::default();
 
         // Both startup checks go out immediately and in parallel: what
@@ -525,6 +531,15 @@ impl LauncherApp {
         }
 
         ui.add_space(8.0);
+        if let Some(instance) = self.instances.items.get(index) {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Controls are saved with this instance and kept through renames and updates: {}",
+                    self.paths.instance_dir(&instance.id).display()
+                ))
+                .weak(),
+            );
+        }
         ui.label(
             egui::RichText::new(format!(
                 "Worlds are shared by every instance: {}",
@@ -537,6 +552,13 @@ impl LauncherApp {
             self.play(index, ui.ctx());
         }
         if delete {
+            // Its saved controls go with it - an instance that no longer exists
+            // shouldn't leave a folder nothing will ever open again.
+            if let Some(instance) = self.instances.items.get(index) {
+                if !instance.id.is_empty() {
+                    let _ = std::fs::remove_dir_all(self.paths.instance_dir(&instance.id));
+                }
+            }
             self.instances.remove(index);
             self.selected = None;
             changed = true;

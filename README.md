@@ -128,9 +128,24 @@ Shift are held (walking while sprinting), but gives way to a *more specific*
 chord on the same key, so `Q` (drop one) and `Ctrl+Q` (drop the stack) don't both
 fire.
 
-Only your *changes* are saved, in `keybinds.json` next to `settings.json`, so a
-default we change later still reaches you unless you'd customised that control.
-A bad or unknown entry is ignored rather than stopping the game.
+**Controls belong to an instance.** Started from the launcher, your controls are
+saved with *that instance* (`instances/<id>/keybinds.json` in the app-data folder),
+so updating an instance to a newer game version, or renaming it, keeps them, and
+two instances can have different controls. Each instance has a permanent id the
+launcher gives it (the game is started with `--instance <id>`); the name and the
+version can change freely without losing anything. Deleting an instance in the
+launcher deletes its controls. A game started without the launcher keeps them in
+plain `keybinds.json`.
+
+Only your *changes* are saved, so a default we change later still reaches you
+unless you'd customised that control. A bad or unknown entry is ignored rather
+than stopping the game - and a key you set for a **mod's** control is kept even
+while that mod is removed, and comes back with it.
+
+**Mods add controls too.** They show up in the same list, under the mod's own
+heading, with the same search, conflict highlighting, reset and unbind (see
+[Mods](#mods) for the file format). A control that runs a command shows what it
+runs (`runs /time set noon`).
 
 Not rebindable on purpose: Esc closing an open screen, Enter/Tab/Backspace in text
 boxes, the mouse wheel for the hotbar, and Shift-click in the inventory.
@@ -777,7 +792,11 @@ copy half-updated. None of that applies now.
 - **Instances tab** — named launch configurations. Each pins a version and
   optionally overrides render distance, world seed, and any extra command
   line arguments. Editing one is immediate; they're stored in
-  `launcher/instances.json`.
+  `launcher/instances.json`. Every instance also has a permanent, hidden `id`
+  (made when it is created, or the first time an older launcher's list is
+  opened) that the game is started with, `--instance <id>`. The player's
+  keybinds are saved under it (`instances/<id>/`), which is why they survive a
+  rename or a version update.
 - **Play** — starts the selected instance. The launcher doesn't wait around;
   you can close it and keep playing.
 
@@ -1293,6 +1312,7 @@ mods/any_folder_name/
   recipes/*.json
   tiers/*.json        tool tiers (material, mining speed, damage)
   rarities/*.json     what a tool's quality is called: id, name, min percent, colour
+  keybinds/*.json     controls added to Settings > Keybinds (see below)
   textures/blocks/*.png
 ```
 
@@ -1318,6 +1338,26 @@ game keeps updating.
 them for that world (`granite_pack_1`, `granite_pack_2`, in folder order), keeps
 those names for good (a block saved as `granite_pack_1:granite` must stay that
 even if the other mod is removed later), and the world carries on.
+
+**Controls.** A mod can add entries to Settings > Keybinds with one JSON file (or
+an array) per control in `keybinds/`:
+
+```json
+{ "id": "noon", "name": "Skip to noon", "category": "Weather Pack",
+  "default": "Ctrl+N", "command": "/time set noon" }
+```
+
+`id` is required (letters, digits, `_`, `-`) and becomes `<mod id>:<id>`, e.g.
+`weather:noon`, so it can't collide with the game's own controls or another mod's.
+`name` is what the screen shows, `category` the heading (default: the mod's name).
+`default` is the key combination it starts on - leave it out (or `"none"`) to start
+unbound, so a mod never takes a key from the player unasked. `command` is a chat
+command (slash optional) that runs when the control is pressed in a world that uses
+the mod; without one the control is only for code to read (below). The player can
+rebind, unbind and search it like any other, and the game flags it in red if it
+shares a key with another control. A broken file is skipped with a note on the
+Keybinds screen. These are read from the installed `mods/` folder, so they appear
+in Settings whether or not a world uses the mod, but only act in worlds that do.
 
 **Naming inside a mod's files:**
 
@@ -1485,6 +1525,33 @@ Blocks can drop it with `"drops": "stick"` or
 `"drops": {"item": "stick", "chance": 0.2, "count": 1}`. A `"tool": {"kind":
 .., "tier": ..}` entry makes it a tool (see [Tools, tiers and
 quality](#tools-tiers-and-quality)).
+
+### Add a control
+
+A plugin can add controls the same way a mod's file does, then ask about them like
+the game's own:
+
+```rust
+use craftmjne::keybinds::{Actions, Bindings, Chord, ControlDef};
+
+// In your plugin's build(): list it on the Keybinds screen.
+let mut bindings = app.world_mut().resource_mut::<Bindings>();
+bindings.register(
+    ControlDef::new("myplugin:zoom", "Zoom", "My Plugin").with_default(Chord::parse("Z").unwrap()),
+);
+
+// In any system: ask whether it is held, without knowing which key that is.
+fn zoom(act: Actions) {
+    if act.pressed("myplugin:zoom") { /* ... */ }   // or act.just_pressed(..)
+}
+```
+
+`register` returns `false` and changes nothing if the id is taken (the first to claim
+it keeps it), so use an id with your own prefix. Add `.with_command("/some command")`
+to make pressing it run a chat command, as a mod's file can. The player's saved key
+for your control (if any) is applied when you register it. The game's own controls are
+`keybinds::Action` values (`act.pressed(Action::Jump)`); anything taking an `Action`
+takes a string id too.
 
 ### Add a recipe
 

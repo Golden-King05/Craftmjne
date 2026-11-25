@@ -3,7 +3,7 @@
 //! empty shells waiting for their options; Rendering and Mods hold the two
 //! settings that existed before; Keybinds is the full control editor.
 //!
-//! **Keybinds screen.** One row per [`Action`] grouped by category, each with a
+//! **Keybinds screen.** One row per control (the game's own, then each mod's) grouped by category, each with a
 //! button showing its chord (click it, then press the new key, mouse button or
 //! combo - see [`Capture`]), a reset and an unbind button. A search box above
 //! the list takes plain words (`jump`), `key:` queries (`key:a`, `key:ctrl+left`)
@@ -22,7 +22,8 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use crate::config::WorldSettings;
-use crate::keybinds::{search, Action, Bindings, Capture, CaptureEvent, Category};
+use crate::keybinds::{search, Bindings, Capture, CaptureEvent};
+use crate::mod_controls::ControlNotes;
 use crate::menu::{despawn_all, full_screen_root, spawn_button, title, BUTTON_HOVER, BUTTON_IDLE, BUTTON_PRESS, PANEL_BG, TEXT_DIM};
 use crate::save::{GraphicsSettings, ModStorage, SaveStore};
 use crate::state::AppState;
@@ -85,9 +86,9 @@ enum SettingsButton {
     Section(Section),
     RenderDistanceDelta(i32),
     ToggleDefaultModStorage,
-    Rebind(Action),
-    Unbind(Action),
-    Reset(Action),
+    Rebind(String),
+    Unbind(String),
+    Reset(String),
     ResetAll,
     ClearSearch,
 }
@@ -103,23 +104,27 @@ pub(crate) fn mod_storage_label(storage: ModStorage) -> String {
     }
 }
 
-/// The search results grouped by category, in the screen's order, leaving out
-/// categories with nothing in them.
-pub(crate) fn keybind_rows(bindings: &Bindings, query: &str) -> Vec<(Category, Vec<Action>)> {
+/// The search results grouped by category, in the screen's order (the game's own
+/// headings first, then each mod's), leaving out headings with nothing under them.
+pub(crate) fn keybind_rows(bindings: &Bindings, query: &str) -> Vec<(String, Vec<String>)> {
     let found = search(bindings, query);
-    Category::ALL
-        .iter()
+    bindings
+        .categories()
+        .into_iter()
         .filter_map(|cat| {
-            let rows: Vec<Action> = found.iter().copied().filter(|a| a.category() == *cat).collect();
-            (!rows.is_empty()).then_some((*cat, rows))
+            let rows: Vec<String> = found.iter().filter(|id| bindings.def(id).is_some_and(|d| d.category == cat)).cloned().collect();
+            (!rows.is_empty()).then_some((cat, rows))
         })
         .collect()
 }
 
 /// "Also used by: Open chat, Open inventory", or `None` if this control's chord is its own.
-pub(crate) fn also_used_by(bindings: &Bindings, action: Action) -> Option<String> {
-    let others = bindings.conflicts_with(action);
-    (!others.is_empty()).then(|| format!("Also used by: {}", others.iter().map(|a| a.label()).collect::<Vec<_>>().join(", ")))
+pub(crate) fn also_used_by(bindings: &Bindings, id: &str) -> Option<String> {
+    let others = bindings.conflicts_with(id);
+    (!others.is_empty()).then(|| {
+        let names: Vec<&str> = others.iter().map(|o| bindings.def(o).map(|d| d.label.as_str()).unwrap_or(o.as_str())).collect();
+        format!("Also used by: {}", names.join(", "))
+    })
 }
 
 /// How many controls are in a conflict, as a sentence, or `None` when none are.
@@ -208,13 +213,14 @@ fn rebuild_settings(
     view: Res<SettingsView>,
     bindings: Res<Bindings>,
     capture: Res<Capture>,
+    notes: Res<ControlNotes>,
     world_settings: Res<WorldSettings>,
     store: Res<SaveStore>,
     content: Query<(Entity, Option<&Children>), With<SettingsContent>>,
 ) {
     let Ok((root, children)) = content.single() else { return };
     let empty = children.is_none_or(|c| c.is_empty());
-    if !(empty || view.is_changed() || bindings.is_changed() || capture.is_changed() || world_settings.is_changed()) {
+    if !(empty || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || world_settings.is_changed()) {
         return;
     }
     commands.entity(root).despawn_related::<Children>();
@@ -261,12 +267,12 @@ fn rebuild_settings(
                 spawn_settings_button(body, &mod_storage_label(storage), SettingsButton::ToggleDefaultModStorage, 380.0, 40.0, 15.0, Color::WHITE, Color::NONE);
                 dim(body, "Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't.", 12.0);
             }
-            Section::Keybinds => spawn_keybinds(body, &view, &bindings, &capture),
+            Section::Keybinds => spawn_keybinds(body, &view, &bindings, &capture, &notes),
         });
     });
 }
 
-fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture) {
+fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes) {
     // Search box + clear + reset all.
     body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), width: Val::Percent(100.0), ..default() }).with_children(|row| {
         row.spawn((
@@ -303,9 +309,10 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
     if let Some(summary) = conflict_summary(bindings) {
         body.spawn((Text::new(summary), TextFont { font_size: 13.0, ..default() }, TextColor(RED)));
     }
-    if let Some(action) = capture.target {
+    if let Some(id) = &capture.target {
+        let label = bindings.def(id).map(|d| d.label.as_str()).unwrap_or(id.as_str());
         body.spawn((
-            Text::new(format!("Binding \"{}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels.", action.label())),
+            Text::new(format!("Binding \"{label}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels.")),
             TextFont { font_size: 13.0, ..default() },
             TextColor(YELLOW),
             Node { max_width: Val::Px(620.0), ..default() },
@@ -332,35 +339,42 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
         if rows.is_empty() {
             dim(list, "No controls match.", 14.0);
         }
-        for (category, actions) in rows {
-            list.spawn((Text::new(category.name()), TextFont { font_size: 16.0, ..default() }, TextColor(YELLOW), Node { margin: UiRect::top(Val::Px(6.0)), ..default() }));
-            for action in actions {
-                let clash = conflicting.contains(&action);
-                let listening = capture.target == Some(action);
+        for (category, ids) in rows {
+            list.spawn((Text::new(category), TextFont { font_size: 16.0, ..default() }, TextColor(YELLOW), Node { margin: UiRect::top(Val::Px(6.0)), ..default() }));
+            for id in ids {
+                let Some(def) = bindings.def(&id) else { continue };
+                let clash = conflicting.contains(&id);
+                let listening = capture.target.as_deref() == Some(id.as_str());
                 list.spawn(Node { flex_direction: FlexDirection::Column, ..default() }).with_children(|entry| {
                     entry.spawn(Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
-                        row.spawn((Text::new(action.label()), TextFont { font_size: 15.0, ..default() }, TextColor(if clash { RED } else { Color::WHITE })));
+                        row.spawn((Text::new(def.label.clone()), TextFont { font_size: 15.0, ..default() }, TextColor(if clash { RED } else { Color::WHITE })));
                         row.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).with_children(|buttons| {
-                            let (text, color) = match (listening, bindings.get(action)) {
+                            let (text, color) = match (listening, bindings.get(&id)) {
                                 (true, _) => ("Press a key...".to_string(), YELLOW),
                                 (false, Some(chord)) => (chord.display(), if clash { RED } else { Color::WHITE }),
                                 (false, None) => ("Unbound".to_string(), TEXT_DIM),
                             };
                             let border = if listening { YELLOW } else if clash { RED } else { BORDER_DIM };
-                            spawn_settings_button(buttons, &text, SettingsButton::Rebind(action), 190.0, 30.0, 14.0, color, border);
-                            let changed = if bindings.is_default(action) { TEXT_DIM } else { Color::WHITE };
-                            spawn_settings_button(buttons, "Reset", SettingsButton::Reset(action), 58.0, 30.0, 13.0, changed, BORDER_DIM);
-                            let bound = if bindings.get(action).is_some() { Color::WHITE } else { TEXT_DIM };
-                            spawn_settings_button(buttons, "Unbind", SettingsButton::Unbind(action), 66.0, 30.0, 13.0, bound, BORDER_DIM);
+                            spawn_settings_button(buttons, &text, SettingsButton::Rebind(id.clone()), 190.0, 30.0, 14.0, color, border);
+                            let changed = if bindings.is_default(&id) { TEXT_DIM } else { Color::WHITE };
+                            spawn_settings_button(buttons, "Reset", SettingsButton::Reset(id.clone()), 58.0, 30.0, 13.0, changed, BORDER_DIM);
+                            let bound = if bindings.get(&id).is_some() { Color::WHITE } else { TEXT_DIM };
+                            spawn_settings_button(buttons, "Unbind", SettingsButton::Unbind(id.clone()), 66.0, 30.0, 13.0, bound, BORDER_DIM);
                         });
                     });
-                    if let Some(note) = also_used_by(bindings, action) {
+                    if let Some(note) = also_used_by(bindings, &id) {
                         entry.spawn((Text::new(note), TextFont { font_size: 12.0, ..default() }, TextColor(RED)));
+                    }
+                    if let Some(command) = &def.command {
+                        entry.spawn((Text::new(format!("runs {command}")), TextFont { font_size: 12.0, ..default() }, TextColor(TEXT_DIM)));
                     }
                 });
             }
         }
     });
+    for note in &notes.0 {
+        body.spawn((Text::new(format!("Mod control skipped: {note}")), TextFont { font_size: 12.0, ..default() }, TextColor(Color::srgb(0.95, 0.6, 0.4)), Node { max_width: Val::Px(620.0), ..default() }));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,13 +451,13 @@ fn handle_settings_buttons(
                 let _ = store.save_graphics_settings(&saved);
                 view.set_changed();
             }
-            SettingsButton::Rebind(action) => capture.start(action),
-            SettingsButton::Unbind(action) => {
-                bindings.set(action, None);
+            SettingsButton::Rebind(id) => capture.start(id),
+            SettingsButton::Unbind(id) => {
+                bindings.set(id, None);
                 save_bindings(&store, &bindings);
             }
-            SettingsButton::Reset(action) => {
-                bindings.reset(action);
+            SettingsButton::Reset(id) => {
+                bindings.reset(id);
                 save_bindings(&store, &bindings);
             }
             SettingsButton::ResetAll => {
@@ -466,7 +480,7 @@ fn capture_binding(
     mut bindings: ResMut<Bindings>,
     store: Res<SaveStore>,
 ) {
-    let Some(target) = capture.target else { return };
+    let Some(target) = capture.target.clone() else { return };
     // Stepping every frame is not a change worth redrawing the screen for;
     // only an outcome is.
     let event = capture.bypass_change_detection().step(&keys, &mouse);
@@ -526,16 +540,20 @@ impl Plugin for SettingsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keybinds::Chord;
+    use crate::keybinds::{Action, Chord};
+
+    fn id(a: Action) -> String {
+        a.id().to_string()
+    }
 
     #[test]
     fn rows_are_grouped_by_category_and_empty_groups_are_left_out() {
         let b = Bindings::default();
         let all = keybind_rows(&b, "");
-        assert_eq!(all.iter().map(|(c, _)| *c).collect::<Vec<_>>(), Category::ALL.to_vec());
+        assert_eq!(all.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(), ["Movement", "Gameplay", "Inventory", "Interface"]);
         assert_eq!(all.iter().map(|(_, rows)| rows.len()).sum::<usize>(), Action::ALL.len());
         let movement_only = keybind_rows(&b, "key:space");
-        assert_eq!(movement_only, vec![(Category::Movement, vec![Action::Jump])]);
+        assert_eq!(movement_only, vec![("Movement".to_string(), vec![id(Action::Jump)])]);
         assert!(keybind_rows(&b, "key:zzz").is_empty());
     }
 
@@ -543,10 +561,10 @@ mod tests {
     fn a_conflict_names_the_other_control_and_counts_both() {
         let mut b = Bindings::default();
         assert_eq!(conflict_summary(&b), None);
-        assert_eq!(also_used_by(&b, Action::Chat), None);
+        assert_eq!(also_used_by(&b, "chat"), None);
         b.set(Action::Chat, Chord::parse("E"));
-        assert_eq!(also_used_by(&b, Action::Chat).as_deref(), Some("Also used by: Open inventory"));
-        assert_eq!(also_used_by(&b, Action::Inventory).as_deref(), Some("Also used by: Open chat"));
+        assert_eq!(also_used_by(&b, "chat").as_deref(), Some("Also used by: Open inventory"));
+        assert_eq!(also_used_by(&b, "inventory").as_deref(), Some("Also used by: Open chat"));
         assert_eq!(conflict_summary(&b).as_deref(), Some("2 controls share a key with another (shown in red)."));
         assert_eq!(tab_label(Section::Keybinds, &b), "Keybinds (2 in conflict)");
         assert_eq!(tab_label(Section::Rendering, &b), "Rendering", "only the Keybinds tab warns");
@@ -574,6 +592,10 @@ mod tests {
     }
 
     fn screen() -> Screen {
+        screen_with(None)
+    }
+
+    fn screen_with(installed: Option<std::path::PathBuf>) -> Screen {
         let dir = std::env::temp_dir().join(format!("craftmjne-settings-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin));
@@ -581,7 +603,10 @@ mod tests {
         app.add_event::<KeyboardInput>().add_event::<MouseWheel>();
         app.insert_resource(SaveStore::at(dir.clone())).insert_resource(WorldSettings::default());
         app.init_state::<AppState>();
-        app.add_plugins((KeybindPlugin, SettingsPlugin));
+        if let Some(installed) = installed {
+            app.insert_resource(crate::mods::InstalledMods(installed));
+        }
+        app.add_plugins((KeybindPlugin, crate::mod_controls::ModControlsPlugin, SettingsPlugin));
         app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Settings);
         app.update();
         app.update();
@@ -631,7 +656,7 @@ mod tests {
             self.app.world().resource::<Bindings>().clone()
         }
 
-        fn rebind_buttons(&mut self) -> Vec<Action> {
+        fn rebind_buttons(&mut self) -> Vec<String> {
             self.buttons().into_iter().filter_map(|(_, b)| if let SettingsButton::Rebind(a) = b { Some(a) } else { None }).collect()
         }
     }
@@ -673,7 +698,7 @@ mod tests {
     fn clicking_a_control_then_pressing_a_combo_rebinds_and_saves_it() {
         let mut s = screen();
         s.click(SettingsButton::Section(Section::Keybinds));
-        s.click(SettingsButton::Rebind(Action::Jump));
+        s.click(SettingsButton::Rebind(id(Action::Jump)));
         assert!(s.app.world().resource::<Capture>().active());
         assert!(s.texts().iter().any(|t| t == "Press a key..."), "the row says it is listening");
 
@@ -690,7 +715,7 @@ mod tests {
     fn escape_cancels_a_rebind_and_the_key_is_not_typed_into_the_search() {
         let mut s = screen();
         s.click(SettingsButton::Section(Section::Keybinds));
-        s.click(SettingsButton::Rebind(Action::Jump));
+        s.click(SettingsButton::Rebind(id(Action::Jump)));
         s.type_text("x");
         assert_eq!(s.app.world().resource::<SettingsView>().search, "", "typing while capturing is not search text");
         s.press(KeyCode::Escape);
@@ -703,10 +728,10 @@ mod tests {
     fn buttons_are_ignored_while_a_key_is_being_captured() {
         let mut s = screen();
         s.click(SettingsButton::Section(Section::Keybinds));
-        s.click(SettingsButton::Rebind(Action::Jump));
+        s.click(SettingsButton::Rebind(id(Action::Jump)));
         s.click(SettingsButton::Section(Section::Sound));
         assert_eq!(s.app.world().resource::<SettingsView>().section, Section::Keybinds);
-        s.click(SettingsButton::Reset(Action::Chat));
+        s.click(SettingsButton::Reset(id(Action::Chat)));
         assert!(s.app.world().resource::<Capture>().active(), "still waiting for the key");
     }
 
@@ -714,14 +739,14 @@ mod tests {
     fn unbind_and_reset_work_and_reset_all_restores_everything() {
         let mut s = screen();
         s.click(SettingsButton::Section(Section::Keybinds));
-        s.click(SettingsButton::Unbind(Action::Chat));
+        s.click(SettingsButton::Unbind(id(Action::Chat)));
         assert_eq!(s.bindings().get(Action::Chat), None);
         assert!(s.texts().iter().any(|t| t == "Unbound"));
         assert_eq!(s.app.world().resource::<SaveStore>().load_keybinds()["chat"], "none");
-        s.click(SettingsButton::Reset(Action::Chat));
+        s.click(SettingsButton::Reset(id(Action::Chat)));
         assert_eq!(s.bindings().get(Action::Chat), Action::Chat.default_chord());
-        s.click(SettingsButton::Unbind(Action::Jump));
-        s.click(SettingsButton::Unbind(Action::Sprint));
+        s.click(SettingsButton::Unbind(id(Action::Jump)));
+        s.click(SettingsButton::Unbind(id(Action::Sprint)));
         s.click(SettingsButton::ResetAll);
         assert_eq!(s.bindings(), Bindings::default());
         assert!(s.app.world().resource::<SaveStore>().load_keybinds().is_empty(), "back to nothing changed");
@@ -749,7 +774,7 @@ mod tests {
         s.click(SettingsButton::Section(Section::Keybinds));
         s.type_text("key:a");
         assert_eq!(s.app.world().resource::<SettingsView>().search, "key:a");
-        assert_eq!(s.rebind_buttons(), vec![Action::Left], "only the control on A is listed");
+        assert_eq!(s.rebind_buttons(), vec![id(Action::Left)], "only the control on A is listed");
         s.click(SettingsButton::ClearSearch);
         assert_eq!(s.rebind_buttons().len(), Action::ALL.len());
         s.type_text("hotbar");
@@ -770,7 +795,7 @@ mod tests {
     fn leaving_the_screen_removes_it_and_a_half_finished_rebind() {
         let mut s = screen();
         s.click(SettingsButton::Section(Section::Keybinds));
-        s.click(SettingsButton::Rebind(Action::Jump));
+        s.click(SettingsButton::Rebind(id(Action::Jump)));
         s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
         s.app.update();
         s.app.update();
@@ -780,6 +805,106 @@ mod tests {
         s.app.update();
         assert!(!s.app.world().resource::<Capture>().active(), "a rebind doesn't wait around for the next visit");
         assert_eq!(s.app.world().resource::<SettingsView>().section, Section::Player);
+    }
+
+
+    // ---- controls from mods ------------------------------------------------
+
+    use crate::mod_controls::support::{add_mod, install};
+
+    fn mod_screen() -> (Screen, crate::mod_controls::support::Installed) {
+        let installed = install(
+            "weather",
+            &[
+                ("noon.json", r#"{"id": "noon", "name": "Skip to noon", "category": "Weather", "default": "Ctrl+N", "command": "/time set noon"}"#),
+                ("broken.json", "nope"),
+            ],
+        );
+        let mut s = screen_with(Some(installed.0.clone()));
+        s.click(SettingsButton::Section(Section::Keybinds));
+        (s, installed)
+    }
+
+    #[test]
+    fn a_mods_controls_appear_under_their_own_heading_with_what_they_run() {
+        let (mut s, _keep) = mod_screen();
+        assert!(s.rebind_buttons().contains(&"weather:noon".to_string()));
+        let texts = s.texts();
+        assert!(texts.iter().any(|t| t == "Weather"), "the mod's heading");
+        assert!(texts.iter().any(|t| t == "Skip to noon"));
+        assert!(texts.iter().any(|t| t == "Ctrl+N"), "its default chord");
+        assert!(texts.iter().any(|t| t == "runs /time set noon"), "and what pressing it does, so it is not a mystery key");
+    }
+
+    #[test]
+    fn a_broken_mod_file_is_reported_on_the_screen_without_hiding_the_rest() {
+        let (mut s, _keep) = mod_screen();
+        assert!(s.texts().iter().any(|t| t.starts_with("Mod control skipped:") && t.contains("broken.json")));
+        assert_eq!(s.rebind_buttons().len(), Action::ALL.len() + 1, "the good control is there");
+    }
+
+    #[test]
+    fn mod_controls_can_be_searched_rebound_and_the_change_is_saved() {
+        let (mut s, _keep) = mod_screen();
+        s.type_text("noon");
+        assert_eq!(s.rebind_buttons(), vec!["weather:noon".to_string()], "found by name");
+        s.click(SettingsButton::ClearSearch);
+        s.type_text("weather");
+        assert_eq!(s.rebind_buttons(), vec!["weather:noon".to_string()], "and by its mod's heading");
+        s.click(SettingsButton::ClearSearch);
+        s.type_text("key:ctrl+n");
+        assert_eq!(s.rebind_buttons(), vec!["weather:noon".to_string()], "and by its key");
+        s.click(SettingsButton::ClearSearch);
+
+        s.click(SettingsButton::Rebind("weather:noon".into()));
+        s.press(KeyCode::F9);
+        assert_eq!(s.bindings().get("weather:noon"), Chord::parse("F9"));
+        assert_eq!(s.app.world().resource::<SaveStore>().load_keybinds()["weather:noon"], "F9");
+    }
+
+    #[test]
+    fn a_mod_control_on_a_key_the_game_uses_is_a_flagged_conflict() {
+        let (mut s, _keep) = mod_screen();
+        s.app.world_mut().resource_mut::<Bindings>().set("weather:noon", Chord::parse("E"));
+        s.app.update();
+        let texts = s.texts();
+        assert!(texts.iter().any(|t| t == "Also used by: Open inventory"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Also used by: Skip to noon"));
+    }
+
+    #[test]
+    fn entering_settings_again_picks_up_a_mod_dropped_in_meanwhile() {
+        let (mut s, keep) = mod_screen();
+        assert!(!s.rebind_buttons().contains(&"later:thing".to_string()));
+        add_mod(&keep.0, "later", &[("t.json", r#"{"id": "thing"}"#)]);
+        s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+        s.app.update();
+        s.app.update();
+        s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Settings);
+        s.app.update();
+        s.app.update();
+        s.click(SettingsButton::Section(Section::Keybinds));
+        assert!(s.rebind_buttons().contains(&"later:thing".to_string()));
+    }
+
+    #[test]
+    fn removing_a_mod_while_its_key_was_changed_keeps_the_key_for_later() {
+        let (mut s, keep) = mod_screen();
+        s.click(SettingsButton::Rebind("weather:noon".into()));
+        s.press(KeyCode::F9);
+        std::fs::remove_dir_all(keep.0.join("weather")).unwrap();
+        s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+        s.app.update();
+        s.app.update();
+        s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Settings);
+        s.app.update();
+        s.app.update();
+        s.click(SettingsButton::Section(Section::Keybinds));
+        assert!(!s.rebind_buttons().contains(&"weather:noon".to_string()), "gone from the screen");
+        // Any later change (here: another rebind) saves the file again; the removed mod's key must still be in it.
+        s.click(SettingsButton::Unbind("chat".into()));
+        let saved = s.app.world().resource::<SaveStore>().load_keybinds();
+        assert_eq!(saved["weather:noon"], "F9", "taking a mod out must not cost the player their key for it");
     }
 
     #[test]

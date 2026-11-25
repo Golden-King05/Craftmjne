@@ -26,13 +26,15 @@
 //! single text block (see `TextSpan`'s own docs: "children must be
 //! `TextSpan`, not `Text`").
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::collections::VecDeque;
 
-use crate::keybinds::{Action, Actions};
+use crate::keybinds::{Action, Actions, Bindings};
+use crate::mods::LoadedContent;
 use crate::commands::{CommandContext, CommandRegistry, CommandSuggestion, WorldRequests};
 use crate::entities::{ClearEntities, SpawnEntity};
 use crate::inventory::InventoryState;
@@ -232,6 +234,91 @@ fn clipboard_paste() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+/// Everything running a chat command needs. One `SystemParam` so the two things that
+/// run commands - typing one into the chat box and pressing a mod's bound control
+/// (`run_bound_commands`) - go through the exact same code, including the cheats flag.
+#[derive(SystemParam)]
+struct CommandEnv<'w, 's> {
+    log: ResMut<'w, ChatLog>,
+    mode: ResMut<'w, GameMode>,
+    active: ResMut<'w, ActiveWorld>,
+    store: Res<'w, SaveStore>,
+    texture_report: Res<'w, TextureReport>,
+    registry: Res<'w, CommandRegistry>,
+    world_gen: Res<'w, crate::world::WorldGen>,
+    players: Query<'w, 's, &'static crate::player::Player>,
+    spawn_events: EventWriter<'w, SpawnEntity>,
+    clear_events: EventWriter<'w, ClearEntities>,
+    state_requests: EventWriter<'w, crate::states::StateEditRequest>,
+}
+
+impl CommandEnv<'_, '_> {
+    /// Runs one command line (without its leading slash) and carries out what it asks for.
+    fn run(&mut self, rest: &str) {
+        let player_pos = self.players.single().map(|p| p.pos).unwrap_or(Vec3::ZERO);
+        let player_yaw = self.players.single().map(|p| p.yaw).unwrap_or(0.0);
+        let mut requests = WorldRequests::default();
+        let mut ctx = CommandContext {
+            mode: &mut self.mode,
+            active: &mut self.active,
+            store: &self.store,
+            texture_report: &self.texture_report,
+            world_gen: &self.world_gen.0,
+            player_pos,
+            player_yaw,
+            requests: &mut requests,
+        };
+        let outcome = self.registry.execute(rest, &mut ctx);
+        let message = outcome.message();
+        if !message.is_empty() {
+            self.log.push(message);
+        }
+        for request in requests.state_edits.drain(..) {
+            self.state_requests.write(request);
+        }
+        for spawn in requests.spawns.drain(..) {
+            self.spawn_events.write(spawn);
+        }
+        if requests.clear_entities {
+            self.clear_events.write(ClearEntities);
+        }
+    }
+}
+
+/// Pressing a control that has a `command` runs it, as if typed into chat - but only
+/// when nothing else owns the keyboard, and only in a world that uses the mod that
+/// defined it (a control from an uninstalled or unused mod does nothing).
+#[allow(clippy::too_many_arguments)]
+fn run_bound_commands(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    bindings: Res<Bindings>,
+    loaded: Option<Res<LoadedContent>>,
+    chat: Res<ChatState>,
+    paused: Res<PauseState>,
+    inventory: Res<InventoryState>,
+    death: Res<DeathState>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut env: CommandEnv,
+) {
+    if chat.open || paused.open || inventory.open || death.open || !crate::player::cursor_grabbed(windows) {
+        return;
+    }
+    let lines: Vec<String> = bindings
+        .defs()
+        .iter()
+        .filter(|d| {
+            d.command.is_some()
+                && d.source.as_ref().is_none_or(|s| loaded.as_ref().is_some_and(|l| l.mods.iter().any(|m| m.path == s.path)))
+                && bindings.just_pressed(d.id.as_str(), &keys, &mouse)
+        })
+        .filter_map(|d| d.command.clone())
+        .collect();
+    for line in lines {
+        env.run(line.trim_start_matches('/'));
+    }
+}
+
 /// Runs after `toggle_chat`. Reads raw `KeyboardInput` events (rather than
 /// `ButtonInput`) so it sees the actual typed characters, same approach as
 /// the create-world text fields in `menu.rs`. `keys` is only consulted for
@@ -242,18 +329,8 @@ fn chat_text_input(
     mut events: EventReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut chat: ResMut<ChatState>,
-    mut log: ResMut<ChatLog>,
-    mut mode: ResMut<GameMode>,
-    mut active: ResMut<ActiveWorld>,
-    store: Res<SaveStore>,
-    texture_report: Res<TextureReport>,
-    registry: Res<CommandRegistry>,
-    world_gen: Res<crate::world::WorldGen>,
-    players: Query<&crate::player::Player>,
+    mut env: CommandEnv,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut spawn_events: EventWriter<SpawnEntity>,
-    mut clear_events: EventWriter<ClearEntities>,
-    mut state_requests: EventWriter<crate::states::StateEditRequest>,
 ) {
     if !chat.open {
         events.clear();
@@ -283,35 +360,9 @@ fn chat_text_input(
                 let text = chat.input.trim().to_string();
                 if !text.is_empty() {
                     if let Some(rest) = text.strip_prefix('/') {
-                        let player_pos = players.single().map(|p| p.pos).unwrap_or(Vec3::ZERO);
-                        let player_yaw = players.single().map(|p| p.yaw).unwrap_or(0.0);
-                        let mut requests = WorldRequests::default();
-                        let mut ctx = CommandContext {
-                            mode: &mut mode,
-                            active: &mut active,
-                            store: &store,
-                            texture_report: &texture_report,
-                            world_gen: &world_gen.0,
-                            player_pos,
-                            player_yaw,
-                            requests: &mut requests,
-                        };
-                        let outcome = registry.execute(rest, &mut ctx);
-                        let message = outcome.message();
-                        if !message.is_empty() {
-                            log.push(message);
-                        }
-                        for request in requests.state_edits.drain(..) {
-                            state_requests.write(request);
-                        }
-                        for spawn in requests.spawns.drain(..) {
-                            spawn_events.write(spawn);
-                        }
-                        if requests.clear_entities {
-                            clear_events.write(ClearEntities);
-                        }
+                        env.run(rest);
                     } else {
-                        log.push(text);
+                        env.log.push(text);
                     }
                 }
                 chat.open = false;
@@ -573,12 +624,14 @@ impl Plugin for ChatPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatState>()
             .init_resource::<ChatLog>()
+            .init_resource::<Bindings>()
             .add_systems(OnEnter(AppState::InGame), setup_chat)
             .add_systems(OnExit(AppState::InGame), despawn_chat)
             .add_systems(
                 Update,
                 (
                     toggle_chat,
+                    run_bound_commands,
                     chat_text_input,
                     click_suggestion,
                     update_chat_suggestions,
@@ -783,5 +836,127 @@ mod tests {
         let log = ChatLog::default();
         let segs = visible_log_segments(&chat, &log);
         assert_eq!(segs, vec![ColoredSegment { text: String::new(), color: None }]);
+    }
+
+    // ---- controls that run commands ----------------------------------------
+
+    use crate::keybinds::{Chord, ControlDef, ControlSource};
+    use crate::mods::ModSource;
+    use crate::save::WorldMeta;
+    use std::sync::Arc;
+
+    fn control_app(mod_path: Option<&str>, world_uses_it: bool, command: &str, chord: &str) -> App {
+        let reg = crate::blocks::BlockRegistry::with_defaults();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<ButtonInput<KeyCode>>().init_resource::<ButtonInput<MouseButton>>();
+        app.add_event::<SpawnEntity>().add_event::<ClearEntities>().add_event::<crate::states::StateEditRequest>();
+        app.init_resource::<ChatLog>().init_resource::<ChatState>().init_resource::<PauseState>().init_resource::<InventoryState>().init_resource::<DeathState>();
+        app.init_resource::<TextureReport>();
+        app.insert_resource(GameMode::Survival);
+        app.insert_resource(CommandRegistry::with_defaults());
+        app.insert_resource(crate::world::WorldGen(Arc::new(crate::terrain::TerrainGenerator::new(7, &reg))));
+        let root = std::env::temp_dir().join(format!("craftmjne-ctl-{}", std::process::id()));
+        app.insert_resource(SaveStore::at(root));
+        app.insert_resource(ActiveWorld {
+            slug: "ctl".into(),
+            meta: WorldMeta {
+                name: "W".into(),
+                seed: 7,
+                format: 0,
+                mode: GameMode::Survival,
+                cheats: false,
+                mods: Vec::new(),
+                mod_storage: Default::default(),
+                branch_of: None,
+                mod_ids: Default::default(),
+                created_at: 0,
+                last_played_at: 0,
+            },
+        });
+        let mut bindings = Bindings::default();
+        let mut def = ControlDef::new("m:creative", "Go creative", "Mod m").with_command(command);
+        def.default = Chord::parse(chord);
+        if let Some(path) = mod_path {
+            def.source = Some(ControlSource { mod_id: "m".into(), mod_name: "Mod m".into(), path: path.into() });
+        }
+        assert!(bindings.register(def));
+        app.insert_resource(bindings);
+        let mods = if world_uses_it { vec![ModSource { ns: "m".into(), path: mod_path.unwrap_or("").into() }] } else { Vec::new() };
+        app.insert_resource(LoadedContent { mods, ..default() });
+        app.world_mut().spawn((
+            Window { cursor_options: bevy::window::CursorOptions { grab_mode: CursorGrabMode::Locked, ..default() }, ..default() },
+            PrimaryWindow,
+        ));
+        app.add_systems(Update, run_bound_commands);
+        app
+    }
+
+    fn tap(app: &mut App, key: KeyCode) {
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(key);
+        app.update();
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(key);
+        keys.clear();
+    }
+
+    fn mode(app: &App) -> GameMode {
+        *app.world().resource::<GameMode>()
+    }
+
+    #[test]
+    fn pressing_a_mods_control_runs_its_command_in_a_world_that_uses_the_mod() {
+        let mut app = control_app(Some("/mods/m"), true, "/mode creative", "F7");
+        tap(&mut app, KeyCode::KeyG);
+        assert_eq!(mode(&app), GameMode::Survival, "an unrelated key does nothing");
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Creative, "F7 ran /mode creative");
+        assert!(app.world().resource::<ActiveWorld>().meta.cheats, "and it counts as using a command, same as typing it");
+    }
+
+    #[test]
+    fn the_slash_is_optional_in_a_controls_command() {
+        let mut app = control_app(Some("/mods/m"), true, "mode creative", "F7");
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Creative);
+    }
+
+    #[test]
+    fn a_mods_control_does_nothing_in_a_world_that_does_not_use_the_mod() {
+        let mut app = control_app(Some("/mods/m"), false, "/mode creative", "F7");
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Survival);
+    }
+
+    #[test]
+    fn a_control_registered_by_code_has_no_mod_to_be_in_and_just_works() {
+        let mut app = control_app(None, false, "/mode creative", "F7");
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Creative);
+    }
+
+    #[test]
+    fn an_unbound_control_and_a_busy_keyboard_run_nothing() {
+        let mut app = control_app(Some("/mods/m"), true, "/mode creative", "none");
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Survival, "unbound");
+
+        let mut app = control_app(Some("/mods/m"), true, "/mode creative", "F7");
+        app.world_mut().resource_mut::<ChatState>().open = true;
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Survival, "typing in chat must not trigger controls");
+
+        let mut app = control_app(Some("/mods/m"), true, "/mode creative", "F7");
+        app.world_mut().resource_mut::<PauseState>().open = true;
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Survival, "nor does the pause menu");
+
+        let mut app = control_app(Some("/mods/m"), true, "/mode creative", "F7");
+        let mut q = app.world_mut().query::<&mut Window>();
+        for mut w in q.iter_mut(app.world_mut()) {
+            w.cursor_options.grab_mode = CursorGrabMode::None;
+        }
+        tap(&mut app, KeyCode::F7);
+        assert_eq!(mode(&app), GameMode::Survival, "nor does a free cursor (a menu is up)");
     }
 }

@@ -12,12 +12,34 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A fresh identifier for an instance: unique across launches (the clock) and
+/// within one (a counter), and made only of characters that are safe in a file
+/// name, because the game keeps this instance's controls in a folder named after
+/// it. See [`Instance::id`].
+pub fn new_instance_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("i{:x}{:x}", nanos, COUNTER.fetch_add(1, Ordering::Relaxed))
+}
 
 /// One launch configuration. Everything except `version` is optional
 /// polish - a brand new instance with just a name and a version is
 /// completely usable.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
+    /// Who this instance *is*, independent of its name and version. The name can
+    /// be edited and the version changes with every update, so neither can say
+    /// "the same instance"; this does. The game is started with `--instance <id>`
+    /// and keeps this instance's controls under it, which is what lets a player's
+    /// keybinds survive renaming the instance and updating its game version.
+    /// Missing in an older `instances.json`; [`Instances::ensure_ids`] fills it.
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     /// The release version this instance runs, matching a directory under
     /// `Paths::versions_dir`. May legitimately name a version that isn't
@@ -39,6 +61,7 @@ pub struct Instance {
 impl Instance {
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
+            id: new_instance_id(),
             name: name.into(),
             version: version.into(),
             render_distance: None,
@@ -50,6 +73,10 @@ impl Instance {
     /// The command-line arguments this instance starts the game with.
     pub fn launch_args(&self) -> Vec<String> {
         let mut args = Vec::new();
+        if !self.id.is_empty() {
+            args.push("--instance".to_string());
+            args.push(self.id.clone());
+        }
         if let Some(rd) = self.render_distance {
             args.push("--render-distance".to_string());
             args.push(rd.to_string());
@@ -118,6 +145,23 @@ impl Instances {
         name
     }
 
+    /// Gives every instance an id, and a new one to any that share an id (a
+    /// hand-copied entry would otherwise share another instance's controls).
+    /// Returns whether anything changed - the caller must then *save*, or the next
+    /// launch invents different ids and the controls saved under these are orphaned.
+    pub fn ensure_ids(&mut self) -> bool {
+        let mut changed = false;
+        let mut seen = std::collections::HashSet::new();
+        for item in &mut self.items {
+            if item.id.is_empty() || !seen.insert(item.id.clone()) {
+                item.id = new_instance_id();
+                seen.insert(item.id.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn remove(&mut self, index: usize) {
         if index < self.items.len() {
             self.items.remove(index);
@@ -130,8 +174,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_bare_instance_launches_with_no_arguments_at_all() {
-        assert!(Instance::new("Default", "1.0.0").launch_args().is_empty());
+    fn a_bare_instance_launches_with_only_its_identity() {
+        let instance = Instance::new("Default", "1.0.0");
+        assert_eq!(instance.launch_args(), vec!["--instance".to_string(), instance.id.clone()]);
     }
 
     #[test]
@@ -141,7 +186,7 @@ mod tests {
         instance.seed = Some(42);
         assert_eq!(
             instance.launch_args(),
-            vec!["--render-distance", "12", "--seed", "42"]
+            vec!["--instance", instance.id.as_str(), "--render-distance", "12", "--seed", "42"]
         );
     }
 
@@ -149,7 +194,7 @@ mod tests {
     fn extra_args_are_split_on_whitespace_and_appended() {
         let mut instance = Instance::new("Raw", "1.0.0");
         instance.extra_args = "  --some-future-flag   --version ".to_string();
-        assert_eq!(instance.launch_args(), vec!["--some-future-flag", "--version"]);
+        assert_eq!(instance.launch_args()[2..], ["--some-future-flag", "--version"]);
     }
 
     #[test]
@@ -159,6 +204,50 @@ mod tests {
         assert_eq!(instances.add(Instance::new("Main", "1.0.0")), "Main (2)");
         assert_eq!(instances.add(Instance::new("Main", "1.0.0")), "Main (3)");
         assert_eq!(instances.items.len(), 3);
+    }
+
+
+    #[test]
+    fn ids_are_unique_and_safe_in_a_file_name() {
+        let ids: std::collections::HashSet<String> = (0..500).map(|_| new_instance_id()).collect();
+        assert_eq!(ids.len(), 500);
+        for id in ids {
+            assert!(id.chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
+        }
+    }
+
+    #[test]
+    fn an_instances_identity_survives_renaming_and_updating_its_version() {
+        let mut instance = Instance::new("Survival", "2.0.0");
+        let id = instance.id.clone();
+        instance.name = "Survival (modded)".to_string();
+        instance.version = "2.1.0".to_string();
+        assert_eq!(instance.id, id);
+        assert_eq!(instance.launch_args()[..2], ["--instance".to_string(), id]);
+    }
+
+    #[test]
+    fn an_old_instances_file_without_ids_gets_them_once_and_keeps_them() {
+        let old = r#"{"items":[{"name":"A","version":"1.0.0"},{"name":"B","version":"1.0.0"}]}"#;
+        let mut instances: Instances = serde_json::from_str(old).unwrap();
+        assert!(instances.items.iter().all(|i| i.id.is_empty()));
+        assert!(instances.ensure_ids());
+        let ids: Vec<String> = instances.items.iter().map(|i| i.id.clone()).collect();
+        assert!(ids.iter().all(|i| !i.is_empty()) && ids[0] != ids[1]);
+        assert!(!instances.ensure_ids(), "a second pass changes nothing, so the ids are stable once saved");
+        assert_eq!(instances.items.iter().map(|i| i.id.clone()).collect::<Vec<_>>(), ids);
+    }
+
+    #[test]
+    fn two_instances_sharing_an_id_are_split_so_they_cannot_share_controls() {
+        let mut a = Instance::new("A", "1.0.0");
+        let mut b = Instance::new("B", "1.0.0");
+        b.id = a.id.clone();
+        let mut instances = Instances { items: vec![a.clone(), b], dev_builds_enabled: false };
+        assert!(instances.ensure_ids());
+        a.name.clear();
+        assert_eq!(instances.items[0].id, a.id, "the first keeps its id");
+        assert_ne!(instances.items[1].id, a.id);
     }
 
     #[test]

@@ -464,70 +464,252 @@ impl Action {
 }
 
 // ---------------------------------------------------------------------------
-// Bindings
+// Controls and bindings
 // ---------------------------------------------------------------------------
 
+/// Anything that names a control: a built-in [`Action`] or a plain id string
+/// (`"granite_pack:dig_deep"`). Lets every [`Bindings`] and [`Actions`] method take
+/// either, so the game's own code keeps saying `Action::Jump` while a mod or
+/// plugin says `"mymod:thing"`.
+pub trait Control {
+    fn control_id(&self) -> &str;
+}
+
+impl Control for Action {
+    fn control_id(&self) -> &str {
+        self.id()
+    }
+}
+
+impl Control for str {
+    fn control_id(&self) -> &str {
+        self
+    }
+}
+
+impl Control for String {
+    fn control_id(&self) -> &str {
+        self
+    }
+}
+
+impl<T: Control + ?Sized> Control for &T {
+    fn control_id(&self) -> &str {
+        (**self).control_id()
+    }
+}
+
+/// Which mod a control came from.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ControlSource {
+    /// The mod's declared id (the prefix of the control's id).
+    pub mod_id: String,
+    pub mod_name: String,
+    /// The mod's folder - what tells whether the current world uses it.
+    pub path: std::path::PathBuf,
+}
+
+/// One entry in the Keybinds screen: what it's called, where it's listed, what it
+/// starts bound to, and optionally a chat command it runs.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ControlDef {
+    /// Unique. The game's own are bare (`jump`); a mod's are `<mod id>:<name>`.
+    pub id: String,
+    pub label: String,
+    /// The heading it's listed under.
+    pub category: String,
+    pub default: Option<Chord>,
+    /// A chat command (`/time set day`, with or without the slash) to run when the
+    /// control is pressed in a world. Without one the control only exists for code
+    /// that asks about it (`Actions::just_pressed("mymod:thing")`).
+    pub command: Option<String>,
+    pub source: Option<ControlSource>,
+}
+
+impl ControlDef {
+    pub fn new(id: impl Into<String>, label: impl Into<String>, category: impl Into<String>) -> Self {
+        Self { id: id.into(), label: label.into(), category: category.into(), default: None, command: None, source: None }
+    }
+
+    pub fn with_default(mut self, chord: Chord) -> Self {
+        self.default = Some(chord);
+        self
+    }
+
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
+        self
+    }
+}
+
+/// Every control that exists and what each is bound to right now.
+///
+/// Starts with the game's own ([`Action`]); a mod's `keybinds/*.json` or a plugin's
+/// code adds more with [`Bindings::register`]. A saved change for a control that
+/// isn't registered *right now* (its mod was removed) is parked, not dropped, and
+/// applied if the control ever comes back - otherwise taking a mod out for a while
+/// would silently throw away the player's keys for it.
 #[derive(Resource, Clone, PartialEq, Debug)]
 pub struct Bindings {
-    chords: HashMap<Action, Option<Chord>>,
+    defs: Vec<ControlDef>,
+    chords: HashMap<String, Option<Chord>>,
+    /// Saved changes (`id -> chord text`) waiting for their control to exist.
+    pending: BTreeMap<String, String>,
+}
+
+fn builtin_defs() -> Vec<ControlDef> {
+    Action::ALL
+        .iter()
+        .map(|a| ControlDef {
+            id: a.id().to_string(),
+            label: a.label().to_string(),
+            category: a.category().name().to_string(),
+            default: a.default_chord(),
+            command: None,
+            source: None,
+        })
+        .collect()
 }
 
 impl Default for Bindings {
     fn default() -> Self {
-        Self { chords: Action::ALL.iter().map(|a| (*a, a.default_chord())).collect() }
+        let defs = builtin_defs();
+        let chords = defs.iter().map(|d| (d.id.clone(), d.default)).collect();
+        Self { defs, chords, pending: BTreeMap::new() }
+    }
+}
+
+/// `none` or a chord; `None` when the text is neither.
+fn parse_saved(text: &str) -> Option<Option<Chord>> {
+    if text.trim().eq_ignore_ascii_case("none") {
+        Some(None)
+    } else {
+        Chord::parse(text).map(Some)
     }
 }
 
 impl Bindings {
-    pub fn get(&self, action: Action) -> Option<Chord> {
-        self.chords.get(&action).copied().flatten()
+    pub fn defs(&self) -> &[ControlDef] {
+        &self.defs
     }
 
-    pub fn set(&mut self, action: Action, chord: Option<Chord>) {
-        self.chords.insert(action, chord);
+    pub fn def(&self, id: &str) -> Option<&ControlDef> {
+        self.defs.iter().find(|d| d.id == id)
     }
 
-    pub fn reset(&mut self, action: Action) {
-        self.set(action, action.default_chord());
+    /// Headings in the order they first appear: the game's own, then each mod's.
+    pub fn categories(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for d in &self.defs {
+            if !out.contains(&d.category) {
+                out.push(d.category.clone());
+            }
+        }
+        out
     }
 
+    /// Adds a control. Returns `false`, changing nothing, if its id is empty or
+    /// already taken - the first to claim an id keeps it, so a mod can never take
+    /// over one of the game's own controls. If a saved change was waiting for this
+    /// id, it is applied.
+    pub fn register(&mut self, def: ControlDef) -> bool {
+        if def.id.is_empty() || self.chords.contains_key(&def.id) {
+            return false;
+        }
+        let chord = self.pending.remove(&def.id).and_then(|text| parse_saved(&text)).unwrap_or(def.default);
+        self.chords.insert(def.id.clone(), chord);
+        self.defs.push(def);
+        true
+    }
+
+    /// The controls that came from mods, in order.
+    pub fn mod_defs(&self) -> Vec<ControlDef> {
+        self.defs.iter().filter(|d| d.source.is_some()).cloned().collect()
+    }
+
+    /// Replaces every mod-provided control with this set (used when the installed
+    /// mods change). A changed key of a control that is going away is parked.
+    /// Returns the ids that were refused (already taken).
+    pub fn set_mod_controls(&mut self, new: Vec<ControlDef>) -> Vec<String> {
+        let old: Vec<String> = self.defs.iter().filter(|d| d.source.is_some()).map(|d| d.id.clone()).collect();
+        for id in &old {
+            if !self.is_default(id.as_str()) {
+                let text = self.get(id.as_str()).map(|c| c.display()).unwrap_or_else(|| "none".to_string());
+                self.pending.insert(id.clone(), text);
+            }
+            self.chords.remove(id);
+        }
+        self.defs.retain(|d| d.source.is_none());
+        new.into_iter().filter_map(|d| { let id = d.id.clone(); (!self.register(d)).then_some(id) }).collect()
+    }
+
+    pub fn get(&self, control: impl Control) -> Option<Chord> {
+        self.chords.get(control.control_id()).copied().flatten()
+    }
+
+    /// Binds (or, with `None`, unbinds) a control. Ignored for an id that isn't registered.
+    pub fn set(&mut self, control: impl Control, chord: Option<Chord>) {
+        if let Some(slot) = self.chords.get_mut(control.control_id()) {
+            *slot = chord;
+        }
+    }
+
+    pub fn default_of(&self, control: impl Control) -> Option<Chord> {
+        self.def(control.control_id()).and_then(|d| d.default)
+    }
+
+    pub fn reset(&mut self, control: impl Control) {
+        let id = control.control_id();
+        let default = self.default_of(id);
+        self.set(id, default);
+    }
+
+    /// Every control back to its default, including any parked change for a mod
+    /// that isn't installed ("reset all" means all).
     pub fn reset_all(&mut self) {
-        *self = Bindings::default();
+        for d in &self.defs {
+            self.chords.insert(d.id.clone(), d.default);
+        }
+        self.pending.clear();
     }
 
-    pub fn is_default(&self, action: Action) -> bool {
-        self.get(action) == action.default_chord()
+    pub fn is_default(&self, control: impl Control) -> bool {
+        let id = control.control_id();
+        self.get(id) == self.default_of(id)
     }
 
-    /// Every other action bound to exactly this action's chord.
-    pub fn conflicts_with(&self, action: Action) -> Vec<Action> {
-        let Some(chord) = self.get(action) else { return Vec::new() };
-        Action::ALL.iter().copied().filter(|o| *o != action && self.get(*o) == Some(chord)).collect()
+    /// Every other control bound to exactly this one's chord.
+    pub fn conflicts_with(&self, control: impl Control) -> Vec<String> {
+        let id = control.control_id();
+        let Some(chord) = self.get(id) else { return Vec::new() };
+        self.defs.iter().filter(|d| d.id != id && self.get(d.id.as_str()) == Some(chord)).map(|d| d.id.clone()).collect()
     }
 
-    /// Every action that shares its chord with at least one other.
-    pub fn conflicting(&self) -> HashSet<Action> {
-        Action::ALL.iter().copied().filter(|a| !self.conflicts_with(*a).is_empty()).collect()
+    /// Every control that shares its chord with at least one other.
+    pub fn conflicting(&self) -> HashSet<String> {
+        self.defs.iter().filter(|d| !self.conflicts_with(d.id.as_str()).is_empty()).map(|d| d.id.clone()).collect()
     }
 
     /// A more specific chord on the same input that is held right now wins.
-    fn shadowed(&self, action: Action, chord: Chord, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
-        Action::ALL.iter().any(|o| {
-            *o != action
+    fn shadowed(&self, id: &str, chord: Chord, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+        self.defs.iter().any(|d| {
+            d.id != id
                 && self
-                    .get(*o)
+                    .get(d.id.as_str())
                     .is_some_and(|c| c.input == chord.input && c.more_specific_than(&chord) && c.held(keys, mouse))
         })
     }
 
-    /// Is the action held down?
-    pub fn pressed(&self, action: Action, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
-        self.get(action).is_some_and(|c| c.held(keys, mouse) && !self.shadowed(action, c, keys, mouse))
+    /// Is the control held down?
+    pub fn pressed(&self, control: impl Control, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+        let id = control.control_id();
+        self.get(id).is_some_and(|c| c.held(keys, mouse) && !self.shadowed(id, c, keys, mouse))
     }
 
     /// Did it start this frame?
-    pub fn just_pressed(&self, action: Action, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
-        self.get(action).is_some_and(|c| c.just_pressed(keys, mouse) && !self.shadowed(action, c, keys, mouse))
+    pub fn just_pressed(&self, control: impl Control, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+        let id = control.control_id();
+        self.get(id).is_some_and(|c| c.just_pressed(keys, mouse) && !self.shadowed(id, c, keys, mouse))
     }
 
     /// The movement actions expressed as the fixed keys `Player::step` reads, so
@@ -550,29 +732,39 @@ impl Bindings {
         out
     }
 
-    /// What differs from the defaults, as `id -> chord text` (`none` = unbound).
+    /// What differs from the defaults, as `id -> chord text` (`none` = unbound),
+    /// including parked changes for controls that aren't registered right now.
     pub fn overrides(&self) -> BTreeMap<String, String> {
-        Action::ALL
-            .iter()
-            .filter(|a| !self.is_default(**a))
-            .map(|a| (a.id().to_string(), self.get(*a).map(|c| c.display()).unwrap_or_else(|| "none".to_string())))
-            .collect()
-    }
-
-    /// The defaults with a saved set of changes on top. An unknown action or an
-    /// unreadable chord is skipped, never an error: a file from a newer or older
-    /// version, or a hand edit, must not stop the game starting.
-    pub fn from_overrides(saved: &BTreeMap<String, String>) -> Self {
-        let mut bindings = Bindings::default();
-        for (id, text) in saved {
-            let Some(action) = Action::from_id(id) else { continue };
-            if text.trim().eq_ignore_ascii_case("none") {
-                bindings.set(action, None);
-            } else if let Some(chord) = Chord::parse(text) {
-                bindings.set(action, Some(chord));
+        let mut out = self.pending.clone();
+        for d in &self.defs {
+            if !self.is_default(d.id.as_str()) {
+                out.insert(d.id.clone(), self.get(d.id.as_str()).map(|c| c.display()).unwrap_or_else(|| "none".to_string()));
             }
         }
+        out
+    }
+
+    /// The game's own controls with a saved set of changes on top. A change for a
+    /// control that doesn't exist yet is parked for when it does; an unreadable
+    /// chord for one that does is ignored. Never an error: a file from a newer or
+    /// older version, or a hand edit, must not stop the game starting.
+    pub fn from_overrides(saved: &BTreeMap<String, String>) -> Self {
+        let mut bindings = Bindings::default();
+        bindings.apply_saved(saved);
         bindings
+    }
+
+    /// Applies saved changes to what is registered and parks the rest.
+    pub fn apply_saved(&mut self, saved: &BTreeMap<String, String>) {
+        for (id, text) in saved {
+            if self.chords.contains_key(id) {
+                if let Some(chord) = parse_saved(text) {
+                    self.chords.insert(id.clone(), chord);
+                }
+            } else {
+                self.pending.insert(id.clone(), text.clone());
+            }
+        }
     }
 }
 
@@ -618,30 +810,36 @@ fn segment_has(chord: &Chord, segment: &str) -> bool {
 /// - `key:` alone: everything that is bound
 /// - `is:conflict`, `is:unbound`, `is:changed`
 /// - anything else: every word must appear in the action's name, category or id
-pub fn search(bindings: &Bindings, query: &str) -> Vec<Action> {
+pub fn search(bindings: &Bindings, query: &str) -> Vec<String> {
     let q = query.trim().to_lowercase();
-    let all = Action::ALL.iter().copied();
+    let all = bindings.defs().iter().map(|d| d.id.as_str());
     if let Some(rest) = q.strip_prefix("key:") {
         let tokens: Vec<&str> = rest.split('+').map(str::trim).filter(|t| !t.is_empty()).collect();
         return all
             .filter(|a| bindings.get(*a).is_some_and(|c| tokens.iter().all(|t| segment_has(&c, t))))
+            .map(str::to_string)
             .collect();
     }
     if let Some(rest) = q.strip_prefix("is:") {
         let conflicting = bindings.conflicting();
         return match rest.trim() {
-            "conflict" | "conflicts" => all.filter(|a| conflicting.contains(a)).collect(),
-            "unbound" | "none" => all.filter(|a| bindings.get(*a).is_none()).collect(),
-            "changed" | "custom" => all.filter(|a| !bindings.is_default(*a)).collect(),
+            "conflict" | "conflicts" => all.filter(|a| conflicting.contains(*a)).map(str::to_string).collect(),
+            "unbound" | "none" => all.filter(|a| bindings.get(*a).is_none()).map(str::to_string).collect(),
+            "changed" | "custom" => all.filter(|a| !bindings.is_default(*a)).map(str::to_string).collect(),
             _ => Vec::new(),
         };
     }
     let words: Vec<&str> = q.split_whitespace().collect();
-    all.filter(|a| {
-        let hay = format!("{} {} {}", a.label(), a.category().name(), a.id()).to_lowercase();
-        words.iter().all(|w| hay.contains(w))
-    })
-    .collect()
+    bindings
+        .defs()
+        .iter()
+        .filter(|d| {
+            let from = d.source.as_ref().map(|s| s.mod_name.as_str()).unwrap_or("");
+            let hay = format!("{} {} {} {from}", d.label, d.category, d.id).to_lowercase();
+            words.iter().all(|w| hay.contains(w))
+        })
+        .map(|d| d.id.clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +856,7 @@ pub enum CaptureEvent {
 /// "Press the new combo now". Resolved by [`Capture::step`] once a frame.
 #[derive(Resource, Default)]
 pub struct Capture {
-    pub target: Option<Action>,
+    pub target: Option<String>,
     /// Frames still to ignore: the click that pressed "Rebind" is itself a mouse
     /// press this frame and must not become the binding.
     warmup: u8,
@@ -669,8 +867,8 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(&mut self, action: Action) {
-        self.target = Some(action);
+    pub fn start(&mut self, control: impl Control) {
+        self.target = Some(control.control_id().to_string());
         self.warmup = 1;
         self.pending = None;
     }
@@ -688,7 +886,7 @@ impl Capture {
     /// Esc cancels. A key or mouse button binds with whatever modifiers are held.
     /// A modifier on its own binds when released without anything else.
     pub fn step(&mut self, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> Option<CaptureEvent> {
-        self.target?;
+        self.target.as_ref()?;
         if self.warmup > 0 {
             self.warmup -= 1;
             return None;
@@ -754,14 +952,14 @@ impl Actions<'_> {
         )
     }
 
-    pub fn pressed(&self, action: Action) -> bool {
+    pub fn pressed(&self, control: impl Control) -> bool {
         let (b, k, m) = self.parts();
-        b.pressed(action, k, m)
+        b.pressed(control, k, m)
     }
 
-    pub fn just_pressed(&self, action: Action) -> bool {
+    pub fn just_pressed(&self, control: impl Control) -> bool {
         let (b, k, m) = self.parts();
-        b.just_pressed(action, k, m)
+        b.just_pressed(control, k, m)
     }
 
     /// The fixed-key view of the movement actions (see [`Bindings::movement_input`]).
@@ -793,6 +991,10 @@ impl Plugin for KeybindPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(actions: &[Action]) -> Vec<String> {
+        actions.iter().map(|a| a.id().to_string()).collect()
+    }
 
     fn input(keys: &[KeyCode], mouse_buttons: &[MouseButton]) -> (ButtonInput<KeyCode>, ButtonInput<MouseButton>) {
         let mut k = ButtonInput::<KeyCode>::default();
@@ -923,9 +1125,9 @@ mod tests {
     fn identical_chords_conflict_and_a_mere_modifier_difference_does_not() {
         let mut b = Bindings::default();
         b.set(Action::Chat, Chord::parse("E"));
-        assert_eq!(b.conflicts_with(Action::Chat), vec![Action::Inventory]);
-        assert_eq!(b.conflicts_with(Action::Inventory), vec![Action::Chat]);
-        assert_eq!(b.conflicting(), HashSet::from([Action::Chat, Action::Inventory]));
+        assert_eq!(b.conflicts_with(Action::Chat), ids(&[Action::Inventory]));
+        assert_eq!(b.conflicts_with(Action::Inventory), ids(&[Action::Chat]));
+        assert_eq!(b.conflicting(), ids(&[Action::Chat, Action::Inventory]).into_iter().collect::<HashSet<_>>());
         b.set(Action::Chat, Chord::parse("Ctrl+E"));
         assert!(b.conflicting().is_empty(), "Ctrl+E and E are different chords");
         b.set(Action::Chat, None);
@@ -963,16 +1165,20 @@ mod tests {
         junk.insert("no_such_action".into(), "A".into());
         junk.insert("forward".into(), "Ctrl+Nope".into());
         let loaded = Bindings::from_overrides(&junk);
-        assert_eq!(loaded, b, "junk changes nothing; forward keeps its default");
+        assert_eq!(loaded.get(Action::Forward), Action::Forward.default_chord(), "an unreadable chord for a real control is ignored");
+        assert_eq!(loaded.get(Action::Jump), b.get(Action::Jump));
+        assert_eq!(loaded.get(Action::Chat), None);
+        assert_eq!(loaded.overrides()["no_such_action"], "A", "an unknown control's key is kept for when it exists (a mod that is only absent for now)");
+        assert!(!loaded.overrides().contains_key("forward"));
     }
 
     #[test]
     fn plain_search_matches_names_categories_and_words_together() {
         let b = Bindings::default();
-        assert_eq!(search(&b, "jump"), vec![Action::Jump]);
+        assert_eq!(search(&b, "jump"), ids(&[Action::Jump]));
         assert!(search(&b, "HOTBAR").len() == 9);
-        assert_eq!(search(&b, "hotbar 3"), vec![Action::Hotbar3]);
-        assert!(search(&b, "movement").contains(&Action::Sprint));
+        assert_eq!(search(&b, "hotbar 3"), ids(&[Action::Hotbar3]));
+        assert!(search(&b, "movement").contains(&Action::Sprint.id().to_string()));
         assert!(search(&b, "zzz").is_empty());
         assert_eq!(search(&b, "").len(), Action::ALL.len(), "an empty box shows everything");
     }
@@ -980,14 +1186,14 @@ mod tests {
     #[test]
     fn key_search_finds_what_is_bound_to_a_key() {
         let b = Bindings::default();
-        assert_eq!(search(&b, "key:a"), vec![Action::Left], "A, not Alt or anything starting with a");
-        assert_eq!(search(&b, "key:space"), vec![Action::Jump]);
-        assert_eq!(search(&b, "KEY:Q"), vec![Action::DropItem, Action::DropStack], "Q alone and Ctrl+Q both use Q");
-        assert_eq!(search(&b, "key:ctrl"), vec![Action::Sprint, Action::DropStack], "Ctrl as a key and as a modifier");
-        assert_eq!(search(&b, "key:ctrl+q"), vec![Action::DropStack], "every named key must be in the chord");
-        assert_eq!(search(&b, "key:q ctrl"), vec![Action::DropStack], "spaces work too");
-        assert_eq!(search(&b, "key:left click"), vec![Action::Attack]);
-        assert_eq!(search(&b, "key:1"), vec![Action::Hotbar1]);
+        assert_eq!(search(&b, "key:a"), ids(&[Action::Left]), "A, not Alt or anything starting with a");
+        assert_eq!(search(&b, "key:space"), ids(&[Action::Jump]));
+        assert_eq!(search(&b, "KEY:Q"), ids(&[Action::DropItem, Action::DropStack]), "Q alone and Ctrl+Q both use Q");
+        assert_eq!(search(&b, "key:ctrl"), ids(&[Action::Sprint, Action::DropStack]), "Ctrl as a key and as a modifier");
+        assert_eq!(search(&b, "key:ctrl+q"), ids(&[Action::DropStack]), "every named key must be in the chord");
+        assert_eq!(search(&b, "key:q ctrl"), ids(&[Action::DropStack]), "spaces work too");
+        assert_eq!(search(&b, "key:left click"), ids(&[Action::Attack]));
+        assert_eq!(search(&b, "key:1"), ids(&[Action::Hotbar1]));
         assert!(search(&b, "key:zzz").is_empty());
         assert_eq!(search(&b, "key:").len(), Action::ALL.len(), "everything here is bound");
     }
@@ -995,10 +1201,10 @@ mod tests {
     #[test]
     fn a_half_typed_key_name_still_finds_it() {
         let b = Bindings::default();
-        assert_eq!(search(&b, "key:spa"), vec![Action::Jump]);
-        assert_eq!(search(&b, "key:esc"), vec![Action::Pause]);
-        assert!(search(&b, "key:s").contains(&Action::Back), "one letter is an exact key, not a prefix");
-        assert!(!search(&b, "key:s").contains(&Action::Sneak), "so S does not also find Shift");
+        assert_eq!(search(&b, "key:spa"), ids(&[Action::Jump]));
+        assert_eq!(search(&b, "key:esc"), ids(&[Action::Pause]));
+        assert!(search(&b, "key:s").contains(&Action::Back.id().to_string()), "one letter is an exact key, not a prefix");
+        assert!(!search(&b, "key:s").contains(&Action::Sneak.id().to_string()), "so S does not also find Shift");
     }
 
     #[test]
@@ -1006,12 +1212,12 @@ mod tests {
         let mut b = Bindings::default();
         b.set(Action::Chat, Chord::parse("E"));
         b.set(Action::Command, None);
-        assert_eq!(search(&b, "key:e"), vec![Action::Inventory, Action::Chat]);
-        assert_eq!(search(&b, "is:conflict"), vec![Action::Inventory, Action::Chat]);
-        assert_eq!(search(&b, "is:unbound"), vec![Action::Command]);
-        assert_eq!(search(&b, "is:changed"), vec![Action::Chat, Action::Command]);
+        assert_eq!(search(&b, "key:e"), ids(&[Action::Inventory, Action::Chat]));
+        assert_eq!(search(&b, "is:conflict"), ids(&[Action::Inventory, Action::Chat]));
+        assert_eq!(search(&b, "is:unbound"), ids(&[Action::Command]));
+        assert_eq!(search(&b, "is:changed"), ids(&[Action::Chat, Action::Command]));
         assert!(search(&b, "is:wat").is_empty());
-        assert!(!search(&b, "key:/").contains(&Action::Command), "unbound means not found by key");
+        assert!(!search(&b, "key:/").contains(&Action::Command.id().to_string()), "unbound means not found by key");
     }
 
     fn frame(keys: &mut ButtonInput<KeyCode>, mouse: &mut ButtonInput<MouseButton>) {

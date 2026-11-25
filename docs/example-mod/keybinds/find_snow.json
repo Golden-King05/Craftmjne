@@ -1,0 +1,6 @@
+{
+  "id": "find_snow",
+  "name": "Find the nearest snow",
+  "default": "Ctrl+F7",
+  "command": "/locate biome snow"
+}

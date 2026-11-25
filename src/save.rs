@@ -416,23 +416,46 @@ fn slugify(name: &str) -> String {
     slug
 }
 
+/// An instance id as a folder name: anything but letters, digits, `-` and `_`
+/// becomes `_`, and nothing is empty. The id arrives on the command line, so a
+/// `..` or a path separator must not reach the file system. Identical to the
+/// launcher's `paths::instance_folder_name`.
+pub fn instance_folder_name(id: &str) -> String {
+    let cleaned: String = id.chars().take(64).map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    if cleaned.is_empty() { "_".to_string() } else { cleaned }
+}
+
 /// Injected as a `Resource` (real per-user dir in production, a throwaway
 /// temp dir in tests and smoke mode) so nothing in the engine hardcodes
 /// where saves live — see `main.rs` and `tests/headless.rs`.
 #[derive(Resource, Clone)]
 pub struct SaveStore {
     root: PathBuf,
+    /// Which launcher instance started this game (`--instance <id>`), if any.
+    /// Things that belong to one instance rather than to the whole install - the
+    /// player's controls - are kept under it; see [`SaveStore::keybinds_path`].
+    instance: Option<String>,
 }
 
 impl Default for SaveStore {
     fn default() -> Self {
-        Self { root: app_data_dir() }
+        Self { root: app_data_dir(), instance: None }
     }
 }
 
 impl SaveStore {
     pub fn at(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, instance: None }
+    }
+
+    /// The same store, acting for a launcher instance. An empty id means "no instance".
+    pub fn with_instance(mut self, id: Option<String>) -> Self {
+        self.instance = id.filter(|i| !i.trim().is_empty());
+        self
+    }
+
+    pub fn instance(&self) -> Option<&str> {
+        self.instance.as_deref()
     }
 
     fn saves_dir(&self) -> PathBuf {
@@ -596,8 +619,18 @@ impl SaveStore {
         fs::rename(&temp, &path)
     }
 
-    fn keybinds_path(&self) -> PathBuf {
-        self.root.join("keybinds.json")
+    /// Where this player's controls are saved. Started by the launcher, that is
+    /// `instances/<id>/keybinds.json` - the id (not the instance's name or game
+    /// version, which change) is what makes controls follow an instance through a
+    /// rename or an update to a newer build, and keeps two instances' controls
+    /// apart. Started on its own there is no instance, so it is `keybinds.json` in
+    /// the app-data folder. The launcher computes the same folder
+    /// (`Paths::instance_dir`) so it can show and delete it.
+    pub fn keybinds_path(&self) -> PathBuf {
+        match &self.instance {
+            Some(id) => self.root.join("instances").join(instance_folder_name(id)).join("keybinds.json"),
+            None => self.root.join("keybinds.json"),
+        }
     }
 
     /// The controls the player changed, as `action id -> chord text` (see
@@ -610,10 +643,13 @@ impl SaveStore {
     }
 
     pub fn save_keybinds(&self, changes: &std::collections::BTreeMap<String, String>) -> io::Result<()> {
-        fs::create_dir_all(&self.root)?;
-        let temp = self.keybinds_path().with_extension("json.tmp");
+        let path = self.keybinds_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
         fs::write(&temp, serde_json::to_string_pretty(changes).map_err(io::Error::other)?)?;
-        fs::rename(&temp, self.keybinds_path())
+        fs::rename(&temp, path)
     }
 
     pub fn load_graphics_settings(&self) -> GraphicsSettings {
@@ -956,5 +992,44 @@ mod tests {
         meta.cheats = true;
         store.save_meta(&slug, &meta).unwrap();
         assert!(store.load_meta(&slug).unwrap().cheats);
+    }
+
+    #[test]
+    fn controls_are_kept_per_instance_and_survive_a_version_change() {
+        let root = std::env::temp_dir().join(format!("craftmjne-instkeys-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut jump = std::collections::BTreeMap::new();
+        jump.insert("jump".to_string(), "Ctrl+J".to_string());
+        let mut chat = std::collections::BTreeMap::new();
+        chat.insert("chat".to_string(), "none".to_string());
+
+        // Two instances, plus a game started on its own.
+        let a = SaveStore::at(root.clone()).with_instance(Some("iaaa".into()));
+        let b = SaveStore::at(root.clone()).with_instance(Some("ibbb".into()));
+        let alone = SaveStore::at(root.clone());
+        a.save_keybinds(&jump).unwrap();
+        b.save_keybinds(&chat).unwrap();
+        assert_eq!(a.load_keybinds(), jump);
+        assert_eq!(b.load_keybinds(), chat, "another instance has its own");
+        assert!(alone.load_keybinds().is_empty(), "and a game run directly has neither");
+        assert_eq!(a.keybinds_path(), root.join("instances").join("iaaa").join("keybinds.json"));
+        assert_eq!(alone.keybinds_path(), root.join("keybinds.json"));
+
+        // "Updating" is the launcher starting a newer build for the same instance:
+        // a brand new store object (new process, new version) with the same id.
+        let after_update = SaveStore::at(root.clone()).with_instance(Some("iaaa".into()));
+        assert_eq!(after_update.load_keybinds(), jump, "same instance, same controls");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_hostile_instance_id_cannot_point_outside_the_instances_folder() {
+        let root = std::path::PathBuf::from("/data");
+        for bad in ["..", "../../etc", "a/b", "C:\\x"] {
+            let path = SaveStore::at(root.clone()).with_instance(Some(bad.into())).keybinds_path();
+            assert_eq!(path.parent().and_then(|p| p.parent()), Some(root.join("instances").as_path()), "{bad:?} -> {path:?}");
+        }
+        assert_eq!(SaveStore::at(root.clone()).with_instance(Some("  ".into())).instance(), None, "a blank id is no instance");
+        assert_eq!(instance_folder_name("i1f-2_x"), "i1f-2_x");
     }
 }

@@ -11,6 +11,9 @@
 //! ```text
 //! <app data>/
 //! ├── saves/                     the game's worlds - shared by every instance
+//! ├── instances/<id>/            what an instance keeps for itself (its controls),
+//! │                              named by `Instance::id` so it survives a rename
+//! │                              or a version update
 //! ├── versions/<version>/        one extracted game build per release
 //! │   └── craftmjne[.exe], blocks/, textures/
 //! └── launcher/
@@ -45,6 +48,16 @@ pub fn app_data_dir() -> PathBuf {
         }
     }
     PathBuf::from(".craftmjne")
+}
+
+/// An instance id as a folder name: anything but letters, digits, `-` and `_`
+/// becomes `_`, and nothing is left empty. The id comes from a file a person can
+/// edit, and this is also the path the launcher deletes when an instance is
+/// removed - `..` must never get through. Identical to the game's
+/// `save::instance_folder_name`.
+pub fn instance_folder_name(id: &str) -> String {
+    let cleaned: String = id.chars().take(64).map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    if cleaned.is_empty() { "_".to_string() } else { cleaned }
 }
 
 /// Every file the launcher owns lives under one root so tests can point the
@@ -82,6 +95,15 @@ impl Paths {
         self.version_dir(version).join(format!("craftmjne{}", std::env::consts::EXE_SUFFIX))
     }
 
+    /// Where the game keeps the things that belong to one instance (today its
+    /// `keybinds.json`). Named by the instance's id, not its name or version, so
+    /// renaming it or moving it to a newer game build keeps everything. The game
+    /// computes the same path from `--instance <id>` (`craftmjne`'s
+    /// `SaveStore::keybinds_path`) - if you change one, change the other.
+    pub fn instance_dir(&self, id: &str) -> PathBuf {
+        self.root.join("instances").join(instance_folder_name(id))
+    }
+
     pub fn launcher_dir(&self) -> PathBuf {
         self.root.join("launcher")
     }
@@ -115,12 +137,25 @@ mod tests {
             paths.version_dir("1.2.3"),
             paths.game_exe("1.2.3"),
             paths.launcher_dir(),
+            paths.instance_dir("iabc"),
             paths.instances_file(),
             paths.staging_dir(),
             paths.saves_dir(),
         ] {
             assert!(p.starts_with("/tmp/scratch-root"), "{p:?} escaped the root");
         }
+    }
+
+    #[test]
+    fn an_odd_instance_id_can_never_name_a_folder_outside_instances() {
+        let paths = Paths::at(PathBuf::from("/root"));
+        for bad in ["..", "../..", "a/b", "", "C:\\x", "/etc"] {
+            let dir = paths.instance_dir(bad);
+            assert_eq!(dir.parent(), Some(PathBuf::from("/root/instances").as_path()), "{bad:?} -> {dir:?}");
+        }
+        assert_eq!(instance_folder_name("i1a2b-3_c"), "i1a2b-3_c", "a real id is untouched");
+        assert_eq!(instance_folder_name(".."), "__");
+        assert_eq!(instance_folder_name(""), "_");
     }
 
     #[test]

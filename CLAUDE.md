@@ -3182,4 +3182,40 @@ etc.) instead of inventing a new approach:
   - `menu.rs` lost its Settings code to `settings.rs` (its helpers went `pub(crate)`).
     The Rebinding screen rebuilds wholesale on change (spawn-on-change), carrying the
     list's scroll offset across in `SettingsView::scroll`.
+- **Controls became string-id'd so mods and plugins can add them, and "which controls exist"
+  is data on `Bindings`, not the `Action` enum.** `Action` is still the typed handle for the
+  game's *own* controls (`act.pressed(Action::Jump)`), but `Bindings` now holds
+  `ControlDef { id, label, category, default, command, source }` for everything and every
+  method takes `impl Control` (an `Action` or any id string). Mods add controls from
+  `keybinds/*.json` (`mod_controls.rs`, read from the **installed** mods folder on startup, when
+  Settings opens and when a world loads); plugins call `Bindings::register`. Things to keep:
+  - **Ids are `modid:name`, so a mod can't take a built-in id** (no colon in the built-ins),
+    and `register` refuses a taken id, first claim wins. Mod controls start **unbound** unless
+    the file gives a `default` - never grab a player's key unasked.
+  - **A key set for a control that isn't registered right now is parked, not dropped**
+    (`Bindings::pending`, included in `overrides()`, re-applied on `register`). Without it,
+    uninstalling a mod once and saving anything would silently delete the player's key for it.
+    `reset_all` is the one thing that clears the parked ones. Same lesson as the world shelf.
+  - **A mod control's `command` runs through the same `CommandEnv` as typed chat commands**
+    (a `SystemParam` extracted from `chat_text_input`), so the cheats flag, `/locate` and every
+    other command behave identically; `run_bound_commands` only fires when no overlay is open and
+    the cursor is grabbed, and only for a mod that the *loaded world* uses (`LoadedContent.mods`,
+    matched by folder path). Controls from a world-local mod copy aren't listed - only installed
+    mods are scanned; say so if that becomes a problem.
+  - **`CommandEnv` extraction means `ChatPlugin` now needs a `Bindings` resource** (it
+    `init_resource`s one; `KeybindPlugin` replaces it with the saved one).
+- **Controls are saved per launcher instance, keyed by a permanent id - not the name or version,
+  both of which change.** The launcher gives every `Instance` an `id` (`new_instance_id`: clock +
+  counter, filesystem-safe), starts the game with `--instance <id>`, and the game keeps
+  `instances/<id>/keybinds.json` (`SaveStore::keybinds_path`; a game started alone uses plain
+  `keybinds.json`). The launcher's instance *name is editable* in its UI - that's why the id exists;
+  keying on the name would have lost the controls on the first rename. Details that matter:
+  - **An id that is only in memory is invented afresh next launch**, orphaning whatever the game
+    saved under it, so `Instances::ensure_ids` (old files have none; duplicate ids from a hand-copied
+    entry are split) is followed by an immediate `save` in `LauncherApp::new`.
+  - **The id reaches the file system, from an editable file and from the command line**, so both
+    sides sanitize it to `[A-Za-z0-9_-]` (`instance_folder_name`, duplicated in `paths.rs` and
+    `save.rs` like `app_data_dir` - change both) and the launcher's delete-instance cleanup can't be
+    pointed outside `instances/` with `..`. Both have tests.
+  - Deleting an instance in the launcher deletes its folder. Unverified: the launcher's egui UI.
 
