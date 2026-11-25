@@ -740,6 +740,9 @@ pub struct BlockDef {
     /// nothing to it, so that click stays free for something else (hitting
     /// a dummy, later). Applies in Creative too.
     pub requires_crouch: bool,
+    /// A plain left click hits it instead of mining it: it takes damage from
+    /// what's in hand and shows the number (the training dummy).
+    pub hittable: bool,
     /// A block that stands two cells tall: the name of the block placed in
     /// the cell above this one. Placing needs both cells free; breaking
     /// either takes the other with it (and only one drop). See
@@ -809,6 +812,7 @@ impl Default for BlockDef {
             requires_tool: false,
             tool_response: 1.0,
             requires_crouch: false,
+            hittable: false,
             upper: None,
             waterloggable: false,
             freezes_to: None,
@@ -885,6 +889,8 @@ struct BlockFile {
     tool_response: Option<f32>,
     #[serde(default)]
     requires_crouch: bool,
+    #[serde(default)]
+    hittable: bool,
     upper: Option<String>,
 }
 
@@ -948,6 +954,7 @@ impl BlockFile {
             requires_tool: self.requires_tool,
             tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
             requires_crouch: self.requires_crouch,
+            hittable: self.hittable,
             upper: self.upper,
             waterloggable: self.waterloggable,
             freezes_to: self.freezes_to,

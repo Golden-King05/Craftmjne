@@ -25,6 +25,7 @@ pub mod light;
 pub mod menu;
 pub mod mesher;
 pub mod noise;
+pub mod particles;
 pub mod player;
 pub mod render;
 pub mod save;

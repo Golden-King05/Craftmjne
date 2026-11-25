@@ -2753,3 +2753,37 @@ etc.) instead of inventing a new approach:
     the mesher skipping model blocks, and the reload (chunk-meshed) path.
   - `Plugins` tuples top out at 15 members, so `main.rs` registers the
     entity plugins in a second `add_plugins` call.
+- **The first particle effect, the damage number, is an entity with a
+  hand-built text mesh - and its arc is solved, not tuned.** `particles.rs`:
+  a `DamageNumberEvent { origin, amount }` spawns a mesh (one quad per
+  character, from a procedurally generated 3x5 pixel font image) with its own
+  unlit alpha-blended `StandardMaterial`, rotated to the player's camera
+  rotation every frame (copying the camera's rotation needs no up vector, so
+  it has no overhead pole to break, like the sun/moon billboards).
+  - **Why a text mesh and not `Text2d`:** `Text2d` is drawn by the 2D render
+    phase, which a 3D camera doesn't run; a font-atlas quad strip goes through
+    the same 3D pipeline as everything else, and the font is generated, so
+    there's no asset to ship or fail to load.
+  - **`Flight::solve(start, rise, end, life)`** derives the launch speed and
+    gravity that make the arc start at the head (1.7), peak 0.6 above that,
+    and be at 0.375 (halfway down the 0.75-block legs) when it has fully
+    faded, 1.2 s later. The user described the shape in words ("shoot up, come
+    down a little, fully faded about halfway down the legs"), so those three
+    numbers are the constants; with `v = sqrt(2 g rise)` the end height is a
+    quadratic in `sqrt(g)`, solved in closed form. The test asserts all
+    three properties (start, peak, end) and that it never goes lower.
+  - **Fading is the material's alpha**, written each frame; each number has
+    its own material, so they fade independently. Removing either the motion
+    or the alpha update turns `a_hit_spawns_a_number...` red (it uses
+    `TimeUpdateStrategy::ManualDuration`, so each update is exactly 0.1 s and
+    the arc is checked frame by frame).
+  - **Hitting is a plain left click on a `hittable` block** (a block flag, like
+    `requires_crouch`, so the dummy's crouch-to-mine and click-to-hit never
+    overlap), with a 0.45 s cooldown that, unlike the mining timers, isn't
+    reset when the button is released, so clicking faster doesn't hit faster.
+    Damage is `ItemRegistry::attack_damage` (tier damage at quality; hand/non-
+    tool `HAND_DAMAGE` = 1). The dummy has no health: this step is only the
+    number. `interact` is now at Bevy's 16-parameter system limit.
+  - **Not done:** hit knockback or flash, a health bar, damage from anything
+    but the held item, different attack speeds per sword kind (the dagger is
+    meant to be fast and the greatsword slow; they all share the cooldown).

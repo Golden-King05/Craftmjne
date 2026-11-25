@@ -528,9 +528,18 @@ anything else, over time - 10 seconds by hand in Survival (`hardness: 2.0`) -
 and drops the dummy item; Creative breaks it instantly while crouching.
 Breaking either half removes the other, with one drop.
 
+**Hitting it.** A plain left click (no Shift) hits the dummy with whatever's
+in your hand, every 0.45 seconds while held. The damage is the held tool's
+tier damage at its quality (a stone axe does about 2.3 at quality 0 up to
+3.5 at 100), or 1 for a bare hand or any non-tool. The dummy has no health;
+it just shows the number: red digits pop up from its head, shoot up a little,
+arc over and drift down, and have faded out completely by the time they're
+halfway down its legs (`src/particles.rs`). Whole numbers show as `3`, others
+to one decimal (`2.9`).
+
 In block files that's `"shape": "model"` (the mesher draws nothing, and its
 neighbours' faces still draw), `"upper": "<block>"` (two cells tall) and
-`"requires_crouch": true`.
+`"requires_crouch": true` and `"hittable": true` (a plain click hits it).
 
 **Entities** are the other way to do it, for things that shouldn't be locked
 to the grid: `/summon training_dummy` also stands a free-standing dummy
@@ -796,6 +805,7 @@ src/
 ├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
 ├── knapping.rs  # knapping rules: stone, strikes, cracks, scoring, quality (pure)
 ├── knap_ui.rs   # the knapping screen
+├── particles.rs # particle effects (damage numbers): the arc, the pixel font, the billboards
 ├── block_models.rs # draws the model of Shape::Model blocks (the dummy) from the blocks
 ├── entities.rs  # entity definitions, summoning, collision boxes (the training dummy)
 ├── player_model.rs # the blocky player model: boxes, skin layout, mesh data

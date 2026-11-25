@@ -29,10 +29,13 @@ use crate::player::{cursor_grabbed, Player};
 use crate::render::{bucket_to_mesh, ChunkMaterials};
 use crate::save::GameMode;
 use crate::state::{AppState, DeathState, PauseState};
+use crate::particles::DamageNumberEvent;
 use crate::tools::{harvests, mining_seconds};
 use crate::world::{Atlas, BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
+/// Seconds between hits while the button is held.
+const ATTACK_COOLDOWN: f32 = 0.45;
 const ACTION_REPEAT: f32 = 0.22; // seconds between repeats while a button is held
 /// After a block breaks, the next one starts after this pause, so holding
 /// the button on instant blocks (torches) doesn't clear a whole row in a
@@ -214,6 +217,8 @@ pub struct Target(pub Option<RayHit>);
 struct ActionTimers {
     break_t: f32,
     place_t: f32,
+    /// Seconds until the next hit can land.
+    attack_t: f32,
     /// Blocks broken this session, mixed into each drop's random roll.
     breaks: u32,
 }
@@ -281,6 +286,13 @@ fn partner_of(map: &ChunkMap, registry: &BlockRegistry, pos: IVec3, broken: Bloc
     (map.get_block(cell) == block).then_some((cell, block))
 }
 
+/// The feet of whatever a block hit belongs to: the cell itself, or for the
+/// upper half of a two-cell-tall block the cell below it, centred.
+fn hit_origin(registry: &BlockRegistry, pos: IVec3, block: BlockId) -> Vec3 {
+    let base = if registry.lower_half(block).is_some() { pos - IVec3::Y } else { pos };
+    Vec3::new(base.x as f32 + 0.5, base.y as f32, base.z as f32 + 0.5)
+}
+
 /// Whether a block can be mined right now: breakable at all, and, for one
 /// that `requires_crouch` (the dummy), only while crouching.
 fn mineable(def: &crate::blocks::BlockDef, crouching: bool) -> bool {
@@ -315,6 +327,7 @@ fn interact(
     players: Query<&Player>,
     mut block_events: EventWriter<BlockSetEvent>,
     mut drops: EventWriter<SpawnDrop>,
+    mut damage_numbers: EventWriter<DamageNumberEvent>,
     mut gizmos: Gizmos,
 ) {
     let Ok(player) = players.single() else { return };
@@ -344,6 +357,7 @@ fn interact(
     let dt = time.delta_secs();
     timers.break_t -= dt;
     timers.place_t -= dt;
+    timers.attack_t -= dt;
     if !mouse.pressed(MouseButton::Left) {
         timers.break_t = 0.0;
     }
@@ -366,6 +380,14 @@ fn interact(
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let aimed = map.get_block(hit.pos);
     let breakable = mineable(registry.def(aimed), shift);
+    // A plain click on something hittable hits it, with whatever is in hand.
+    if registry.def(aimed).hittable && !shift && mouse.pressed(MouseButton::Left) && timers.attack_t <= 0.0 {
+        timers.attack_t = ATTACK_COOLDOWN;
+        damage_numbers.write(DamageNumberEvent {
+            origin: hit_origin(registry, hit.pos, aimed),
+            amount: content.items.attack_damage(&hotbar.slots[hotbar.selected]),
+        });
+    }
     if *mode == GameMode::Creative {
         if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
             if breakable {
@@ -827,5 +849,14 @@ mod tests {
         assert!(!upper_fits(&map, &reg, lower, at), "a block overhead leaves no room");
         assert!(upper_fits(&map, &reg, stone, at), "a one-cell block doesn't care");
         assert!(!upper_fits(&map, &reg, lower, IVec3::new(4, WORLD_HEIGHT - 1, 4)), "nor does the top of the world");
+    }
+
+    #[test]
+    fn a_hit_on_either_half_shows_its_number_at_the_dummys_feet() {
+        let reg = BlockRegistry::with_defaults();
+        let (lower, upper) = (reg.id("training_dummy"), reg.id("training_dummy_top"));
+        assert!(reg.def(lower).hittable && reg.def(upper).hittable && !reg.def(reg.id("stone")).hittable);
+        assert_eq!(hit_origin(&reg, IVec3::new(4, 10, -3), lower), Vec3::new(4.5, 10.0, -2.5));
+        assert_eq!(hit_origin(&reg, IVec3::new(4, 11, -3), upper), Vec3::new(4.5, 10.0, -2.5));
     }
 }

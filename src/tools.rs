@@ -58,6 +58,9 @@ pub const SECONDS_PER_HARDNESS: f32 = 5.0;
 /// faster than a bare hand" and a better tier is just a bigger number.
 pub const NO_TOOL_PENALTY: f32 = 8.0;
 
+/// What a bare hand (or anything that isn't a tool) does when it hits something.
+pub const HAND_DAMAGE: f32 = 1.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolKind {

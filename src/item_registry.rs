@@ -263,6 +263,18 @@ impl ItemRegistry {
         Some(HeldTool { kind: spec.kind, speed: tier.mining_speed_at(stack.quality) })
     }
 
+    /// How much damage a hit with `stack` in hand does: the tool's tier
+    /// damage at its quality, or [`HAND_DAMAGE`] for a bare hand or anything
+    /// that isn't a tool.
+    pub fn attack_damage(&self, stack: &ItemStack) -> f32 {
+        if stack.is_empty() {
+            return crate::tools::HAND_DAMAGE;
+        }
+        self.tool(stack.id)
+            .and_then(|spec| self.tiers.get(&spec.tier))
+            .map_or(crate::tools::HAND_DAMAGE, |tier| tier.damage_at(stack.quality))
+    }
+
     /// A fresh stack of `count` of `id`: a tool starts at the default
     /// quality (`tools::DEFAULT_TOOL_QUALITY`), anything else has none.
     /// For items that appear without being made - Creative's list.
@@ -485,5 +497,18 @@ mod tests {
             tool: Some(ToolSpec { kind: ToolKind::Pickaxe, tier: "mithril".into() }),
         };
         ItemRegistry::build(&blocks, vec![def]).with_tiers(TierBook::with_defaults());
+    }
+
+    #[test]
+    fn a_hit_does_the_tiers_damage_at_the_tools_quality_and_a_hand_does_one() {
+        let (_blocks, items) = shipped();
+        let axe = items.id("stone_axe");
+        let stone = items.tiers.get("stone").unwrap().clone();
+        let at = |q| items.attack_damage(&ItemStack { id: axe, count: 1, quality: q });
+        assert_eq!(at(0), stone.damage_at(0));
+        assert_eq!(at(100), stone.damage_at(100));
+        assert!(at(100) > at(0), "quality hits harder");
+        assert_eq!(items.attack_damage(&ItemStack::EMPTY), crate::tools::HAND_DAMAGE);
+        assert_eq!(items.attack_damage(&ItemStack::new(items.id("stick"), 3)), crate::tools::HAND_DAMAGE);
     }
 }

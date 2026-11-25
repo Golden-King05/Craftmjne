@@ -4,6 +4,7 @@
   "shape": "model",
   "hardness": 2.0,
   "requires_crouch": true,
+  "hittable": true,
   "transmission": 1.0,
   "item": false,
   "drops": "training_dummy",
