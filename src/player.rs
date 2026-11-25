@@ -13,7 +13,7 @@ use crate::chat::ChatState;
 use crate::entities::{Aabb, EntityColliders};
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
 use crate::inventory::InventoryState;
-use crate::keybinds::{Action, Actions};
+use crate::keybinds::{Action, Actions, ControlOptions, DoubleTap};
 use crate::health::Vitals;
 use crate::save::GameMode;
 use crate::state::{AppState, DeathState, PauseState};
@@ -455,6 +455,8 @@ fn player_update(
     inventory: Res<InventoryState>,
     death: Res<DeathState>,
     colliders: Res<EntityColliders>,
+    options: Option<Res<ControlOptions>>,
+    mut jump_taps: Local<DoubleTap>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
     let Some(tables) = tables else { return };
@@ -476,7 +478,8 @@ fn player_update(
             // both feet (eventually) on the ground.
             if !frozen {
                 if *mode == GameMode::Creative {
-                    if act.just_pressed(Action::ToggleFly) {
+                    let options = options.as_deref().copied().unwrap_or_default();
+                    if options.wants_fly_toggle(act.just_pressed(Action::ToggleFly), act.just_pressed(Action::Jump), time.elapsed_secs(), &mut jump_taps) {
                         player.fly = !player.fly;
                         player.vel.y = 0.0;
                     }
@@ -763,5 +766,101 @@ mod tests {
 
         assert!(player.pos.x > 12.0, "never made it onto the shore: x = {}", player.pos.x);
         assert!(player.pos.y >= 13.99, "didn't climb up onto land: y = {}", player.pos.y);
+    }
+
+    // ---- flight modes, through the real player_update system ----------------
+
+    use crate::keybinds::{ControlOptions, FlightMode};
+
+    /// An app running only `player_update`, with a Creative player standing on the
+    /// floor of `flat_world`, and a clock that advances exactly 0.1 s per update.
+    fn flight_app(mode: FlightMode) -> App {
+        let (map, tables) = flat_world();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_millis(100)));
+        app.init_resource::<ButtonInput<KeyCode>>().init_resource::<ButtonInput<MouseButton>>();
+        app.insert_resource(map).insert_resource(BlockTables(tables));
+        app.insert_resource(GameMode::Creative);
+        app.init_resource::<ChatState>().init_resource::<PauseState>().init_resource::<InventoryState>().init_resource::<DeathState>();
+        app.init_resource::<EntityColliders>();
+        app.insert_resource(ControlOptions { flight_mode: mode });
+        app.world_mut().spawn((
+            Player { pos: Vec3::new(8.5, 11.0 + EPS, 8.5), spawned: true, ..Player::default() },
+            Transform::default(),
+        ));
+        app.add_systems(Update, player_update);
+        app.update();
+        app
+    }
+
+    fn flying(app: &mut App) -> bool {
+        let mut q = app.world_mut().query::<&Player>();
+        q.single(app.world()).unwrap().fly
+    }
+
+    /// One frame with `key` going down, one with nothing.
+    fn press_for_a_frame(app: &mut App, key: KeyCode) {
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(key);
+        app.update();
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(key);
+        keys.clear();
+        app.update();
+    }
+
+    #[test]
+    fn toggle_mode_starts_and_stops_flying_with_the_toggle_key_only() {
+        let mut app = flight_app(FlightMode::Toggle);
+        press_for_a_frame(&mut app, KeyCode::Space);
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(!flying(&mut app), "double-tapping jump does nothing in toggle mode");
+        press_for_a_frame(&mut app, KeyCode::KeyF);
+        assert!(flying(&mut app), "F starts flying");
+        press_for_a_frame(&mut app, KeyCode::KeyF);
+        assert!(!flying(&mut app), "and stops it");
+    }
+
+    #[test]
+    fn double_tap_mode_starts_flying_on_a_double_tap_and_stops_on_another() {
+        let mut app = flight_app(FlightMode::DoubleTapJump);
+        press_for_a_frame(&mut app, KeyCode::KeyF);
+        assert!(!flying(&mut app), "the toggle key does nothing in this mode");
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(!flying(&mut app), "one tap is just a jump");
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(flying(&mut app), "the second tap, 0.2 s later, starts flying");
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(flying(&mut app), "a single tap while flying doesn't stop it");
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(!flying(&mut app), "a double-tap again stops it");
+    }
+
+    #[test]
+    fn two_jumps_too_far_apart_are_not_a_double_tap() {
+        let mut app = flight_app(FlightMode::DoubleTapJump);
+        press_for_a_frame(&mut app, KeyCode::Space);
+        for _ in 0..4 {
+            app.update(); // 0.4 s of nothing
+        }
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(!flying(&mut app));
+    }
+
+    #[test]
+    fn survival_never_flies_in_either_mode_and_chat_swallows_the_taps() {
+        for mode in FlightMode::ALL {
+            let mut app = flight_app(mode);
+            *app.world_mut().resource_mut::<GameMode>() = GameMode::Survival;
+            press_for_a_frame(&mut app, KeyCode::KeyF);
+            press_for_a_frame(&mut app, KeyCode::Space);
+            press_for_a_frame(&mut app, KeyCode::Space);
+            assert!(!flying(&mut app), "{mode:?}");
+        }
+        let mut app = flight_app(FlightMode::DoubleTapJump);
+        app.world_mut().resource_mut::<ChatState>().open = true;
+        press_for_a_frame(&mut app, KeyCode::Space);
+        press_for_a_frame(&mut app, KeyCode::Space);
+        assert!(!flying(&mut app), "taps typed into chat aren't jumps");
     }
 }

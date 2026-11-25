@@ -970,6 +970,87 @@ impl Actions<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Control options (how controls behave, as opposed to which keys)
+// ---------------------------------------------------------------------------
+
+/// How flying is switched on and off in Creative.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlightMode {
+    /// Press the Toggle flying control (F) to start and stop.
+    #[default]
+    Toggle,
+    /// Double-tap Jump to start flying; double-tap it again to stop. The Toggle
+    /// flying control does nothing in this mode.
+    DoubleTapJump,
+}
+
+impl FlightMode {
+    pub const ALL: [FlightMode; 2] = [FlightMode::Toggle, FlightMode::DoubleTapJump];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FlightMode::Toggle => "Toggle key",
+            FlightMode::DoubleTapJump => "Double-tap jump",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            FlightMode::Toggle => "Press the \"Toggle flying\" key (F by default) to start flying, and again to stop.",
+            FlightMode::DoubleTapJump => "Double-tap Jump to start flying, and double-tap it again to stop. The \"Toggle flying\" key does nothing in this mode.",
+        }
+    }
+}
+
+/// Settings about how controls behave. Saved next to the keybinds, so (like them)
+/// they belong to a launcher instance. Missing or unreadable reads as the defaults.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ControlOptions {
+    #[serde(default)]
+    pub flight_mode: FlightMode,
+}
+
+/// How close together two Jump presses have to be to count as a double-tap.
+pub const DOUBLE_TAP_WINDOW: f32 = 0.3;
+
+/// Remembers the last Jump press so a second one soon after can be recognised.
+#[derive(Default, Debug)]
+pub struct DoubleTap {
+    last: Option<f32>,
+}
+
+impl DoubleTap {
+    /// Registers a press at time `now` (seconds). `true` when it is the second of a
+    /// double-tap. A double-tap uses both presses up, so three quick taps are one
+    /// double-tap and a fresh first tap, not two double-taps.
+    pub fn tap(&mut self, now: f32) -> bool {
+        match self.last {
+            Some(prev) if now - prev <= DOUBLE_TAP_WINDOW => {
+                self.last = None;
+                true
+            }
+            _ => {
+                self.last = Some(now);
+                false
+            }
+        }
+    }
+}
+
+impl ControlOptions {
+    /// Should flying be switched this frame? In `Toggle` mode that is the Toggle
+    /// flying control; in `DoubleTapJump` mode it is a double-tap of Jump. The
+    /// other way of asking is ignored, so the two modes never both fire.
+    pub fn wants_fly_toggle(&self, toggle_pressed: bool, jump_pressed: bool, now: f32, tap: &mut DoubleTap) -> bool {
+        match self.flight_mode {
+            FlightMode::Toggle => toggle_pressed,
+            FlightMode::DoubleTapJump => jump_pressed && tap.tap(now),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -984,7 +1065,8 @@ impl Plugin for KeybindPlugin {
             .get_resource::<SaveStore>()
             .map(|store| Bindings::from_overrides(&store.load_keybinds()))
             .unwrap_or_default();
-        app.insert_resource(bindings).init_resource::<Capture>();
+        let options = app.world().get_resource::<SaveStore>().map(|store| store.load_control_options()).unwrap_or_default();
+        app.insert_resource(bindings).insert_resource(options).init_resource::<Capture>();
     }
 }
 
@@ -1372,5 +1454,50 @@ mod tests {
         app.world_mut().resource_mut::<ButtonInput<MouseButton>>().press(MouseButton::Left);
         app.update();
         assert!(app.world().resource::<Seen>().attack);
+    }
+
+    #[test]
+    fn a_double_tap_needs_two_presses_close_together_and_uses_both_up() {
+        let mut t = DoubleTap::default();
+        assert!(!t.tap(0.0), "the first tap starts the clock");
+        assert!(t.tap(0.2), "a second within the window is a double-tap");
+        assert!(!t.tap(0.25), "which used both up: this is a new first tap");
+        assert!(t.tap(0.4));
+
+        let mut slow = DoubleTap::default();
+        assert!(!slow.tap(0.0));
+        assert!(!slow.tap(0.5), "too slow is two single taps");
+        assert!(slow.tap(0.6), "but that second one started a new clock");
+    }
+
+    #[test]
+    fn toggle_mode_flies_on_the_key_and_ignores_jump_taps() {
+        let o = ControlOptions { flight_mode: FlightMode::Toggle };
+        let mut t = DoubleTap::default();
+        assert!(o.wants_fly_toggle(true, false, 0.0, &mut t));
+        assert!(!o.wants_fly_toggle(false, true, 0.1, &mut t));
+        assert!(!o.wants_fly_toggle(false, true, 0.2, &mut t), "double-tapping jump does nothing in toggle mode");
+    }
+
+    #[test]
+    fn double_tap_mode_flies_on_a_jump_double_tap_and_ignores_the_key() {
+        let o = ControlOptions { flight_mode: FlightMode::DoubleTapJump };
+        let mut t = DoubleTap::default();
+        assert!(!o.wants_fly_toggle(true, false, 0.0, &mut t), "the toggle key does nothing in this mode");
+        assert!(!o.wants_fly_toggle(false, true, 1.0, &mut t), "one tap is just a jump");
+        assert!(o.wants_fly_toggle(false, true, 1.2, &mut t), "two start flying");
+        assert!(!o.wants_fly_toggle(false, true, 2.0, &mut t));
+        assert!(o.wants_fly_toggle(false, true, 2.2, &mut t), "and two more stop it");
+        assert!(!o.wants_fly_toggle(false, false, 2.3, &mut t), "no press, no toggle");
+    }
+
+    #[test]
+    fn control_options_default_and_survive_a_save_with_or_without_the_field() {
+        assert_eq!(ControlOptions::default().flight_mode, FlightMode::Toggle);
+        let saved = serde_json::to_string(&ControlOptions { flight_mode: FlightMode::DoubleTapJump }).unwrap();
+        assert_eq!(saved, r#"{"flight_mode":"double_tap_jump"}"#);
+        assert_eq!(serde_json::from_str::<ControlOptions>(&saved).unwrap().flight_mode, FlightMode::DoubleTapJump);
+        assert_eq!(serde_json::from_str::<ControlOptions>("{}").unwrap(), ControlOptions::default(), "a file from before the option existed");
+        assert!(serde_json::from_str::<ControlOptions>("{\"flight_mode\": \"nope\"}").is_err(), "load_control_options turns that into the default");
     }
 }

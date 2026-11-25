@@ -3218,4 +3218,15 @@ etc.) instead of inventing a new approach:
     `save.rs` like `app_data_dir` - change both) and the launcher's delete-instance cleanup can't be
     pointed outside `instances/` with `..`. Both have tests.
   - Deleting an instance in the launcher deletes its folder. Unverified: the launcher's egui UI.
+- **"Controls" is the settings section; "Keybinds" and "Options" are its two halves, and flight is the first option.**
+  `ControlOptions { flight_mode }` (a `Resource`, saved as `controls.json` beside the keybinds so it is per
+  launcher instance too; missing/unreadable/unrecognised reads as the default) is *how controls behave*,
+  where `Bindings` is *which keys*. `FlightMode::Toggle` flies on the `ToggleFly` control; `DoubleTapJump`
+  flies on a double-tap of `Jump` (0.3 s, `DOUBLE_TAP_WINDOW`) and ignores the toggle key - the two modes never
+  both act. The decision is one pure function (`ControlOptions::wants_fly_toggle` + `DoubleTap`) called from
+  `player_update`, which already knew whether the player is frozen/Creative, so taps typed into chat or made in
+  Survival aren't counted. **A double-tap uses both presses up** (`DoubleTap::tap` clears itself), otherwise three
+  quick taps would toggle twice. Tests go through the real `player_update` system with a manual clock
+  (`flight_app`), not just the pure function - the wiring is the thing that could be wrong. Next options that
+  belong here rather than in Keybinds: sprint/sneak hold-vs-toggle, mouse sensitivity.
 

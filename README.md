@@ -63,7 +63,7 @@ makensis -DAPP_VERSION=1.0.0 \
 The mouse locks automatically the moment you enter a world — no click needed.
 
 These are the **defaults**; every one except the mouse wheel and a few
-screen conventions can be changed in **Settings → Keybinds** (see
+screen conventions can be changed in **Settings → Controls → Keybinds** (see
 [Rebinding controls](#rebinding-controls)).
 
 | Input | Action |
@@ -72,7 +72,7 @@ screen conventions can be changed in **Settings → Keybinds** (see
 | Space | jump / swim up / fly up (Creative only) |
 | Shift | fly down (Creative only) |
 | Ctrl | sprint |
-| F | toggle fly mode (Creative only) |
+| F | toggle fly mode (Creative only; see *Flight mode* below - or double-tap Space instead) |
 | Left / right click | mine (hold, in Survival) / place block |
 | Middle click | pick targeted block (Creative only) |
 | 1–9 / mouse wheel | hotbar selection |
@@ -103,9 +103,22 @@ of which Rendering (render distance, applied on next launch), Keybinds and
 Mods (where new worlds keep their mods) do something today and Player and
 Sound are placeholders. **Mods** lists the installed mods.
 
+### Flight mode
+
+**Settings → Controls → Options** chooses how flying starts and stops in Creative:
+
+- **Toggle key** (the default): press the *Toggle flying* key (`F`) to start and again to stop.
+- **Double-tap jump**: double-tap Jump (within 0.3 s) to start flying, and double-tap it
+  again to stop. A single tap is still just a jump. The *Toggle flying* key does nothing
+  in this mode, and the two never both act, so you can't switch flight on and off in one
+  press by accident.
+
+Survival never flies in either mode, and taps typed into chat or an open inventory
+don't count. Like your keybinds, the choice is saved per launcher instance.
+
 ### Rebinding controls
 
-**Settings → Keybinds** lists every control by category with the key it uses.
+**Settings → Controls → Keybinds** lists every control by category with the key it uses.
 Click a control's button, then press the new input:
 
 - a key (`J`), a mouse button (`Middle Click`), or a **combo** - hold modifiers
@@ -121,15 +134,16 @@ combo, `key:spa` finds Space), and `is:conflict`, `is:unbound` and
 `is:changed` filter by state.
 
 **Conflicts are shown in red** - the control, its key, and a line naming the
-other control - and the Keybinds tab says how many are in conflict. Two controls
+other control - and the Controls tab says how many are in conflict. Two controls
 on exactly the same chord both fire; the game doesn't pick one for you. The one
 exception is deliberate: a chord with no modifiers still works while Ctrl/Alt/
 Shift are held (walking while sprinting), but gives way to a *more specific*
 chord on the same key, so `Q` (drop one) and `Ctrl+Q` (drop the stack) don't both
 fire.
 
-**Controls belong to an instance.** Started from the launcher, your controls are
-saved with *that instance* (`instances/<id>/keybinds.json` in the app-data folder),
+**Controls belong to an instance.** Started from the launcher, your controls (the keys,
+and the flight mode, in `keybinds.json` and `controls.json`) are saved with *that
+instance* (`instances/<id>/` in the app-data folder),
 so updating an instance to a newer game version, or renaming it, keeps them, and
 two instances can have different controls. Each instance has a permanent id the
 launcher gives it (the game is started with `--instance <id>`); the name and the
@@ -1312,7 +1326,7 @@ mods/any_folder_name/
   recipes/*.json
   tiers/*.json        tool tiers (material, mining speed, damage)
   rarities/*.json     what a tool's quality is called: id, name, min percent, colour
-  keybinds/*.json     controls added to Settings > Keybinds (see below)
+  keybinds/*.json     controls added to Settings > Controls > Keybinds (see below)
   textures/blocks/*.png
 ```
 
@@ -1339,7 +1353,7 @@ them for that world (`granite_pack_1`, `granite_pack_2`, in folder order), keeps
 those names for good (a block saved as `granite_pack_1:granite` must stay that
 even if the other mod is removed later), and the world carries on.
 
-**Controls.** A mod can add entries to Settings > Keybinds with one JSON file (or
+**Controls.** A mod can add entries to Settings > Controls > Keybinds with one JSON file (or
 an array) per control in `keybinds/`:
 
 ```json

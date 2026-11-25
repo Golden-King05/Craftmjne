@@ -635,6 +635,30 @@ impl SaveStore {
 
     /// The controls the player changed, as `action id -> chord text` (see
     /// `keybinds::Bindings::overrides`). Missing or unreadable reads as "no changes".
+    /// Where this player's control options (flight mode...) are saved - beside the
+    /// keybinds, so they belong to the same launcher instance.
+    pub fn controls_path(&self) -> PathBuf {
+        self.keybinds_path().with_file_name("controls.json")
+    }
+
+    /// Missing, unreadable or unrecognised reads as the defaults.
+    pub fn load_control_options(&self) -> crate::keybinds::ControlOptions {
+        fs::read_to_string(self.controls_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_control_options(&self, options: &crate::keybinds::ControlOptions) -> io::Result<()> {
+        let path = self.controls_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string_pretty(options).map_err(io::Error::other)?)?;
+        fs::rename(&temp, path)
+    }
+
     pub fn load_keybinds(&self) -> std::collections::BTreeMap<String, String> {
         fs::read_to_string(self.keybinds_path())
             .ok()
@@ -1019,6 +1043,14 @@ mod tests {
         // a brand new store object (new process, new version) with the same id.
         let after_update = SaveStore::at(root.clone()).with_instance(Some("iaaa".into()));
         assert_eq!(after_update.load_keybinds(), jump, "same instance, same controls");
+
+        // The control options (flight mode) travel with them.
+        let double = crate::keybinds::ControlOptions { flight_mode: crate::keybinds::FlightMode::DoubleTapJump };
+        a.save_control_options(&double).unwrap();
+        assert_eq!(after_update.load_control_options(), double, "same instance keeps its flight mode through an update");
+        assert_eq!(b.load_control_options(), Default::default(), "another instance has its own");
+        assert_eq!(alone.load_control_options(), Default::default());
+        assert_eq!(a.controls_path(), root.join("instances").join("iaaa").join("controls.json"));
         let _ = fs::remove_dir_all(&root);
     }
 

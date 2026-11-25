@@ -1,7 +1,8 @@
-//! The Settings screen: a row of sections (Player, Rendering, Sound, Keybinds,
+//! The Settings screen: a row of sections (Player, Rendering, Sound, Controls,
 //! Mods) and the body of whichever is selected. Player and Sound are still
 //! empty shells waiting for their options; Rendering and Mods hold the two
-//! settings that existed before; Keybinds is the full control editor.
+//! settings that existed before; Controls holds the keybind editor and how controls
+//! behave (flight mode).
 //!
 //! **Keybinds screen.** One row per control (the game's own, then each mod's) grouped by category, each with a
 //! button showing its chord (click it, then press the new key, mouse button or
@@ -22,7 +23,7 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 
 use crate::config::WorldSettings;
-use crate::keybinds::{search, Bindings, Capture, CaptureEvent};
+use crate::keybinds::{search, Bindings, Capture, CaptureEvent, ControlOptions, FlightMode};
 use crate::mod_controls::ControlNotes;
 use crate::menu::{despawn_all, full_screen_root, spawn_button, title, BUTTON_HOVER, BUTTON_IDLE, BUTTON_PRESS, PANEL_BG, TEXT_DIM};
 use crate::save::{GraphicsSettings, ModStorage, SaveStore};
@@ -41,28 +42,37 @@ pub enum Section {
     Player,
     Rendering,
     Sound,
-    Keybinds,
+    Controls,
     Mods,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [Section::Player, Section::Rendering, Section::Sound, Section::Keybinds, Section::Mods];
+    pub const ALL: [Section; 5] = [Section::Player, Section::Rendering, Section::Sound, Section::Controls, Section::Mods];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::Player => "Player",
             Section::Rendering => "Rendering",
             Section::Sound => "Sound",
-            Section::Keybinds => "Keybinds",
+            Section::Controls => "Controls",
             Section::Mods => "Mods",
         }
     }
+}
+
+/// The two halves of the Controls section: which keys do what, and how controls behave.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ControlsTab {
+    Keybinds,
+    Options,
 }
 
 /// What the screen is showing right now.
 #[derive(Resource)]
 pub struct SettingsView {
     pub section: Section,
+    /// Which part of the Controls section is open.
+    pub controls_tab: ControlsTab,
     pub search: String,
     /// The keybind list's scroll offset, kept so rebuilding doesn't jump it to the top.
     pub scroll: f32,
@@ -70,7 +80,7 @@ pub struct SettingsView {
 
 impl Default for SettingsView {
     fn default() -> Self {
-        Self { section: Section::Player, search: String::new(), scroll: 0.0 }
+        Self { section: Section::Player, controls_tab: ControlsTab::Keybinds, search: String::new(), scroll: 0.0 }
     }
 }
 
@@ -84,6 +94,8 @@ struct KeybindList;
 #[derive(Component, Clone, PartialEq, Debug)]
 enum SettingsButton {
     Section(Section),
+    ControlsTab(ControlsTab),
+    SetFlightMode(FlightMode),
     RenderDistanceDelta(i32),
     ToggleDefaultModStorage,
     Rebind(String),
@@ -133,11 +145,11 @@ pub(crate) fn conflict_summary(bindings: &Bindings) -> Option<String> {
     (n > 0).then(|| format!("{n} controls share a key with another (shown in red)."))
 }
 
-/// The label on a section tab: Keybinds says how many controls clash.
+/// The label on a section tab: Controls says how many controls clash.
 pub(crate) fn tab_label(section: Section, bindings: &Bindings) -> String {
     let n = bindings.conflicting().len();
-    if section == Section::Keybinds && n > 0 {
-        format!("Keybinds ({n} in conflict)")
+    if section == Section::Controls && n > 0 {
+        format!("Controls ({n} in conflict)")
     } else {
         section.label().to_string()
     }
@@ -214,13 +226,14 @@ fn rebuild_settings(
     bindings: Res<Bindings>,
     capture: Res<Capture>,
     notes: Res<ControlNotes>,
+    options: Res<ControlOptions>,
     world_settings: Res<WorldSettings>,
     store: Res<SaveStore>,
     content: Query<(Entity, Option<&Children>), With<SettingsContent>>,
 ) {
     let Ok((root, children)) = content.single() else { return };
     let empty = children.is_none_or(|c| c.is_empty());
-    if !(empty || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || world_settings.is_changed()) {
+    if !(empty || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || world_settings.is_changed()) {
         return;
     }
     commands.entity(root).despawn_related::<Children>();
@@ -229,10 +242,10 @@ fn rebuild_settings(
         p.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
             for section in Section::ALL {
                 let selected = section == view.section;
-                let clash = section == Section::Keybinds && !bindings.conflicting().is_empty();
+                let clash = section == Section::Controls && !bindings.conflicting().is_empty();
                 let text = if clash { RED } else { Color::WHITE };
                 let border = if selected { Color::WHITE } else { BORDER_DIM };
-                let width = if section == Section::Keybinds { 190.0 } else { 100.0 };
+                let width = if section == Section::Controls { 210.0 } else { 100.0 };
                 spawn_settings_button(row, &tab_label(section, &bindings), SettingsButton::Section(section), width, 34.0, 15.0, text, border);
             }
         });
@@ -267,9 +280,32 @@ fn rebuild_settings(
                 spawn_settings_button(body, &mod_storage_label(storage), SettingsButton::ToggleDefaultModStorage, 380.0, 40.0, 15.0, Color::WHITE, Color::NONE);
                 dim(body, "Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't.", 12.0);
             }
-            Section::Keybinds => spawn_keybinds(body, &view, &bindings, &capture, &notes),
+            Section::Controls => spawn_controls(body, &view, &bindings, &capture, &notes, &options),
         });
     });
+}
+
+fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes, options: &ControlOptions) {
+    body.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
+        for (tab, label) in [(ControlsTab::Keybinds, "Keybinds"), (ControlsTab::Options, "Options")] {
+            let border = if tab == view.controls_tab { Color::WHITE } else { BORDER_DIM };
+            let color = if tab == ControlsTab::Keybinds && !bindings.conflicting().is_empty() { RED } else { Color::WHITE };
+            spawn_settings_button(row, label, SettingsButton::ControlsTab(tab), 110.0, 30.0, 14.0, color, border);
+        }
+    });
+    match view.controls_tab {
+        ControlsTab::Keybinds => spawn_keybinds(body, view, bindings, capture, notes),
+        ControlsTab::Options => {
+            body.spawn((Text::new("Flight (Creative mode)"), TextFont { font_size: 16.0, ..default() }, TextColor(YELLOW), Node { margin: UiRect::top(Val::Px(8.0)), ..default() }));
+            body.spawn(Node { column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
+                for mode in FlightMode::ALL {
+                    let border = if mode == options.flight_mode { Color::WHITE } else { BORDER_DIM };
+                    spawn_settings_button(row, mode.label(), SettingsButton::SetFlightMode(mode), 190.0, 36.0, 15.0, Color::WHITE, border);
+                }
+            });
+            dim(body, options.flight_mode.description(), 13.0);
+        }
+    }
 }
 
 fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes) {
@@ -396,7 +432,7 @@ fn settings_button_visuals(mut buttons: Query<(&Interaction, &mut BackgroundColo
 /// text field here. Ignored - and the events thrown away - while a key is being
 /// captured, so the key being bound never also lands in the search.
 fn search_input(mut events: EventReader<KeyboardInput>, capture: Res<Capture>, mut view: ResMut<SettingsView>) {
-    if view.section != Section::Keybinds || capture.active() {
+    if view.section != Section::Controls || view.controls_tab != ControlsTab::Keybinds || capture.active() {
         events.clear();
         return;
     }
@@ -427,6 +463,7 @@ fn handle_settings_buttons(
     mut capture: ResMut<Capture>,
     mut bindings: ResMut<Bindings>,
     mut world_settings: ResMut<WorldSettings>,
+    mut options: ResMut<ControlOptions>,
     store: Res<SaveStore>,
 ) {
     for (interaction, button) in &interactions {
@@ -437,6 +474,14 @@ fn handle_settings_buttons(
             SettingsButton::Section(section) => {
                 view.section = section;
                 view.scroll = 0.0;
+            }
+            SettingsButton::ControlsTab(tab) => {
+                view.controls_tab = tab;
+                view.scroll = 0.0;
+            }
+            SettingsButton::SetFlightMode(mode) => {
+                options.flight_mode = mode;
+                let _ = store.save_control_options(&options);
             }
             SettingsButton::RenderDistanceDelta(d) => {
                 world_settings.render_distance = (world_settings.render_distance + d).clamp(2, 16);
@@ -566,9 +611,9 @@ mod tests {
         assert_eq!(also_used_by(&b, "chat").as_deref(), Some("Also used by: Open inventory"));
         assert_eq!(also_used_by(&b, "inventory").as_deref(), Some("Also used by: Open chat"));
         assert_eq!(conflict_summary(&b).as_deref(), Some("2 controls share a key with another (shown in red)."));
-        assert_eq!(tab_label(Section::Keybinds, &b), "Keybinds (2 in conflict)");
-        assert_eq!(tab_label(Section::Rendering, &b), "Rendering", "only the Keybinds tab warns");
-        assert_eq!(tab_label(Section::Keybinds, &Bindings::default()), "Keybinds");
+        assert_eq!(tab_label(Section::Controls, &b), "Controls (2 in conflict)");
+        assert_eq!(tab_label(Section::Rendering, &b), "Rendering", "only the Controls tab warns");
+        assert_eq!(tab_label(Section::Controls, &Bindings::default()), "Controls");
     }
 
     // ---- the screen as a running Bevy schedule ----------------------------
@@ -679,7 +724,7 @@ mod tests {
         assert!(s.texts().iter().any(|t| t.contains("no sound")));
         s.click(SettingsButton::Section(Section::Mods));
         assert!(s.texts().iter().any(|t| t.starts_with("New worlds keep mods")));
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         assert_eq!(s.rebind_buttons().len(), Action::ALL.len(), "one row per control");
     }
 
@@ -697,7 +742,7 @@ mod tests {
     #[test]
     fn clicking_a_control_then_pressing_a_combo_rebinds_and_saves_it() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.click(SettingsButton::Rebind(id(Action::Jump)));
         assert!(s.app.world().resource::<Capture>().active());
         assert!(s.texts().iter().any(|t| t == "Press a key..."), "the row says it is listening");
@@ -714,7 +759,7 @@ mod tests {
     #[test]
     fn escape_cancels_a_rebind_and_the_key_is_not_typed_into_the_search() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.click(SettingsButton::Rebind(id(Action::Jump)));
         s.type_text("x");
         assert_eq!(s.app.world().resource::<SettingsView>().search, "", "typing while capturing is not search text");
@@ -727,10 +772,10 @@ mod tests {
     #[test]
     fn buttons_are_ignored_while_a_key_is_being_captured() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.click(SettingsButton::Rebind(id(Action::Jump)));
         s.click(SettingsButton::Section(Section::Sound));
-        assert_eq!(s.app.world().resource::<SettingsView>().section, Section::Keybinds);
+        assert_eq!(s.app.world().resource::<SettingsView>().section, Section::Controls);
         s.click(SettingsButton::Reset(id(Action::Chat)));
         assert!(s.app.world().resource::<Capture>().active(), "still waiting for the key");
     }
@@ -738,7 +783,7 @@ mod tests {
     #[test]
     fn unbind_and_reset_work_and_reset_all_restores_everything() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.click(SettingsButton::Unbind(id(Action::Chat)));
         assert_eq!(s.bindings().get(Action::Chat), None);
         assert!(s.texts().iter().any(|t| t == "Unbound"));
@@ -755,13 +800,13 @@ mod tests {
     #[test]
     fn two_controls_on_one_key_are_flagged_on_both_rows() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.app.world_mut().resource_mut::<Bindings>().set(Action::Chat, Chord::parse("E"));
         s.app.update();
         let texts = s.texts();
         assert!(texts.iter().any(|t| t == "Also used by: Open inventory"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "Also used by: Open chat"));
-        assert!(texts.iter().any(|t| t == "Keybinds (2 in conflict)"), "the tab warns too");
+        assert!(texts.iter().any(|t| t == "Controls (2 in conflict)"), "the tab warns too");
         // The red is real colour on the rows' text, not just wording.
         let mut q = s.app.world_mut().query::<(&Text, &TextColor)>();
         let red_labels: Vec<_> = q.iter(s.app.world()).filter(|(_, c)| c.0 == RED).map(|(t, _)| t.0.clone()).collect();
@@ -771,7 +816,7 @@ mod tests {
     #[test]
     fn typing_searches_and_key_queries_find_a_key() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.type_text("key:a");
         assert_eq!(s.app.world().resource::<SettingsView>().search, "key:a");
         assert_eq!(s.rebind_buttons(), vec![id(Action::Left)], "only the control on A is listed");
@@ -794,7 +839,7 @@ mod tests {
     #[test]
     fn leaving_the_screen_removes_it_and_a_half_finished_rebind() {
         let mut s = screen();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         s.click(SettingsButton::Rebind(id(Action::Jump)));
         s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
         s.app.update();
@@ -821,7 +866,7 @@ mod tests {
             ],
         );
         let mut s = screen_with(Some(installed.0.clone()));
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         (s, installed)
     }
 
@@ -883,7 +928,7 @@ mod tests {
         s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Settings);
         s.app.update();
         s.app.update();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         assert!(s.rebind_buttons().contains(&"later:thing".to_string()));
     }
 
@@ -899,7 +944,7 @@ mod tests {
         s.app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Settings);
         s.app.update();
         s.app.update();
-        s.click(SettingsButton::Section(Section::Keybinds));
+        s.click(SettingsButton::Section(Section::Controls));
         assert!(!s.rebind_buttons().contains(&"weather:noon".to_string()), "gone from the screen");
         // Any later change (here: another rebind) saves the file again; the removed mod's key must still be in it.
         s.click(SettingsButton::Unbind("chat".into()));
@@ -907,10 +952,54 @@ mod tests {
         assert_eq!(saved["weather:noon"], "F9", "taking a mod out must not cost the player their key for it");
     }
 
+
+    // ---- the Controls options (flight mode) ---------------------------------
+
+    #[test]
+    fn controls_opens_on_the_keybinds_and_has_an_options_half() {
+        let mut s = screen();
+        s.click(SettingsButton::Section(Section::Controls));
+        assert_eq!(s.app.world().resource::<SettingsView>().controls_tab, ControlsTab::Keybinds);
+        assert!(s.texts().iter().any(|t| t == "Controls"), "the section tab is called Controls");
+        assert!(!s.texts().iter().any(|t| t == "Keybinds (0 in conflict)"));
+        assert_eq!(s.rebind_buttons().len(), Action::ALL.len());
+        s.click(SettingsButton::ControlsTab(ControlsTab::Options));
+        assert!(s.rebind_buttons().is_empty(), "the options half has no key list");
+        let texts = s.texts();
+        assert!(texts.iter().any(|t| t == "Flight (Creative mode)"));
+        assert!(texts.iter().any(|t| t == "Toggle key") && texts.iter().any(|t| t == "Double-tap jump"));
+        assert!(texts.iter().any(|t| t == FlightMode::Toggle.description()), "the current choice is explained");
+        s.click(SettingsButton::ControlsTab(ControlsTab::Keybinds));
+        assert_eq!(s.rebind_buttons().len(), Action::ALL.len(), "and back");
+    }
+
+    #[test]
+    fn choosing_double_tap_jump_changes_the_resource_explains_it_and_saves_it() {
+        let mut s = screen();
+        s.click(SettingsButton::Section(Section::Controls));
+        s.click(SettingsButton::ControlsTab(ControlsTab::Options));
+        assert_eq!(s.app.world().resource::<ControlOptions>().flight_mode, FlightMode::Toggle, "toggle is the default");
+        s.click(SettingsButton::SetFlightMode(FlightMode::DoubleTapJump));
+        assert_eq!(s.app.world().resource::<ControlOptions>().flight_mode, FlightMode::DoubleTapJump);
+        assert!(s.texts().iter().any(|t| t == FlightMode::DoubleTapJump.description()));
+        assert_eq!(s.app.world().resource::<SaveStore>().load_control_options().flight_mode, FlightMode::DoubleTapJump, "written to disk");
+        s.click(SettingsButton::SetFlightMode(FlightMode::Toggle));
+        assert_eq!(s.app.world().resource::<SaveStore>().load_control_options().flight_mode, FlightMode::Toggle);
+    }
+
+    #[test]
+    fn typing_on_the_options_half_does_not_go_into_the_hidden_search() {
+        let mut s = screen();
+        s.click(SettingsButton::Section(Section::Controls));
+        s.click(SettingsButton::ControlsTab(ControlsTab::Options));
+        s.type_text("abc");
+        assert_eq!(s.app.world().resource::<SettingsView>().search, "");
+    }
+
     #[test]
     fn the_sections_are_the_ones_asked_for() {
         let labels: Vec<_> = Section::ALL.iter().map(|s| s.label()).collect();
-        assert_eq!(labels, ["Player", "Rendering", "Sound", "Keybinds", "Mods"]);
+        assert_eq!(labels, ["Player", "Rendering", "Sound", "Controls", "Mods"]);
     }
 
     #[test]
