@@ -200,6 +200,24 @@ pub const DEFAULT_MASS: f32 = 1.0;
 /// Seconds between melee hits with anything that doesn't say (`attack_cooldown`).
 pub const DEFAULT_ATTACK_COOLDOWN: f32 = 0.45;
 
+/// A state a block declares for itself (`state_defs` in its file): a name and
+/// the values it can take. The *first* value is the default - what a freshly
+/// placed block has, and what a cleared state word reads as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateDef {
+    pub name: String,
+    pub values: Vec<String>,
+}
+
+/// How a `state_defs` entry is written: `"charge": 8` (values `0`..`7`) or
+/// `"mode": ["off", "on", "auto"]`.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum StateValuesFile {
+    Count(u32),
+    Names(Vec<String>),
+}
+
 /// Everything about how a thing behaves when thrown, apart from its mass.
 /// The same four tags work in a block file and an item file, and every
 /// field is optional: leave one out and the default below applies.
@@ -834,6 +852,12 @@ pub struct BlockDef {
     /// `waterloggable` -> `waterlogged`, a fluid or what one freezes into ->
     /// `level`). Nothing outside this list is ever a state of this block.
     pub states: Vec<String>,
+    /// States this block declares itself (`state_defs`), beyond the built-in
+    /// tags. Stored in the cell's state word like any other (see `states.rs`).
+    pub state_defs: Vec<StateDef>,
+    /// Where each of `state_defs` lives in the state word - filled in by
+    /// `BlockRegistry::finalize_states`, parallel to `state_defs`.
+    pub state_fields: Vec<crate::states::Field>,
     /// What this fluid becomes when it freezes (`water` -> `ice`). A block
     /// named here is a "layer" every waterloggable block gets a variant for.
     pub freezes_to: Option<String>,
@@ -905,6 +929,8 @@ impl Default for BlockDef {
             upper: None,
             waterloggable: false,
             states: Vec::new(),
+            state_defs: Vec::new(),
+            state_fields: Vec::new(),
             freezes_to: None,
             layered: None,
         }
@@ -975,6 +1001,9 @@ pub(crate) struct BlockFile {
     /// Which state tags a placed one has (`states.rs`).
     #[serde(default)]
     states: Vec<String>,
+    /// States this block declares for itself.
+    #[serde(default)]
+    state_defs: std::collections::BTreeMap<String, StateValuesFile>,
     freezes_to: Option<String>,
     tool: Option<ToolKind>,
     #[serde(default)]
@@ -1080,6 +1109,18 @@ impl BlockFile {
             upper: self.upper,
             waterloggable,
             states,
+            state_defs: self
+                .state_defs
+                .into_iter()
+                .map(|(name, values)| StateDef {
+                    name: name.to_lowercase(),
+                    values: match values {
+                        StateValuesFile::Count(n) => (0..n).map(|i| i.to_string()).collect(),
+                        StateValuesFile::Names(names) => names,
+                    },
+                })
+                .collect(),
+            state_fields: Vec::new(),
             freezes_to: self.freezes_to,
             layered: None,
         }
@@ -1415,6 +1456,21 @@ impl BlockRegistry {
             if let Some(unknown) = def.states.iter().find(|s| crate::states::state_tag(s).is_none()) {
                 let names: Vec<_> = crate::states::STATE_TAGS.iter().map(|t| t.name).collect();
                 panic!("block {:?}: unknown state {:?} in \"states\" (known: {})", def.id, unknown, names.join(", "));
+            }
+            // Fit this block's own states into the bits its built-in tags
+            // leave free. Each block has its own layout: a cell holds one
+            // block, so two blocks never compete for bits.
+            def.state_fields = crate::states::allocate_fields(&def.id, &def.states, &def.state_defs)
+                .unwrap_or_else(|why| panic!("{why}"));
+        }
+        // A derived `block@layer` variant lays its states out exactly like its
+        // block, so a cell can swap between the two (water arriving, leaving)
+        // without moving any bits.
+        for i in 1..self.defs.len() {
+            if let Some(l) = self.defs[i].layered {
+                let (defs, fields) = (self.defs[l.block as usize].state_defs.clone(), self.defs[l.block as usize].state_fields.clone());
+                self.defs[i].state_defs = defs;
+                self.defs[i].state_fields = fields;
             }
         }
     }

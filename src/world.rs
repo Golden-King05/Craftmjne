@@ -9,7 +9,7 @@
 //! chunks to exist (the mesher gets a 1-block padded shell for seamless
 //! culling and ambient occlusion across chunk borders).
 
-use crate::states::{pack_state, AXIS, LEVEL};
+use crate::states::{axis_of, level_of, pack_state, with_axis, with_level};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
@@ -79,10 +79,6 @@ pub struct BlockSetEvent {
     pub pos: IVec3,
     pub id: BlockId,
     pub prev: BlockId,
-    /// The placed orientation (`blocks::AXIS_X/Y/Z`) - `AXIS_Y` (the
-    /// default) for anything that doesn't rotate. Carried on the event so
-    /// `record_edits`/`write_save` can persist it alongside the block id.
-    pub axis: u8,
 }
 
 #[derive(Event)]
@@ -280,7 +276,28 @@ impl ChunkMap {
 
     /// Writes a block, marks the chunk (and border neighbours) for remeshing.
     /// Returns the previous block id, or None if the chunk isn't loaded.
+    ///
+    /// **Clears the cell's state word** (`states.rs`): a new block starts with
+    /// every state at its default, so nothing the old block stored in those
+    /// bits (a log's axis, a mod block's charge) leaks into the next one. Use
+    /// [`Self::set_block_keep_level`] for a change where the *fluid* carries on
+    /// - ice forming from flowing water, water left behind when a waterlogged
+    /// block is mined.
     pub fn set_block(&mut self, pos: IVec3, id: BlockId) -> Option<BlockId> {
+        self.write_block(pos, id, true)
+    }
+
+    /// [`Self::set_block`], but the cell keeps its fluid level (and nothing
+    /// else): the one piece of state that belongs to the water, not to the
+    /// block it's sharing a cell with.
+    pub fn set_block_keep_level(&mut self, pos: IVec3, id: BlockId) -> Option<BlockId> {
+        let level = self.get_fluid_level(pos);
+        let prev = self.write_block(pos, id, true)?;
+        self.set_fluid_level_raw(pos, level);
+        Some(prev)
+    }
+
+    fn write_block(&mut self, pos: IVec3, id: BlockId, clear_state: bool) -> Option<BlockId> {
         if pos.y < 0 || pos.y >= WORLD_HEIGHT {
             return None;
         }
@@ -296,6 +313,11 @@ impl ChunkMap {
             return None;
         }
         blocks[idx] = id;
+        if clear_state {
+            if let Some(states) = chunk.state.as_mut() {
+                states[idx] = crate::states::DEFAULT_STATE;
+            }
+        }
         forget_base_fluid(&mut chunk.base_fluid, idx);
         chunk.touched = true;
         chunk.version += 1;
@@ -322,12 +344,55 @@ impl ChunkMap {
         );
         let Some(chunk) = self.chunks.get_mut(&coord) else { return };
         if let Some(states) = chunk.state.as_mut() {
-            if LEVEL.get(states[idx]) != level as u16 {
+            if level_of(states[idx]) != level {
                 forget_base_fluid(&mut chunk.base_fluid, idx);
                 chunk.touched = true;
             }
-            states[idx] = LEVEL.set(states[idx], level as u16);
+            states[idx] = with_level(states[idx], level);
         }
+    }
+
+    /// A cell's whole state word (`states.rs`); `DEFAULT_STATE` where nothing
+    /// is stored or the chunk isn't loaded.
+    pub fn state_word(&self, pos: IVec3) -> u16 {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return crate::states::DEFAULT_STATE;
+        }
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        self.chunks
+            .get(&Self::chunk_coord(pos.x, pos.z))
+            .and_then(|c| c.state.as_ref())
+            .map_or(crate::states::DEFAULT_STATE, |s| s[idx])
+    }
+
+    /// Overwrites a cell's whole state word without touching its block (what
+    /// reloading a saved edit does). Remeshing and the fluid-save bookkeeping
+    /// follow if anything actually changed. No-op if the chunk isn't loaded.
+    pub fn set_state_word_raw(&mut self, pos: IVec3, word: u16) {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
+        let idx = block_index(lx as usize, pos.y as usize, lz as usize);
+        let Some(chunk) = self.chunks.get_mut(&coord) else { return };
+        let Some(states) = chunk.state.as_mut() else { return };
+        if states[idx] == word {
+            return;
+        }
+        if level_of(states[idx]) != level_of(word) {
+            forget_base_fluid(&mut chunk.base_fluid, idx);
+        }
+        states[idx] = word;
+        chunk.touched = true;
+        chunk.version += 1;
+        chunk.dirty = true;
+        self.touch_borders(coord, lx, lz);
+        self.needs_scan = true;
     }
 
     /// A cell's stored rotation axis (`blocks::AXIS_*`); `AXIS_Y` where
@@ -344,7 +409,7 @@ impl ChunkMap {
         self.chunks
             .get(&Self::chunk_coord(pos.x, pos.z))
             .and_then(|c| c.state.as_ref())
-            .map_or(crate::blocks::AXIS_Y, |s| AXIS.get(s[idx]) as u8)
+            .map_or(crate::blocks::AXIS_Y, |s| axis_of(s[idx]))
     }
 
     /// Marks a cell as changed without changing its block id: remeshes the
@@ -379,7 +444,7 @@ impl ChunkMap {
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         );
         if let Some(states) = self.chunks.get_mut(&coord).and_then(|c| c.state.as_mut()) {
-            states[idx] = AXIS.set(states[idx], axis as u16);
+            states[idx] = with_axis(states[idx], axis);
         }
     }
 
@@ -394,11 +459,11 @@ impl ChunkMap {
             return FLUID_SOURCE;
         };
         let Some(states) = &chunk.state else { return FLUID_SOURCE };
-        LEVEL.get(states[block_index(
+        level_of(states[block_index(
             pos.x.rem_euclid(CHUNK_SIZE) as usize,
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
-        )]) as u8
+        )])
     }
 
     /// Sets both a cell's block id and fluid level in one write, used by the
@@ -419,12 +484,12 @@ impl ChunkMap {
             return false;
         };
         let idx = block_index(lx as usize, pos.y as usize, lz as usize);
-        if blocks[idx] != id || LEVEL.get(states[idx]) != level as u16 {
+        if blocks[idx] != id || level_of(states[idx]) != level {
             forget_base_fluid(&mut chunk.base_fluid, idx);
             chunk.touched = true;
         }
         blocks[idx] = id;
-        states[idx] = LEVEL.set(states[idx], level as u16);
+        states[idx] = with_level(states[idx], level);
         chunk.version += 1;
         chunk.dirty = true;
 
@@ -481,8 +546,8 @@ impl ChunkMap {
                 // The mesher wants plain per-cell level and axis arrays, so
                 // unpack the state word's fields as the column is copied.
                 for (i, &word) in src_state[src_base..src_base + H].iter().enumerate() {
-                    padded.fluid[dst_base + i] = LEVEL.get(word) as u8;
-                    padded.axis[dst_base + i] = AXIS.get(word) as u8;
+                    padded.fluid[dst_base + i] = level_of(word);
+                    padded.axis[dst_base + i] = axis_of(word);
                 }
                 padded.light[dst_base..dst_base + H]
                     .copy_from_slice(&src_light[src_base..src_base + H]);
@@ -539,14 +604,14 @@ struct MeshTask {
 /// save). Stores `(id, axis)` rather than just `id` so a rotated block's
 /// orientation survives a save/reload, not just its type.
 #[derive(Resource, Default)]
-pub struct EditLog(pub HashMap<IVec3, (BlockId, u8)>);
+pub struct EditLog(pub HashMap<IVec3, (BlockId, u16)>);
 
 /// Edits loaded from a save, grouped by chunk so `collect_gen_tasks` can
 /// apply them in O(1) right after a chunk finishes procedurally generating.
 /// Drained per-chunk as each one is applied - `EditLog` (above) is the
 /// resource that actually needs the complete picture for the whole session.
 #[derive(Resource, Default)]
-struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId, u8)>>);
+struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId, u16)>>);
 
 /// Saved fluid cells (`save::FluidCell`), grouped by chunk exactly like
 /// `PendingEdits` - reapplied verbatim (id *and* level, no simulation
@@ -890,18 +955,21 @@ fn enter_world(
     if is_new_world {
         data.time_of_day = NEW_WORLD_START_TIME;
     }
-    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u8)>> = HashMap::new();
-    let mut edit_log: HashMap<IVec3, (BlockId, u8)> = HashMap::new();
+    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u16)>> = HashMap::new();
+    let mut edit_log: HashMap<IVec3, (BlockId, u16)> = HashMap::new();
     for edit in &data.edits {
         // Unknown block names (e.g. from a mod no longer installed) are
         // skipped rather than failing the whole load.
         let Ok(id) = registry.by_name(&edit.block) else { continue };
         let pos = IVec3::new(edit.x, edit.y, edit.z);
         let coord = IVec2::new(edit.x.div_euclid(CHUNK_SIZE), edit.z.div_euclid(CHUNK_SIZE));
-        grouped.entry(coord).or_default().push((pos, id, edit.axis));
+        // A format-7 edit carries the whole state word; an older one only
+        // knew the rotation axis.
+        let word = edit.state.unwrap_or_else(|| with_axis(0, edit.axis));
+        grouped.entry(coord).or_default().push((pos, id, word));
         // EditLog needs the complete picture (old + new) from the start, not
         // just what this session adds - see its doc comment for why.
-        edit_log.insert(pos, (id, edit.axis));
+        edit_log.insert(pos, (id, word));
     }
     commands.insert_resource(PendingEdits(grouped));
     commands.insert_resource(EditLog(edit_log));
@@ -967,9 +1035,12 @@ fn enter_world(
     }
 }
 
-fn record_edits(mut events: EventReader<BlockSetEvent>, mut log: ResMut<EditLog>) {
+fn record_edits(mut events: EventReader<BlockSetEvent>, map: Res<ChunkMap>, mut log: ResMut<EditLog>) {
     for e in events.read() {
-        log.0.insert(e.pos, (e.id, e.axis));
+        // The cell's whole state word as it is now (its axis, a mod block's
+        // states, ...), read from the world rather than carried on the event,
+        // so no sender can forget some of it.
+        log.0.insert(e.pos, (e.id, map.state_word(e.pos)));
     }
 }
 
@@ -1007,7 +1078,7 @@ fn freeze_exposed_water(
     }
     for pos in candidates {
         if let Some((prev, frozen)) = try_freeze_cell(&mut map, &tables.0, pos, |x, z| world_gen.0.biome_at(x, z)) {
-            params.p1().write(BlockSetEvent { pos, id: frozen, prev, axis: crate::blocks::AXIS_Y });
+            params.p1().write(BlockSetEvent { pos, id: frozen, prev });
         }
     }
 }
@@ -1041,7 +1112,7 @@ fn try_freeze_cell(
     if !biome_at(pos.x, pos.z).freezes_water() {
         return None;
     }
-    map.set_block(pos, frozen).map(|prev| (prev, frozen))
+    map.set_block_keep_level(pos, frozen).map(|prev| (prev, frozen))
 }
 
 /// Serializes the current `EditLog` + exact fluid state + player pose and
@@ -1082,12 +1153,13 @@ fn write_save(
     let edits = log
         .0
         .iter()
-        .map(|(pos, &(id, axis))| BlockEdit {
+        .map(|(pos, &(id, word))| BlockEdit {
             x: pos.x,
             y: pos.y,
             z: pos.z,
             block: registry.def(id).id.clone(),
-            axis,
+            axis: 0,
+            state: Some(word),
         })
         .collect();
 
@@ -1209,7 +1281,7 @@ fn chunk_fluid_cells(
             for y in 0..H {
                 let idx = block_index(x, y, z);
                 let id = blocks[idx];
-                let level = LEVEL.get(states[idx]) as u8;
+                let level = level_of(states[idx]);
                 if !tables.holds_level(id, level) {
                     continue;
                 }
@@ -1489,9 +1561,9 @@ fn collect_gen_tasks(
         chunk.light = Some(generated.light);
         // Re-apply any saved edits for this chunk on top of the fresh terrain.
         if let Some(edits) = pending.0.remove(&gen_task.coord) {
-            for (pos, id, axis) in edits {
+            for (pos, id, word) in edits {
                 map.set_block(pos, id);
-                map.set_axis_raw(pos, axis);
+                map.set_state_word_raw(pos, word);
             }
         }
         // Re-apply this chunk's exact saved fluid state - id *and* level,
@@ -1612,10 +1684,10 @@ fn unload_far_chunks(
         pending.0.remove(coord);
     }
     let gone: std::collections::HashSet<IVec2> = gone.into_iter().collect();
-    for (pos, &(id, axis)) in &log.0 {
+    for (pos, &(id, word)) in &log.0 {
         let coord = ChunkMap::chunk_coord(pos.x, pos.z);
         if gone.contains(&coord) {
-            pending.0.entry(coord).or_default().push((*pos, id, axis));
+            pending.0.entry(coord).or_default().push((*pos, id, word));
         }
     }
     map.needs_scan = true;

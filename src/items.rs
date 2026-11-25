@@ -395,7 +395,6 @@ fn simulate_items(
                             pos: cell,
                             id: crate::blocks::AIR,
                             prev: id,
-                            axis: crate::blocks::AXIS_Y,
                         });
                         item.vel *= kept / speed;
                     } else {

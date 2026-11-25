@@ -66,16 +66,114 @@ impl Field {
 /// A fluid's flow level: `FLUID_SOURCE` (0), 1.. blocks from a supply, or
 /// `FLUID_FALLING` (255).
 pub const LEVEL: Field = Field { shift: 0, bits: 8 };
-/// Which axis a rotating block lies on (`AXIS_X/Y/Z`).
+/// Which axis a rotating block lies on, stored so that the default axis
+/// (`AXIS_Y`) is `0`: see [`encode_axis`].
 pub const AXIS: Field = Field { shift: 8, bits: 2 };
 
-/// Every cell's state word before anything has happened to it: a source-level
-/// cell on the default axis. A fresh chunk is filled with this.
-pub const DEFAULT_STATE: u16 = LEVEL.pack(FLUID_SOURCE as u16) | AXIS.pack(AXIS_Y as u16);
+/// Every cell's state word before anything has happened to it: **zero**. A
+/// source-level cell on the default axis with every mod state at its first
+/// value. The vanilla encodings (level 0 = source, axis stored as 0 = `AXIS_Y`)
+/// and the rule that a declared state's first value is its default are what
+/// make that true, so a block change can simply clear the word.
+pub const DEFAULT_STATE: u16 = 0;
+
+/// `AXIS_X/Y/Z` as stored: `AXIS_Y` is 0 so that a cleared word is the default.
+pub const fn encode_axis(axis: u8) -> u16 {
+    match axis {
+        AXIS_X => 1,
+        AXIS_Z => 2,
+        _ => 0,
+    }
+}
+
+pub const fn decode_axis(stored: u16) -> u8 {
+    match stored {
+        1 => AXIS_X,
+        2 => AXIS_Z,
+        _ => AXIS_Y,
+    }
+}
+
+/// The fluid level in `word`.
+pub const fn level_of(word: u16) -> u8 {
+    LEVEL.get(word) as u8
+}
+/// `word` with its fluid level replaced.
+pub const fn with_level(word: u16, level: u8) -> u16 {
+    LEVEL.set(word, level as u16)
+}
+/// The rotation axis in `word` (`AXIS_X/Y/Z`).
+pub const fn axis_of(word: u16) -> u8 {
+    decode_axis(AXIS.get(word))
+}
+/// `word` with its rotation axis replaced.
+pub const fn with_axis(word: u16, axis: u8) -> u16 {
+    AXIS.set(word, encode_axis(axis))
+}
 
 /// Builds a state word from a fluid level and an axis.
 pub const fn pack_state(level: u8, axis: u8) -> u16 {
-    LEVEL.pack(level as u16) | AXIS.pack(axis as u16)
+    with_axis(with_level(0, level), axis)
+}
+
+/// Lays out a block's own `state_defs` in the bits its built-in tags leave
+/// free: first fit, in declaration order, lowest bits first.
+///
+/// `states` is the block's enabled built-in tags (`level`/`waterlogged` reserve
+/// the level bits - a waterloggable block's variants hold a fluid level in the
+/// same word - and `axis` reserves the axis bits). Errors, in words a content
+/// author can act on, for a bad name, a state with fewer than two values, or
+/// a block that needs more bits than are free.
+pub fn allocate_fields(block: &str, states: &[String], defs: &[crate::blocks::StateDef]) -> Result<Vec<Field>, String> {
+    let has = |name: &str| states.iter().any(|s| s == name);
+    let mut taken: u16 = 0;
+    if has("level") || has("waterlogged") {
+        taken |= LEVEL.mask();
+    }
+    if has("axis") {
+        taken |= AXIS.mask();
+    }
+    let mut fields = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for def in defs {
+        if def.name.is_empty() || !def.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!("block {block:?}: state name {:?} must be letters, digits and underscores", def.name));
+        }
+        if state_tag(&def.name).is_some() {
+            return Err(format!("block {block:?}: state {:?} is a built-in state tag's name", def.name));
+        }
+        if seen.contains(&def.name.as_str()) {
+            return Err(format!("block {block:?}: state {:?} is declared twice", def.name));
+        }
+        seen.push(&def.name);
+        let n = def.values.len();
+        if n < 2 {
+            return Err(format!("block {block:?}: state {:?} needs at least two values", def.name));
+        }
+        let mut distinct = def.values.clone();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() != n {
+            return Err(format!("block {block:?}: state {:?} lists a value twice", def.name));
+        }
+        let bits = (usize::BITS - (n - 1).leading_zeros()) as u8; // ceil(log2(n))
+        let slot = (0..=16u8.saturating_sub(bits)).find(|&shift| {
+            let field = Field { shift, bits };
+            taken & field.mask() == 0
+        });
+        let Some(shift) = slot else {
+            let free = 16 - taken.count_ones();
+            return Err(format!(
+                "block {block:?}: its states need more bits than the {free} free in a cell's state word \
+                 (state {:?} needs {bits} more); give the block fewer or smaller states",
+                def.name
+            ));
+        };
+        let field = Field { shift, bits };
+        taken |= field.mask();
+        fields.push(field);
+    }
+    Ok(fields)
 }
 
 /// Where a state tag's value lives.
@@ -197,7 +295,7 @@ impl StateError {
 /// could take.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CellState {
-    pub name: &'static str,
+    pub name: String,
     pub value: String,
     pub allowed: Vec<String>,
 }
@@ -205,13 +303,22 @@ pub struct CellState {
 /// Every state tag the block at `pos` has, with its current value.
 pub fn read_states(map: &ChunkMap, registry: &BlockRegistry, tables: &Tables, pos: IVec3) -> Vec<CellState> {
     let id = map.get_block(pos);
-    STATE_TAGS
+    let mut states: Vec<CellState> = STATE_TAGS
         .iter()
         .filter_map(|tag| {
             let allowed = (tag.values)(registry, tables, id);
-            (!allowed.is_empty()).then(|| CellState { name: tag.name, value: (tag.get)(map, registry, tables, pos), allowed })
+            (!allowed.is_empty())
+                .then(|| CellState { name: tag.name.to_string(), value: (tag.get)(map, registry, tables, pos), allowed })
         })
-        .collect()
+        .collect();
+    // Then whatever this block declared for itself.
+    let word = map.state_word(pos);
+    let def = registry.def(id);
+    for (state, field) in def.state_defs.iter().zip(&def.state_fields) {
+        let value = state.values.get(field.get(word) as usize).cloned().unwrap_or_else(|| "?".into());
+        states.push(CellState { name: state.name.clone(), value, allowed: state.values.clone() });
+    }
+    states
 }
 
 /// Sets state tag `tag` of the block at `pos` to `value`. Returns the events
@@ -227,8 +334,19 @@ pub fn set_state(
     if !map.is_loaded(pos) {
         return Err(StateError::NotLoaded);
     }
-    let def = state_tag(tag).ok_or_else(|| StateError::UnknownTag(tag.to_string()))?;
     let id = map.get_block(pos);
+    // A state the block declared itself?
+    let block = registry.def(id);
+    if let Some((state, field)) = block.state_defs.iter().zip(&block.state_fields).find(|(s, _)| s.name == tag) {
+        let value = value.to_lowercase();
+        let Some(index) = state.values.iter().position(|v| v.to_lowercase() == value) else {
+            return Err(StateError::BadValue { tag: tag.to_string(), value, allowed: state.values.clone() });
+        };
+        let word = field.set(map.state_word(pos), index as u16);
+        map.set_state_word_raw(pos, word);
+        return Ok(vec![BlockSetEvent { pos, id, prev: id }]);
+    }
+    let def = state_tag(tag).ok_or_else(|| StateError::UnknownTag(tag.to_string()))?;
     let allowed = (def.values)(registry, tables, id);
     if allowed.is_empty() {
         return Err(StateError::NotApplicable { block: registry.def(id).id.clone(), tag: tag.to_string() });
@@ -274,7 +392,7 @@ fn axis_set(map: &mut ChunkMap, _: &BlockRegistry, _: &Tables, pos: IVec3, value
     map.set_axis_raw(pos, axis);
     map.refresh_cell(pos);
     // Same id, new axis: this is what `EditLog` saves.
-    vec![BlockSetEvent { pos, id, prev: id, axis }]
+    vec![BlockSetEvent { pos, id, prev: id }]
 }
 
 // ---- waterlogged -----------------------------------------------------
@@ -320,11 +438,10 @@ fn layer_set(map: &mut ChunkMap, registry: &BlockRegistry, _: &Tables, pos: IVec
     if new == old {
         return Vec::new();
     }
-    let axis = map.get_axis(pos);
     map.set_block(pos, new);
     // Starts as a permanent source, like a player-placed fluid.
     map.set_fluid_level_raw(pos, FLUID_SOURCE);
-    vec![BlockSetEvent { pos, id: new, prev: old, axis }]
+    vec![BlockSetEvent { pos, id: new, prev: old }]
 }
 
 // ---- level -----------------------------------------------------------
@@ -358,7 +475,7 @@ fn level_set(map: &mut ChunkMap, _: &BlockRegistry, _: &Tables, pos: IVec3, valu
     map.set_fluid_level_raw(pos, level);
     map.refresh_cell(pos);
     // Wakes the fluid simulation around the cell, which settles the rest.
-    vec![BlockSetEvent { pos, id, prev: id, axis: map.get_axis(pos) }]
+    vec![BlockSetEvent { pos, id, prev: id }]
 }
 
 // ---- the in-game side: a request, and the system that carries it out ---
@@ -399,7 +516,7 @@ fn apply_state_requests(
             _ => {
                 let mut states = read_states(&map, &registry, &tables.0, p);
                 if let Some(tag) = &req.tag {
-                    states.retain(|s| s.name == tag);
+                    states.retain(|s| s.name == *tag);
                 }
                 if states.is_empty() {
                     format!("{name} at {} {} {} has no state tags.", p.x, p.y, p.z)
@@ -449,8 +566,8 @@ mod tests {
 
     pub(super) const P: IVec3 = IVec3::new(4, 10, 4);
 
-    fn tags(map: &ChunkMap, reg: &BlockRegistry, tables: &Tables) -> Vec<&'static str> {
-        read_states(map, reg, tables, P).iter().map(|s| s.name).collect()
+    fn tags(map: &ChunkMap, reg: &BlockRegistry, tables: &Tables) -> Vec<String> {
+        read_states(map, reg, tables, P).into_iter().map(|s| s.name).collect()
     }
 
     #[test]
@@ -475,7 +592,7 @@ mod tests {
         assert_eq!(map.get_axis(P), AXIS_X);
         assert_eq!(read_states(&map, &reg, &tables, P)[0].value, "x");
         // The event carries the new axis, which is what the edit log saves.
-        assert!(events.iter().any(|e| e.pos == P && e.id == log && e.axis == AXIS_X));
+        assert!(events.iter().any(|e| e.pos == P && e.id == log), "announced so the edit log records the new word");
         assert!(map.chunks[&IVec2::ZERO].dirty, "the chunk is remeshed");
     }
 
@@ -654,21 +771,24 @@ mod storage_tests {
     #[test]
     fn writing_one_field_leaves_the_others_alone() {
         let word = pack_state(7, AXIS_X);
-        assert_eq!(LEVEL.get(word), 7);
-        assert_eq!(AXIS.get(word), AXIS_X as u16);
-        let w = LEVEL.set(word, FLUID_FALLING as u16);
-        assert_eq!((LEVEL.get(w), AXIS.get(w)), (FLUID_FALLING as u16, AXIS_X as u16));
-        let w = AXIS.set(w, AXIS_Z as u16);
-        assert_eq!((LEVEL.get(w), AXIS.get(w)), (FLUID_FALLING as u16, AXIS_Z as u16));
+        assert_eq!((level_of(word), axis_of(word)), (7, AXIS_X));
+        let w = with_level(word, FLUID_FALLING);
+        assert_eq!((level_of(w), axis_of(w)), (FLUID_FALLING, AXIS_X));
+        let w = with_axis(w, AXIS_Z);
+        assert_eq!((level_of(w), axis_of(w)), (FLUID_FALLING, AXIS_Z));
         // A value too wide for its field is cut off rather than spilling over.
         assert_eq!(AXIS.get(AXIS.set(0, 0b111)), 0b11);
         assert_eq!(LEVEL.get(AXIS.set(0, 0b111)), 0);
     }
 
     #[test]
-    fn a_fresh_cell_is_a_source_on_the_default_axis() {
-        assert_eq!(LEVEL.get(DEFAULT_STATE) as u8, FLUID_SOURCE);
-        assert_eq!(AXIS.get(DEFAULT_STATE) as u8, AXIS_Y);
+    fn a_cleared_word_is_the_default_everything() {
+        assert_eq!(DEFAULT_STATE, 0);
+        assert_eq!(level_of(0), FLUID_SOURCE);
+        assert_eq!(axis_of(0), AXIS_Y, "the default axis is stored as zero");
+        for axis in [AXIS_X, AXIS_Y, AXIS_Z] {
+            assert_eq!(decode_axis(encode_axis(axis)), axis);
+        }
     }
 
     #[test]
@@ -688,5 +808,173 @@ mod storage_tests {
         assert_eq!(map.get_axis(p), AXIS_Z);
         map.set_fluid_level_raw(p, FLUID_FALLING);
         assert_eq!(map.get_axis(p), AXIS_Z, "and the axis survived a level change");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::blocks::{BlockFile, BlockRegistry, StateDef};
+
+    fn def(name: &str, n: usize) -> StateDef {
+        StateDef { name: name.into(), values: (0..n).map(|i| i.to_string()).collect() }
+    }
+
+    fn registry_with(files: &[&str]) -> (BlockRegistry, std::sync::Arc<Tables>) {
+        let mut reg = BlockRegistry::with_defaults();
+        for f in files {
+            reg.register(serde_json::from_str::<BlockFile>(f).unwrap().into_def());
+        }
+        reg.add_layered_variants();
+        let mut painters = crate::atlas::default_painters();
+        for name in reg.texture_names().collect::<Vec<_>>() {
+            painters.ensure_registered(&name);
+        }
+        let atlas = crate::atlas::build_atlas(&painters);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        (reg, tables)
+    }
+
+    fn tags(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_block_with_no_built_in_states_can_use_every_bit() {
+        // Four states of 4 bits each fill all 16.
+        let fields = allocate_fields("battery", &[], &[def("a", 16), def("b", 16), def("c", 16), def("d", 16)]).unwrap();
+        assert_eq!(fields.iter().map(|f| f.shift).collect::<Vec<_>>(), vec![0, 4, 8, 12]);
+        let err = allocate_fields("battery", &[], &[def("a", 16), def("b", 16), def("c", 16), def("d", 16), def("e", 2)]).unwrap_err();
+        assert!(err.contains("more bits"), "{err}");
+    }
+
+    #[test]
+    fn a_block_only_gives_up_the_bits_its_built_in_states_use() {
+        // Water's level takes 8, so a 16-valued (4-bit) state goes above it.
+        let f = allocate_fields("b", &tags(&["level"]), &[def("x", 16)]).unwrap();
+        assert_eq!(f[0], Field { shift: 8, bits: 4 });
+        // A log's axis takes bits 8-9; the state fits below it.
+        let f = allocate_fields("b", &tags(&["axis"]), &[def("x", 256)]).unwrap();
+        assert_eq!(f[0], Field { shift: 0, bits: 8 });
+        // Both: only 6 bits remain.
+        assert!(allocate_fields("b", &tags(&["level", "axis"]), &[def("x", 64)]).is_ok());
+        assert!(allocate_fields("b", &tags(&["level", "axis"]), &[def("x", 65)]).is_err());
+        // Waterlogged reserves the level bits too: its variants hold a level.
+        let f = allocate_fields("b", &tags(&["waterlogged"]), &[def("x", 4)]).unwrap();
+        assert!(f[0].shift >= 8);
+    }
+
+    #[test]
+    fn bad_declarations_are_refused_with_the_reason() {
+        let one = StateDef { name: "x".into(), values: vec!["only".into()] };
+        assert!(allocate_fields("b", &[], &[one]).unwrap_err().contains("two values"));
+        assert!(allocate_fields("b", &[], &[def("x", 2), def("x", 2)]).unwrap_err().contains("twice"));
+        assert!(allocate_fields("b", &[], &[def("axis", 2)]).unwrap_err().contains("built-in"));
+        assert!(allocate_fields("b", &[], &[def("has space", 2)]).unwrap_err().contains("underscores"));
+        let dup = StateDef { name: "x".into(), values: vec!["a".into(), "a".into()] };
+        assert!(allocate_fields("b", &[], &[dup]).unwrap_err().contains("value twice"));
+    }
+
+    #[test]
+    fn a_declared_block_gets_its_own_layout_and_a_variant_shares_it() {
+        let (reg, _) = registry_with(&[
+            r#"{"id": "battery", "state_defs": {"charge": 8, "mode": ["off", "on", "auto"]}}"#,
+            r#"{"id": "shell", "shape": "floor", "waterloggable": true, "state_defs": {"charge": 8}}"#,
+        ]);
+        let battery = reg.def(reg.id("battery"));
+        assert_eq!(battery.state_fields, vec![Field { shift: 0, bits: 3 }, Field { shift: 3, bits: 2 }]);
+        // A shell can be waterlogged, so its charge stays clear of the level bits...
+        let shell = reg.def(reg.id("shell"));
+        assert!(shell.state_fields[0].shift >= 8);
+        // ...and shell@water lays out exactly the same.
+        let wet = reg.def(reg.variant(reg.id("shell"), reg.id("water")).unwrap());
+        assert_eq!(wet.state_fields, shell.state_fields);
+        assert_eq!(wet.state_defs, shell.state_defs);
+    }
+
+    #[test]
+    fn a_mod_blocks_states_can_be_read_set_and_dont_leak_into_the_next_block() {
+        let (reg, tables) = registry_with(&[r#"{"id": "battery", "state_defs": {"charge": 8, "mode": ["off", "on", "auto"]}}"#]);
+        let (battery, stone) = (reg.id("battery"), reg.id("stone"));
+        let (_, _, mut map) = tests::setup();
+        let p = tests::P;
+        map.set_block(p, battery);
+        let read = |map: &ChunkMap| -> Vec<(String, String)> {
+            read_states(map, &reg, &tables, p).into_iter().map(|s| (s.name, s.value)).collect()
+        };
+        assert_eq!(read(&map), vec![("charge".into(), "0".into()), ("mode".into(), "off".into())], "defaults are the first values");
+        set_state(&mut map, &reg, &tables, p, "charge", "5").unwrap();
+        set_state(&mut map, &reg, &tables, p, "mode", "AUTO").unwrap();
+        assert_eq!(read(&map), vec![("charge".into(), "5".into()), ("mode".into(), "auto".into())]);
+        assert!(matches!(set_state(&mut map, &reg, &tables, p, "charge", "8"), Err(StateError::BadValue { .. })));
+        // Replacing the block clears everything it stored.
+        map.set_block(p, stone);
+        assert_eq!(map.state_word(p), DEFAULT_STATE, "no charge left behind for the next block");
+    }
+
+    #[test]
+    fn placing_over_a_fluid_keeps_only_its_level() {
+        let (reg, _tables, mut map) = tests::setup();
+        let p = tests::P;
+        map.set_block(p, reg.id("water"));
+        map.set_fluid_level_raw(p, 3);
+        map.set_axis_raw(p, AXIS_X); // stray bits that belong to nothing here
+        map.set_block_keep_level(p, reg.id("ice"));
+        assert_eq!(map.get_fluid_level(p), 3, "the fluid carries on");
+        assert_eq!(map.get_axis(p), AXIS_Y, "nothing else does");
+        map.set_block(p, reg.id("stone"));
+        assert_eq!(map.get_fluid_level(p), FLUID_SOURCE, "a plain replacement clears the level too");
+    }
+
+    #[test]
+    fn an_old_edit_with_only_an_axis_still_loads() {
+        let old: crate::save::BlockEdit = serde_json::from_str(r#"{"x":1,"y":2,"z":3,"block":"log","axis":2}"#).unwrap();
+        assert_eq!(old.state, None);
+        assert_eq!(axis_of(old.state.unwrap_or_else(|| with_axis(0, old.axis))), AXIS_Z);
+        let new: crate::save::BlockEdit = serde_json::from_str(r#"{"x":1,"y":2,"z":3,"block":"log","state":300}"#).unwrap();
+        assert_eq!(new.state, Some(300));
+    }
+}
+
+#[cfg(test)]
+mod janitor_tests {
+    /// Every source file that reads or writes a cell's state word. If a file
+    /// starts doing so it must be added to `docs/STATE_ACCESS.md` - both the
+    /// machine-readable line and a description of what the new code does.
+    #[test]
+    fn the_janitor_list_covers_every_file_that_touches_the_word() {
+        const TOUCHES: &[&str] = &[
+            "LEVEL.", "AXIS.", "level_of(", "with_level(", "axis_of(", "with_axis(", "state_word", "chunk.state",
+            ".state.as_", "pack_state", "set_fluid_level_raw", "set_axis_raw", "get_fluid_level", "get_axis(",
+            "set_block_keep_level",
+        ];
+        let mut found: Vec<String> = std::fs::read_dir("src")
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+            .filter(|p| {
+                let text = std::fs::read_to_string(p).unwrap();
+                // Only code counts, not a mention in a comment.
+                text.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| TOUCHES.iter().any(|t| l.contains(t)))
+            })
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        found.sort();
+        let doc = std::fs::read_to_string("docs/STATE_ACCESS.md").expect("docs/STATE_ACCESS.md exists");
+        let line = doc.lines().find(|l| l.contains("janitor-files:")).expect("a janitor-files line");
+        let mut listed: Vec<String> = line
+            .trim_start_matches("<!--")
+            .trim_end_matches("-->")
+            .trim()
+            .trim_start_matches("janitor-files:")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        listed.sort();
+        assert_eq!(found, listed, "files touching the state word vs the janitor list in docs/STATE_ACCESS.md");
+        for file in &listed {
+            assert!(doc.contains(&format!("`{file}`")), "{file} is listed but not described");
+        }
     }
 }

@@ -1191,14 +1191,40 @@ what freezes from one) has a `level`. A misspelled state name is refused too.
 
 **Storage.** Every cell has one 16-bit *state word* (`Chunk::state`), the same
 two bytes it used to spend on a separate fluid-level array and axis array, so
-memory is unchanged. Each state tag stored there owns a run of bits declared in
-its table row (`level` takes 8, `axis` 2, so 6 bits are free: a new tag that
-fits costs no memory). One exception is deliberate: `waterlogged` *is* which
-block id the cell holds (`pebble@water`), because collision, light and meshing
-are all looked up by block id and would each have to become state-dependent to
-move it. On disk nothing changed, so older worlds still open: `axis` is saved
-through the edit log and `level` through the fluid scan, both reading and writing
-the word through its fields.
+memory is unchanged. **Which bits mean what depends on the block in the cell.**
+The built-in tags sit at fixed positions on the blocks that enable them (`level`
+bits 0-7, `axis` 8-9), and a block's own states take whatever bits its built-in
+tags leave free, so a block that uses none can use all 16. A cell holds one
+block, so two blocks (or two mods) never compete for bits. Nothing is reserved
+globally, and the layouts are computed per block at startup
+(`BlockRegistry::finalize_states`), from every registered block.
+
+A block declares its own states with `state_defs`: a name and either a count or
+value names, the first value being the default.
+
+```json
+{ "id": "battery", "state_defs": { "charge": 8, "mode": ["off", "on", "auto"] } }
+```
+
+`/blockstate x y z charge 5` reads and sets them like any built-in tag, they're
+saved with the world, and breaking or replacing the block clears them. A block
+that needs more bits than are free is refused at startup with a message saying
+so (extended storage for those isn't built yet).
+
+`waterlogged` is the one tag *not* in the word: its value is which block id the
+cell holds (`pebble@water`), because collision, light and meshing are all looked
+up by block id. A waterloggable block keeps the level bits clear of its own
+states, so it can swap with its water variant without moving anything.
+
+Because the meaning of a bit depends on the block, any code that touches the
+word has to check the block first, and any code that changes the block has to
+clear the word (`ChunkMap::set_block` does). [`docs/STATE_ACCESS.md`](docs/STATE_ACCESS.md)
+lists every such place, and a test fails if a new file starts touching the word
+without being added to it.
+
+On disk, an edit now saves the cell's whole state word (`SAVE_FORMAT` 7); an older
+world's edits, which only had an axis, still load. Fluid levels are still saved by
+the fluid scan.
 
 ## Extending the framework
 

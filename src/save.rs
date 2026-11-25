@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 6;
+pub const SAVE_FORMAT: u32 = 7;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +108,10 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
         // a format-4 build would read a saved tool back as quality 0 and
         // write that over the real value.
+        // Step 6 -> 7 (an edit saves the cell's whole state word, not just its
+        // axis) needs no rewrite: an old edit has no `state` and is read from
+        // its `axis`. Bumped because a format-6 build would read only the axis
+        // and write that back, dropping every other state.
         // Step 5 -> 6 (entities such as the training dummy) is defaults only
         // too: a format-5 build would load the world without them and save
         // it back, deleting every one.
@@ -260,8 +264,13 @@ pub struct BlockEdit {
     /// The placed orientation (`blocks::AXIS_X/Y/Z`) for a rotating block;
     /// meaningless (and ignored) for anything else, so an old save missing
     /// this field entirely just defaults to `0` with no ill effect.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub axis: u8,
+    /// The cell's whole state word (`states.rs`): axis, a mod block's own
+    /// states, and so on. Absent in a world saved before format 7, which only
+    /// knew `axis`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<u16>,
 }
 
 /// One fluid cell's exact state, saved so a reload restores water (and any
@@ -724,7 +733,7 @@ mod tests {
                 health: 13.0,
                 air: 4.5,
             }),
-            edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0 }],
+            edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0, state: None }],
             fluids: vec![FluidCell { x: 4, y: 5, z: 6, block: "water".into(), level: 2 }],
             time_of_day: 456.0,
             day_count: 12,

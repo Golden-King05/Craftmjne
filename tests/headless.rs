@@ -378,7 +378,7 @@ fn water_restores_exactly_after_leaving_and_reentering_a_world() {
             map.set_block(pos, id)
         };
         if let Some(prev) = prev {
-            app.world_mut().send_event(BlockSetEvent { pos, id, prev, axis: AXIS_Y });
+            app.world_mut().send_event(BlockSetEvent { pos, id, prev });
         }
     };
 
@@ -436,7 +436,7 @@ fn a_waterlogged_pebble_survives_leaving_and_reentering_a_world() {
     let edit = |app: &mut App, pos: IVec3, id: u16| {
         let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(pos, id);
         if let Some(prev) = prev {
-            app.world_mut().send_event(BlockSetEvent { pos, id, prev, axis: AXIS_Y });
+            app.world_mut().send_event(BlockSetEvent { pos, id, prev });
         }
     };
     let surface = {
@@ -502,7 +502,7 @@ fn edits_in_unvisited_chunks_survive_a_second_reload() {
     let glass = app.world().resource::<BlockRegistry>().id("glass");
     {
         let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(far, glass).expect("chunk loaded");
-        app.world_mut().send_event(BlockSetEvent { pos: far, id: glass, prev, axis: AXIS_Y });
+        app.world_mut().send_event(BlockSetEvent { pos: far, id: glass, prev });
     }
     app.update(); // let record_edits pick up the event
 
@@ -616,7 +616,7 @@ fn sky_light_fills_open_air_and_a_roof_cuts_it_off() {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
         map.set_block(roof, stone);
     }
-    app.world_mut().send_event(BlockSetEvent { pos: roof, id: stone, prev: 0, axis: AXIS_Y });
+    app.world_mut().send_event(BlockSetEvent { pos: roof, id: stone, prev: 0 });
     run_until_lit(&mut app);
 
     let under_roof = app.world().resource::<ChunkMap>().get_light(open).sky;
@@ -638,7 +638,7 @@ fn a_placed_torch_lights_the_cells_around_it_in_its_own_color() {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
         map.set_block(torch_pos, torch);
     }
-    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: torch, prev: 0, axis: AXIS_Y });
+    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: torch, prev: 0 });
     run_until_lit(&mut app);
 
     let map = app.world().resource::<ChunkMap>();
@@ -666,7 +666,7 @@ fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
         map.set_block(torch_pos, torch);
     }
-    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: torch, prev: 0, axis: AXIS_Y });
+    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: torch, prev: 0 });
     run_until_lit(&mut app);
     assert!(app.world().resource::<ChunkMap>().get_light(probe).block[0] > 0);
 
@@ -674,7 +674,7 @@ fn breaking_a_torch_takes_its_light_back_out_of_the_world() {
         let mut map = app.world_mut().resource_mut::<ChunkMap>();
         map.set_block(torch_pos, 0);
     }
-    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: 0, prev: torch, axis: AXIS_Y });
+    app.world_mut().send_event(BlockSetEvent { pos: torch_pos, id: 0, prev: torch });
     run_until_lit(&mut app);
 
     assert_eq!(
@@ -854,7 +854,7 @@ fn digging_a_shaft_lets_sunlight_down_it() {
     for depth in 0..4 {
         let pos = top - IVec3::Y * depth;
         let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(pos, 0).expect("chunk loaded");
-        app.world_mut().send_event(BlockSetEvent { pos, id: 0, prev, axis: AXIS_Y });
+        app.world_mut().send_event(BlockSetEvent { pos, id: 0, prev });
         app.update();
     }
     run_until_lit(&mut app);
@@ -900,7 +900,7 @@ fn a_mined_hole_lights_up_even_while_chunks_are_still_loading() {
     }
     let top = open_air_above_ground(&app) - IVec3::Y;
     let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(top, 0).unwrap();
-    app.world_mut().send_event(BlockSetEvent { pos: top, id: 0, prev, axis: AXIS_Y });
+    app.world_mut().send_event(BlockSetEvent { pos: top, id: 0, prev });
     for _ in 0..3 {
         app.update();
     }
@@ -965,7 +965,7 @@ fn chunks_unloaded_far_away_come_back_exactly_as_they_were() {
     // A player edit (through the edit log)...
     let edited = open_air_above_ground(&app);
     let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(edited, stone).unwrap();
-    app.world_mut().send_event(BlockSetEvent { pos: edited, id: stone, prev, axis: AXIS_Y });
+    app.world_mut().send_event(BlockSetEvent { pos: edited, id: stone, prev });
     // ...and a fluid cell no edit records - a flowing level, as the fluid
     // sim would leave - which only the fluid save can bring back.
     let wet = open_air_run(&app, 2) + IVec3::X * 2;
@@ -1257,8 +1257,8 @@ fn the_dummy_block_shows_its_model_and_it_follows_the_block_through_a_reload() {
         let prev_low = map.set_block(base, lower).unwrap();
         let prev_up = map.set_block(base + IVec3::Y, upper).unwrap();
         let mut events = app.world_mut().resource_mut::<Events<BlockSetEvent>>();
-        events.send(BlockSetEvent { pos: base, id: lower, prev: prev_low, axis: 0 });
-        events.send(BlockSetEvent { pos: base + IVec3::Y, id: upper, prev: prev_up, axis: 0 });
+        events.send(BlockSetEvent { pos: base, id: lower, prev: prev_low });
+        events.send(BlockSetEvent { pos: base + IVec3::Y, id: upper, prev: prev_up });
     }
     assert!(run_until(&mut app, |app| !models(app).is_empty(), 500), "a model appeared");
     app.update();
@@ -1281,7 +1281,7 @@ fn the_dummy_block_shows_its_model_and_it_follows_the_block_through_a_reload() {
     {
         let mut map = app2.world_mut().resource_mut::<ChunkMap>();
         let prev = map.set_block(base, 0).unwrap();
-        app2.world_mut().resource_mut::<Events<BlockSetEvent>>().send(BlockSetEvent { pos: base, id: 0, prev, axis: 0 });
+        app2.world_mut().resource_mut::<Events<BlockSetEvent>>().send(BlockSetEvent { pos: base, id: 0, prev });
     }
     app2.update();
     app2.update();
@@ -1388,7 +1388,7 @@ fn a_state_edit_changes_the_block_and_survives_a_reload() {
     let pos = open_air_run(&app, 2);
     let log = app.world().resource::<craftmjne::blocks::BlockRegistry>().id("log");
     app.world_mut().resource_mut::<ChunkMap>().set_block(pos, log);
-    app.world_mut().send_event(craftmjne::world::BlockSetEvent { pos, id: log, prev: craftmjne::blocks::AIR, axis: craftmjne::blocks::AXIS_Y });
+    app.world_mut().send_event(craftmjne::world::BlockSetEvent { pos, id: log, prev: craftmjne::blocks::AIR });
     app.world_mut().send_event(StateEditRequest { pos, tag: Some("axis".into()), value: Some("x".into()) });
     app.update();
     app.update();
@@ -1402,4 +1402,31 @@ fn a_state_edit_changes_the_block_and_survives_a_reload() {
     assert!(run_until(&mut app2, |a| a.world().resource::<ChunkMap>().is_loaded(pos), 2000));
     assert_eq!(app2.world().resource::<ChunkMap>().get_block(pos), log);
     assert_eq!(app2.world().resource::<ChunkMap>().get_axis(pos), AXIS_X, "the axis was saved");
+}
+
+/// A cell's whole state word is saved with its edit, not just the axis: bits
+/// no built-in tag owns (what a mod block's own states live in) come back
+/// after leaving and re-entering the world, and a later replacement clears them.
+#[test]
+fn a_cells_whole_state_word_survives_a_reload() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 25, 2000));
+    let pos = open_air_run(&app, 2);
+    let stone = app.world().resource::<craftmjne::blocks::BlockRegistry>().id("stone");
+    let word: u16 = 0b11_0101_1010_0110;
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(pos, stone);
+        map.set_state_word_raw(pos, word);
+    }
+    app.world_mut().send_event(BlockSetEvent { pos, id: stone, prev: craftmjne::blocks::AIR });
+    app.update();
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(&mut app2, |a| a.world().resource::<ChunkMap>().is_loaded(pos), 2000));
+    assert_eq!(app2.world().resource::<ChunkMap>().get_block(pos), stone);
+    assert_eq!(app2.world().resource::<ChunkMap>().state_word(pos), word, "every bit came back");
 }

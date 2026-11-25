@@ -2892,7 +2892,7 @@ etc.) instead of inventing a new approach:
   **Storage is unified, with one stated exception.** `Chunk::state` is one
   `u16` per cell (the two bytes `fluid_level: Vec<u8>` + `axis: Vec<u8>` took,
   so no memory change); each tag's row has `storage: Storage::Cell(Field)`
-  (`LEVEL` = bits 0-7, `AXIS` = bits 8-9, 6 spare) or `Storage::BlockId`
+  (`LEVEL` = bits 0-7, `AXIS` = bits 8-9, on the blocks that enable them; see the per-block layout entry below) or `Storage::BlockId`
   (`waterlogged`: the value is which block id the cell holds, because light,
   collision and the mesher are all per-id tables). **A new state tag goes in a
   spare field of the word - never a new per-cell `Vec`** - and the accessors
@@ -2934,3 +2934,34 @@ etc.) instead of inventing a new approach:
   empty list (the base's `waterlogged` was still only implied) - the variant
   adds `waterlogged`/`level` itself. Break-tested: with the full-cube rule
   removed the "can't waterlog a cube" tests go red.
+- **The state word's layout is per block, not global, and every reader/writer
+  of it is a "janitor" tracked in `docs/STATE_ACCESS.md`.** Plain-terms version
+  of why: a block that doesn't use `level`/`axis` can put its own states in
+  those bits, but then any code that writes the level bits for a cell it hasn't
+  checked (the old `set_fluid_level_raw(place_pos, SOURCE)` on *every*
+  placement) wipes the other block's data. So: (1) `DEFAULT_STATE` is `0` -
+  level 0 is source, the axis is *stored* with `AXIS_Y` as 0 (`encode_axis`),
+  and a declared state's first value is its default - which makes "clear the
+  word" the one reset rule; `ChunkMap::set_block` does it, and
+  `set_block_keep_level` keeps only the fluid's level for the cases where the
+  fluid carries on (freezing, mining/placing a waterlogged block).
+  (2) `BlockDef::state_defs`/`state_fields`: `states::allocate_fields` lays a
+  block's own states into the bits its enabled built-in tags leave free
+  (`level`/`waterlogged` reserve the level bits because the variants hold a
+  level; `axis` reserves its two). `finalize_states` runs it, and copies a
+  derived `block@layer` variant's layout from its block *after* the bases are
+  done (the variant is built before the base's fields exist - same ordering
+  trap as the earlier `states` list). (3) Persistence moved to the whole word:
+  `BlockSetEvent` lost its `axis` field; `record_edits` reads the word from the
+  map (so no sender can forget part of it), `EditLog`/`PendingEdits` hold
+  `(BlockId, u16)`, `save::BlockEdit` gained `state: Option<u16>` (`axis` kept
+  only to read old saves), and `SAVE_FORMAT` is 7. (4) A new file that touches
+  the word must be added to `docs/STATE_ACCESS.md`'s `janitor-files` line, or
+  `the_janitor_list_covers_every_file_that_touches_the_word` fails - the test
+  scans code lines only, so a comment mentioning a pattern doesn't count.
+  Break-tested: recording only the axis turns the whole-word reload test red,
+  dropping the clear in `write_block` turns two layout tests red, and removing
+  a file from the janitor line turns the janitor test red. **Still to do**:
+  extended storage (a sparse per-chunk table for blocks needing > 16 bits; it
+  would be a new janitor), and a mod loader that registers blocks before
+  `finalize_states`.

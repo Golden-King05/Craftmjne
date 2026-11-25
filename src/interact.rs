@@ -267,7 +267,7 @@ fn break_partner(
 ) {
     if let Some((partner, _)) = partner_of(map, registry, pos, broken) {
         if let Some(prev) = map.set_block(partner, AIR) {
-            events.write(BlockSetEvent { pos: partner, id: AIR, prev, axis: AXIS_Y });
+            events.write(BlockSetEvent { pos: partner, id: AIR, prev });
         }
     }
 }
@@ -445,8 +445,8 @@ fn interact(
         if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
             if breakable {
                 let after = registry.left_behind(aimed);
-                if let Some(prev) = map.set_block(hit.pos, after) {
-                    block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
+                if let Some(prev) = map.set_block_keep_level(hit.pos, after) {
+                    block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev });
                     break_partner(&mut map, registry, hit.pos, prev, &mut block_events);
                 }
             }
@@ -463,8 +463,8 @@ fn interact(
             // Mining a waterlogged pebble takes the pebble and leaves the
             // water (or the ice) it was sitting in.
             let after = registry.left_behind(aimed);
-            if let Some(prev) = map.set_block(hit.pos, after) {
-                block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
+            if let Some(prev) = map.set_block_keep_level(hit.pos, after) {
+                block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev });
                 break_partner(&mut map, registry, hit.pos, prev, &mut block_events);
                 timers.breaks = timers.breaks.wrapping_add(1);
                 if harvests(def, in_hand) {
@@ -506,35 +506,28 @@ fn interact(
                 && (upper.is_none()
                     || (!player.intersects_block(upper_pos) && !player.solids.iter().any(|b| b.overlaps_cell(upper_pos))));
             if replaceable && !blocked && !unsupported && upper_ok {
-                if let Some(prev) = map.set_block(place_pos, id) {
+                // A waterlogged block takes the cell's fluid level with it;
+                // anything else starts from a cleared state (`set_block`), so
+                // a stale flowing level can't make a placed ice block slope.
+                let placed = if waterlogged.is_some() {
+                    map.set_block_keep_level(place_pos, id)
+                } else {
+                    map.set_block(place_pos, id)
+                };
+                if let Some(prev) = placed {
                     if let Some(upper) = upper {
                         if let Some(upper_prev) = map.set_block(upper_pos, upper) {
-                            block_events.write(BlockSetEvent { pos: upper_pos, id: upper, prev: upper_prev, axis: AXIS_Y });
+                            block_events.write(BlockSetEvent { pos: upper_pos, id: upper, prev: upper_prev });
                         }
-                    }
-                    if registry.def(id).fluid && waterlogged.is_none() {
-                        // A player-placed fluid always starts as a
-                        // permanent source, not whatever level that cell's
-                        // fluid array last held (e.g. a dried flowing cell).
-                        map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
-                    } else if waterlogged.is_none() {
-                        // Anything else starts at the default level too, so a
-                        // stale flowing level left by earlier water can't
-                        // make a placed block of ice slope.
-                        map.set_fluid_level_raw(place_pos, FLUID_SOURCE);
                     }
                     // A rotating block's orientation follows the face it was
                     // placed against, Minecraft-log-style; everything else
                     // stays at the default (AXIS_Y is also the "doesn't
                     // matter" value the mesher ignores for non-rotating ids).
-                    let axis = if registry.def(id).rotation != Rotation::None {
-                        let axis = axis_from_normal(hit.normal);
-                        map.set_axis_raw(place_pos, axis);
-                        axis
-                    } else {
-                        AXIS_Y
-                    };
-                    block_events.write(BlockSetEvent { pos: place_pos, id, prev, axis });
+                    if registry.def(id).rotation != Rotation::None {
+                        map.set_axis_raw(place_pos, axis_from_normal(hit.normal));
+                    }
+                    block_events.write(BlockSetEvent { pos: place_pos, id, prev });
                     // Survival consumes from the stack (clearing the slot
                     // once it's empty); Creative's stacks never deplete -
                     // its "free items" already come from being able to
@@ -584,7 +577,7 @@ fn pop_unsupported(
         let above = pos + IVec3::Y;
         let after = content.blocks.left_behind(map.get_block(above));
         if let Some(prev) = unsupported_floor(&map, &content.blocks, above).and_then(|_| map.set_block(above, after)) {
-            events.p1().write(BlockSetEvent { pos: above, id: after, prev, axis: AXIS_Y });
+            events.p1().write(BlockSetEvent { pos: above, id: after, prev });
             if let Some(stack) = content.items.drop_of(&content.blocks, prev, 0.0) {
                 drops.write(mined_drop(above, stack));
             }
