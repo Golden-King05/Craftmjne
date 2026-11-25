@@ -15,7 +15,7 @@ use bevy::prelude::*;
 
 use crate::atlas::{destroy_stage_name, DESTROY_STAGES};
 use crate::blocks::{
-    BlockId, BlockRegistry, BlockTables, ItemStack, Rotation, Shape, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_SOURCE,
+    BlockId, BlockRegistry, BlockTables, ItemStack, Rotation, Shape, AIR, AXIS_X, AXIS_Y, AXIS_Z,
 };
 use crate::chat::ChatState;
 use crate::config::WORLD_HEIGHT;

@@ -124,13 +124,20 @@ impl RecipeBook {
     /// unknown item or station, no inputs, a zero count. Startup content,
     /// like blocks and items.
     pub fn load_from_dir(blocks: &BlockRegistry, items: &ItemRegistry, dir: &Path) -> Self {
-        let mut paths: Vec<_> = std::fs::read_dir(dir)
-            .unwrap_or_else(|err| panic!("could not read recipes from {dir:?}: {err}"))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        paths.sort();
+        Self::load_from_dirs(blocks, items, &[dir.to_path_buf()])
+    }
+
+    /// Recipes from the game's directory (`dirs[0]`) then each mod's `recipes/`.
+    pub fn load_from_dirs(blocks: &BlockRegistry, items: &ItemRegistry, dirs: &[std::path::PathBuf]) -> Self {
+        // A recipe has no id, so a mod replaces a core recipe by giving its
+        // file the same name; a new name adds one.
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for path in crate::blocks::json_files_in(dirs, "recipes") {
+            match paths.iter().position(|p| p.file_name() == path.file_name()) {
+                Some(i) => paths[i] = path,
+                None => paths.push(path),
+            }
+        }
         let mut book = Self::default();
         for path in paths {
             let text = std::fs::read_to_string(&path)

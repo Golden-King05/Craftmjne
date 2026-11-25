@@ -161,20 +161,15 @@ impl ItemRegistry {
     /// drops an item that doesn't exist - this is startup content, the same
     /// as `BlockRegistry::load_from_dir`.
     pub fn load_from_dir(blocks: &BlockRegistry, dir: &Path) -> Self {
-        let mut paths: Vec<_> = std::fs::read_dir(dir)
-            .unwrap_or_else(|err| panic!("could not read item definitions from {dir:?}: {err}"))
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        paths.sort();
-        let plain = paths
-            .iter()
-            .map(|path| {
-                let text = std::fs::read_to_string(path)
-                    .unwrap_or_else(|err| panic!("failed to read item file {path:?}: {err}"));
-                crate::tags::warn_unknown_tags(path, &text, crate::tags::Scope::Item);
-                let file: ItemFile = serde_json::from_str(&text)
+        Self::load_from_dirs(blocks, &[dir.to_path_buf()])
+    }
+
+    /// Items from the game's directory (`dirs[0]`) then each mod's `items/`.
+    pub fn load_from_dirs(blocks: &BlockRegistry, dirs: &[std::path::PathBuf]) -> Self {
+        let plain = crate::blocks::overlay_by_id(dirs, "item definitions", crate::tags::Scope::Item)
+            .into_iter()
+            .map(|(path, value)| {
+                let file: ItemFile = serde_json::from_value(value)
                     .unwrap_or_else(|err| panic!("failed to parse item file {path:?}: {err}"));
                 let tool = file.tool.map(|t| ToolSpec { kind: t.kind, tier: t.tier });
                 ItemDef {

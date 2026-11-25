@@ -614,7 +614,7 @@ fn handle_menu_buttons(
             }
             MenuButton::RenderDistanceDelta(d) => {
                 settings.render_distance = (settings.render_distance + d).clamp(2, 16);
-                let _ = store.save_graphics_settings(&GraphicsSettings { render_distance: settings.render_distance });
+                let _ = store.save_graphics_settings(&GraphicsSettings { render_distance: settings.render_distance, ..store.load_graphics_settings() });
             }
             MenuButton::Resume => {
                 paused.open = false;

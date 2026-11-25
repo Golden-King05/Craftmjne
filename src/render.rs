@@ -134,8 +134,18 @@ pub fn bucket_to_mesh(bucket: MeshBucket) -> Mesh {
 
 /// Startup (after `world::compile_content`): upload the atlas and icon
 /// atlas, and create the two chunk materials.
+/// The [`LoadedContent::generation`] the GPU atlas and materials were built from.
+#[derive(Resource, Default)]
+struct UploadedContent(u64);
+
+/// Whether the content has been replaced since it was last uploaded.
+fn content_replaced(loaded: Res<crate::mods::LoadedContent>, uploaded: Res<UploadedContent>) -> bool {
+    loaded.generation != uploaded.0
+}
+
 fn setup_render(
     mut commands: Commands,
+    loaded: Res<crate::mods::LoadedContent>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ChunkMaterial>>,
     atlas: Res<Atlas>,
@@ -194,6 +204,7 @@ fn setup_render(
         icon_size: icon_atlas.0.icon_size,
     });
     commands.insert_resource(ChunkMaterials { solid, water });
+    commands.insert_resource(UploadedContent(loaded.generation));
 }
 
 #[cfg(test)]
@@ -221,6 +232,13 @@ impl Plugin for RenderSetupPlugin {
         embedded_asset!(app, "chunk.wgsl");
         app.add_plugins(MaterialPlugin::<ChunkMaterial>::default())
             .insert_resource(ClearColor(SKY_COLOR))
-            .add_systems(Startup, setup_render.after(crate::world::compile_content));
+            .init_resource::<UploadedContent>()
+            .add_systems(Startup, setup_render.after(crate::world::compile_content))
+            // A world with its own mods rebuilt the content; upload it again
+            // (before `enter_world` starts the world's chunks using it).
+            .add_systems(
+                OnEnter(crate::state::AppState::InGame),
+                setup_render.run_if(content_replaced).after(crate::world::WorldContentSet).before(crate::world::EnterWorldSet),
+            );
     }
 }

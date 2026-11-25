@@ -27,8 +27,25 @@ pub struct TextureReport {
 }
 
 impl TextureReport {
+    /// Records statuses, replacing any already recorded under the same name.
     pub fn extend(&mut self, entries: impl IntoIterator<Item = (String, TextureStatus)>) {
-        self.entries.extend(entries);
+        for (name, status) in entries {
+            match self.entries.iter_mut().find(|(n, _)| *n == name) {
+                Some(entry) => entry.1 = status,
+                None => self.entries.push((name, status)),
+            }
+        }
+    }
+
+    /// Every name recorded so far.
+    pub fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Forgets these names - the block textures of content that's being replaced
+    /// (a world with different mods), so they aren't counted next to the new ones.
+    pub fn remove(&mut self, names: &[String]) {
+        self.entries.retain(|(n, _)| !names.contains(n));
     }
 
     pub fn set_missing(&mut self, missing: Vec<String>) {

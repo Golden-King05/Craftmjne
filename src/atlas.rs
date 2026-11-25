@@ -225,11 +225,19 @@ enum CustomTile {
 /// raw RGBA8 plus its native size. See [`CustomTile`] for what each outcome
 /// means - nothing here panics; a malformed file degrades to the
 /// placeholder via `build_atlas_from_dir` instead of crashing the game.
+#[cfg(test)]
 fn load_custom_tile(dir: &Path, name: &str) -> CustomTile {
-    let path = dir.join(format!("{name}.png"));
-    if !path.is_file() {
+    load_custom_tile_in(&[dir.to_path_buf()], name)
+}
+
+/// [`load_custom_tile`] across several directories, highest priority first: the
+/// first one holding `<name>.png` wins. A mod's directory comes before the
+/// game's, so a mod can re-skin a core block by shipping a texture of the same
+/// name (the core file is never touched; take the mod off and it's back).
+fn load_custom_tile_in(dirs: &[PathBuf], name: &str) -> CustomTile {
+    let Some(path) = dirs.iter().map(|d| d.join(format!("{name}.png"))).find(|p| p.is_file()) else {
         return CustomTile::Absent;
-    }
+    };
     let Ok(img) = image::open(&path) else {
         return CustomTile::Malformed;
     };
@@ -263,7 +271,13 @@ fn upscale_nearest(src: &[u8], src_size: usize, dst_size: usize) -> Vec<u8> {
 }
 
 pub fn build_atlas(painters: &Painters) -> AtlasData {
-    build_atlas_from_dir(painters, &find_textures_dir())
+    build_atlas_in(painters, &[find_textures_dir()])
+}
+
+/// [`build_atlas`] looking for custom textures in `dirs`, highest priority
+/// first (see `load_custom_tile_in`).
+pub fn build_atlas_in(painters: &Painters, dirs: &[PathBuf]) -> AtlasData {
+    build_atlas_from_dirs(painters, dirs)
 }
 
 /// The real logic behind `build_atlas`, taking an explicit textures
@@ -273,6 +287,10 @@ pub fn build_atlas(painters: &Painters) -> AtlasData {
 /// the_whole_atlas_resolution` below). `build_atlas` itself, used
 /// everywhere else, is unaffected - it always resolves the real directory.
 fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
+    build_atlas_from_dirs(painters, &[textures_dir.to_path_buf()])
+}
+
+fn build_atlas_from_dirs(painters: &Painters, textures_dirs: &[PathBuf]) -> AtlasData {
     assert!(
         painters.entries.len() <= ATLAS_TILES * ATLAS_TILES,
         "too many textures for a {ATLAS_TILES}x{ATLAS_TILES} atlas"
@@ -282,7 +300,7 @@ fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
     // atlas's resolution (the largest one found, `BASE_TILE_SIZE` if none)
     // and so the second pass below never re-reads a file from disk.
     let custom: Vec<CustomTile> =
-        painters.entries.iter().map(|(name, _)| load_custom_tile(textures_dir, name)).collect();
+        painters.entries.iter().map(|(name, _)| load_custom_tile_in(textures_dirs, name)).collect();
     let tile_size = custom
         .iter()
         .filter_map(|c| match c {

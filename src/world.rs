@@ -16,16 +16,17 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::atlas::{build_atlas, default_painters, AtlasData, Painters};
+use crate::atlas::{default_painters, AtlasData};
+use crate::content::{build_content, try_build_content, Content, ContentPaths};
+use crate::mods::{resolve_world_mods, ContentOk, InstalledMods, LoadedContent, MenuNotice};
 use crate::biome;
 use crate::blocks::{
     BlockId, BlockRegistry, BlockTables, Tables, AIR, FLUID_FALLING, FLUID_SOURCE,
 };
 use crate::config::{block_index, WorldSettings, CHUNK_SIZE, CS, H, WORLD_HEIGHT};
-use crate::icons::{build_icon_atlas, IconAtlasData};
+use crate::icons::IconAtlasData;
 use crate::light::{seed_new_chunk, LightCell, LightQueue};
 use crate::mesher::{mesh_chunk, padded_index, ChunkMeshData, PaddedChunk};
-use crate::crafting::RecipeBook;
 use crate::health::Vitals;
 use crate::item_registry::ItemRegistry;
 use crate::interact::Hotbar;
@@ -917,48 +918,88 @@ fn recompute_cell(map: &mut ChunkMap, tables: &Tables, pos: IVec3, queue: &mut V
 /// constructed per-world by `enter_world`, since each world has its own seed.
 pub fn compile_content(
     mut commands: Commands,
-    mut registry: ResMut<BlockRegistry>,
-    mut painters: ResMut<Painters>,
     mut texture_report: ResMut<TextureReport>,
+    mut loaded: ResMut<LoadedContent>,
 ) {
-    // Any texture name a block's `texture_scheme` derives (or `textures`
-    // names explicitly) that nobody registered a procedural painter for
-    // gets the "missing texture" placeholder instead of `compile()`
-    // panicking - see `Painters::ensure_registered`.
-    let mut items = ItemRegistry::with_defaults(&registry);
-    for name in registry.texture_names().collect::<std::collections::HashSet<_>>() {
-        painters.ensure_registered(&name);
-    }
-    for name in items.texture_names() {
-        painters.ensure_registered(name);
-    }
-    let mut atlas = build_atlas(&painters);
-    items.resolve_tiles(&atlas.indices);
-    commands.insert_resource(RecipeBook::with_defaults(&registry, &items));
-    commands.insert_resource(items);
+    let content = build_content(&ContentPaths::vanilla());
+    let before = texture_report.names();
+    install_content(&mut commands, content, &mut texture_report);
+    loaded.block_textures = texture_report.names().into_iter().filter(|n| !before.contains(n)).collect();
+    loaded.mods = Vec::new();
+    loaded.generation += 1;
+}
 
-    // Contrast-stretch every texture a block actually tints (directly, or
-    // as an overlay decal) so hand-supplied grayscale mask art that didn't
-    // come out bright/near-white still reads at full color once multiplied
-    // by a biome tint - see `atlas::normalize_tint_mask_tile`'s doc comment.
-    for name in registry.tint_mask_names() {
-        crate::atlas::normalize_tint_mask_tile(&mut atlas, &name);
+/// Makes `content` the game's: replaces the registries, recipes, atlas, icons
+/// and tables resources and records its textures in the report. The one place
+/// content is installed, at startup and again when a world brings its own mods.
+pub fn install_content(commands: &mut Commands, content: Content, texture_report: &mut TextureReport) {
+    texture_report.extend(content.texture_status);
+    texture_report.set_missing(content.missing_textures);
+    commands.insert_resource(content.registry);
+    commands.insert_resource(content.items);
+    commands.insert_resource(content.recipes);
+    commands.insert_resource(Atlas(content.atlas));
+    commands.insert_resource(IconAtlas(content.icons));
+    commands.insert_resource(BlockTables(content.tables));
+}
+
+/// The system that gives the entering world its mods' content.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorldContentSet;
+
+/// The system that loads the entering world.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnterWorldSet;
+
+/// `OnEnter(AppState::InGame)`, before `enter_world`: gives the world the content
+/// its mods make. Works out which mod folders the active world uses
+/// (`mods::resolve_world_mods`), and if they differ from what's loaded builds
+/// the core game with those mods laid over it and installs that instead. A world
+/// with no mods, after another with none, costs nothing.
+///
+/// If the mods can't be put together (one is missing, or its files are broken)
+/// the world does *not* open: it goes back to the menu with a message, because
+/// loading it without them would drop their blocks from its next save.
+#[allow(clippy::too_many_arguments)]
+fn apply_world_mods(
+    mut commands: Commands,
+    active: Res<ActiveWorld>,
+    store: Res<SaveStore>,
+    installed: Res<InstalledMods>,
+    mut loaded: ResMut<LoadedContent>,
+    mut report: ResMut<TextureReport>,
+    mut ok: ResMut<ContentOk>,
+    mut notice: ResMut<MenuNotice>,
+    mut next_state: ResMut<NextState<AppState>>,
+    mut hotbar: ResMut<Hotbar>,
+) {
+    let refuse = |why: String, ok: &mut ContentOk, notice: &mut MenuNotice, next: &mut NextState<AppState>| {
+        ok.0 = false;
+        notice.0 = Some(why);
+        next.set(AppState::MainMenu);
+    };
+    let mods = match resolve_world_mods(&store, &active.slug, &active.meta, &installed.0) {
+        Ok(mods) => mods,
+        Err(err) => return refuse(err.message(), &mut ok, &mut notice, &mut next_state),
+    };
+    if mods == loaded.mods {
+        ok.0 = true;
+        return;
     }
-
-    // A real invariant check for `/texture-report`'s red tier, not a fixed
-    // stub: every name the registry actually needs should have ended up in
-    // the atlas via the loop above - this only comes back non-empty if that
-    // guarantee is ever broken by a future change.
-    let missing: Vec<String> =
-        registry.texture_names().filter(|name| !atlas.indices.contains_key(name)).collect();
-    texture_report.extend(atlas.texture_status.clone());
-    texture_report.set_missing(missing);
-
-    let icon_atlas = build_icon_atlas(&registry, &atlas);
-    let tables = registry.compile(&atlas.indices, atlas.tile_size);
-    commands.insert_resource(Atlas(atlas));
-    commands.insert_resource(IconAtlas(icon_atlas));
-    commands.insert_resource(BlockTables(tables));
+    match try_build_content(&ContentPaths::vanilla().with_mods(&mods)) {
+        Ok(content) => {
+            report.remove(&loaded.block_textures);
+            let before = report.names();
+            install_content(&mut commands, content, &mut report);
+            loaded.block_textures = report.names().into_iter().filter(|n| !before.contains(n)).collect();
+            loaded.mods = mods;
+            loaded.generation += 1;
+            // Icons and textures changed; the hotbar draws from them.
+            hotbar.set_changed();
+            ok.0 = true;
+        }
+        Err(why) => refuse(format!("A mod for this world couldn't be loaded: {why}"), &mut ok, &mut notice, &mut next_state),
+    }
 }
 
 /// `OnEnter(AppState::InGame)`: builds the terrain generator for the active
@@ -1847,11 +1888,22 @@ impl Plugin for WorldPlugin {
             .init_resource::<LightQueue>()
             .init_resource::<DayNightClock>()
             .init_resource::<TextureReport>()
+            .init_resource::<InstalledMods>()
+            .init_resource::<LoadedContent>()
+            .init_resource::<ContentOk>()
+            .init_resource::<MenuNotice>()
             .add_event::<SpawnEntity>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)
-            .add_systems(OnEnter(AppState::InGame), enter_world)
+            .add_systems(
+                OnEnter(AppState::InGame),
+                (
+                    apply_world_mods.in_set(WorldContentSet),
+                    enter_world.in_set(EnterWorldSet).run_if(|ok: Res<ContentOk>| ok.0),
+                )
+                    .chain(),
+            )
             .add_systems(OnExit(AppState::InGame), exit_world.in_set(WorldSaveSet))
             .add_systems(
                 Update,

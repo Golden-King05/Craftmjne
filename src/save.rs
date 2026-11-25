@@ -186,8 +186,38 @@ pub struct WorldMeta {
     /// Not surfaced anywhere in the UI on purpose.
     #[serde(default)]
     pub cheats: bool,
+    /// The mods this world uses: for `Instance` storage, the ids to run from the
+    /// game's `mods/` folder; for `World` storage, what was copied in when it
+    /// was created (the world's own folder is what actually decides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<String>,
+    /// Where this world's mods live. See [`ModStorage`].
+    #[serde(default)]
+    pub mod_storage: ModStorage,
+    /// A *branch*: use the mods of this other world (its slug) instead of
+    /// keeping any copies of its own. Only a `World`-storage world can be
+    /// branched from, and a branch can't itself be branched from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_of: Option<String>,
     pub created_at: u64,
     pub last_played_at: u64,
+}
+
+/// Where a world's mods live (`WorldMeta::mod_storage`, and the default for
+/// new worlds in the game's settings).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModStorage {
+    /// The world names the mods it uses and runs the copies installed in the
+    /// game's `mods/` folder. One copy on disk however many worlds use it, but
+    /// removing a mod from that folder breaks every world that needs it.
+    #[default]
+    Instance,
+    /// The mods are copied into the world's own `mods/` folder when it's
+    /// created, and the world runs those. Independent of the game's folder
+    /// (so a mod can be added to just this world), at the cost of one copy per
+    /// world - unless the world is a *branch* of another (`branch_of`).
+    World,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Default)]
@@ -343,11 +373,15 @@ pub struct EntitySave {
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct GraphicsSettings {
     pub render_distance: i32,
+    /// Where newly created worlds keep their mods (`ModStorage`). Missing in an
+    /// older settings file, which reads as `Instance`.
+    #[serde(default)]
+    pub mod_storage: ModStorage,
 }
 
 impl Default for GraphicsSettings {
     fn default() -> Self {
-        Self { render_distance: 8 }
+        Self { render_distance: 8, mod_storage: ModStorage::Instance }
     }
 }
 
@@ -393,6 +427,16 @@ impl SaveStore {
 
     fn settings_path(&self) -> PathBuf {
         self.root.join("settings.json")
+    }
+
+    /// Where world `slug` keeps everything.
+    pub fn world_dir(&self, slug: &str) -> PathBuf {
+        self.saves_dir().join(slug)
+    }
+
+    /// The `mods/` folder inside world `slug` (`World` storage keeps its mods here).
+    pub fn world_mods_dir(&self, slug: &str) -> PathBuf {
+        self.world_dir(slug).join("mods")
     }
 
     fn meta_path(&self, slug: &str) -> PathBuf {
@@ -463,6 +507,9 @@ impl SaveStore {
             format: SAVE_FORMAT,
             mode,
             cheats: false,
+            mods: Vec::new(),
+            mod_storage: ModStorage::default(),
+            branch_of: None,
             created_at: now,
             last_played_at: now,
         };
@@ -831,7 +878,7 @@ mod tests {
     fn graphics_settings_round_trip_and_default_when_missing() {
         let store = temp_store();
         assert_eq!(store.load_graphics_settings().render_distance, 8);
-        store.save_graphics_settings(&GraphicsSettings { render_distance: 12 }).unwrap();
+        store.save_graphics_settings(&GraphicsSettings { render_distance: 12, mod_storage: ModStorage::World }).unwrap();
         assert_eq!(store.load_graphics_settings().render_distance, 12);
     }
 

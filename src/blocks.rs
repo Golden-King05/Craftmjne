@@ -290,6 +290,88 @@ pub(crate) fn parse_block_file_for_test(text: &str) -> Result<(), serde_json::Er
     serde_json::from_str::<BlockFile>(text).map(|_| ())
 }
 
+/// The `*.json` files in `dirs[0]` (which must be readable) followed by those in
+/// each later directory (skipped if absent), each directory sorted by name.
+/// Shared by the block, item and recipe loaders so they treat a mod's folders
+/// the same way.
+pub(crate) fn json_files_in(dirs: &[PathBuf], what: &str) -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) if i == 0 => panic!("could not read {what} from {dir:?}: {err} (expected one *.json file each)"),
+            Err(_) => continue,
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        paths.sort();
+        all.extend(paths);
+    }
+    all
+}
+
+/// Patches `base` with `patch`, the way a mod patches a core file: objects merge
+/// key by key (recursively), anything else is replaced, and a `null` removes the
+/// key so the field falls back to its default. Neither input is a file; the
+/// core files are never written.
+pub(crate) fn merge_json(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    use serde_json::Value;
+    match (base, patch) {
+        (Value::Object(b), Value::Object(p)) => {
+            for (key, value) in p {
+                if value.is_null() {
+                    b.remove(key);
+                } else if let Some(existing) = b.get_mut(key) {
+                    merge_json(existing, value);
+                } else {
+                    b.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (base, patch) => *base = patch.clone(),
+    }
+}
+
+/// Reads every `*.json` in `dirs` (see [`json_files_in`]: the core directory
+/// first, then each mod's, in load order) and combines files that share an `id`
+/// by [`merge_json`], later ones patching earlier ones. Returns one entry per
+/// id, in order of first appearance, with the path of the last file that touched
+/// it. This is how a mod changes a core block or item without editing it: its
+/// file only needs the `id` and the keys it wants changed.
+pub(crate) fn overlay_by_id(
+    dirs: &[PathBuf],
+    what: &str,
+    scope: crate::tags::Scope,
+) -> Vec<(PathBuf, serde_json::Value)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut merged: HashMap<String, (PathBuf, serde_json::Value)> = HashMap::new();
+    for path in json_files_in(dirs, what) {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"));
+        crate::tags::warn_unknown_tags(&path, &text, scope);
+        let value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|err| panic!("failed to parse {path:?}: {err}"));
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("{path:?} needs an \"id\""))
+            .to_string();
+        match merged.get_mut(&id) {
+            Some((last, base)) => {
+                merge_json(base, &value);
+                *last = path;
+            }
+            None => {
+                order.push(id.clone());
+                merged.insert(id, (path, value));
+            }
+        }
+    }
+    order.into_iter().filter_map(|id| merged.remove(&id)).collect()
+}
+
 /// A block file's `hardness` when it doesn't give one.
 pub const DEFAULT_HARDNESS: f32 = 1.0;
 
@@ -1320,6 +1402,15 @@ impl BlockRegistry {
     }
 
     pub fn load_from_dir(dir: &Path) -> Self {
+        Self::load_from_dirs(&[dir.to_path_buf()])
+    }
+
+    /// Loads blocks from the game's own directory (`dirs[0]`, required) and
+    /// then each mod's `blocks/` (the rest, skipped if a mod has none). Ids are
+    /// assigned in that order, so the blocks the core files define never move,
+    /// whatever mods are on. (The derived `block@layer` variants come after all
+    /// of them and can shift; nothing stores an id as a number.)
+    pub fn load_from_dirs(dirs: &[PathBuf]) -> Self {
         let air = BlockDef {
             id: "air".into(),
             name: "Air".into(),
@@ -1337,24 +1428,10 @@ impl BlockRegistry {
             compiled: false,
         };
 
-        let entries = std::fs::read_dir(dir).unwrap_or_else(|err| {
-            panic!(
-                "could not read block definitions from {:?}: {err} (expected one *.json file per block)",
-                dir
-            )
-        });
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        paths.sort(); // deterministic block id assignment across runs/platforms
-
-        for path in paths {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read block file {path:?}: {err}"));
-            crate::tags::warn_unknown_tags(&path, &text, crate::tags::Scope::Block);
-            let file: BlockFile = serde_json::from_str(&text)
+        // Mods overlay the core files: a mod's block with an existing id patches
+        // that block, anything else is added after (so core ids never move).
+        for (path, value) in overlay_by_id(dirs, "block definitions", crate::tags::Scope::Block) {
+            let file: BlockFile = serde_json::from_value(value)
                 .unwrap_or_else(|err| panic!("failed to parse block file {path:?}: {err}"));
             if file.id.contains(char::is_whitespace) {
                 panic!("block file {path:?}: id {:?} must not contain spaces", file.id);
