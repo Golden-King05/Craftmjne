@@ -25,13 +25,13 @@ use bevy::prelude::*;
 use crate::config::WorldSettings;
 use crate::keybinds::{search, Bindings, Capture, CaptureEvent, ControlOptions, FlightMode};
 use crate::mod_controls::ControlNotes;
-use crate::menu::{despawn_all, full_screen_root, spawn_button, title, BUTTON_HOVER, BUTTON_IDLE, BUTTON_PRESS, PANEL_BG, TEXT_DIM};
+use crate::menu::{despawn_all, MenuButton};
+use crate::ui_theme::{self as theme, ButtonOpts, ButtonStyle, TEXT_DIM};
 use crate::save::{GraphicsSettings, ModStorage, SaveStore};
 use crate::state::AppState;
 
-const RED: Color = Color::srgb(1.0, 0.35, 0.35);
-const YELLOW: Color = Color::srgb(1.0, 0.85, 0.3);
-const BORDER_DIM: Color = Color::srgba(1.0, 1.0, 1.0, 0.25);
+const RED: Color = theme::ERROR;
+const YELLOW: Color = theme::WARN;
 /// How much the mouse wheel moves the list per notch, in pixels.
 const SCROLL_STEP: f32 = 28.0;
 /// Longest search text accepted.
@@ -166,58 +166,24 @@ fn save_bindings(store: &SaveStore, bindings: &Bindings) {
 fn setup_settings(mut commands: Commands, mut view: ResMut<SettingsView>, mut capture: ResMut<Capture>) {
     *view = SettingsView::default();
     capture.target = None;
-    commands.spawn((SettingsRoot, full_screen_root())).with_children(|root| {
-        root.spawn((
-            Node {
-                width: Val::Px(680.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                padding: UiRect::axes(Val::Px(28.0), Val::Px(22.0)),
-                row_gap: Val::Px(10.0),
-                ..default()
-            },
-            BackgroundColor(PANEL_BG),
-        ))
-        .with_children(|p| {
-            p.spawn(title("Settings"));
+    commands.spawn((SettingsRoot, theme::screen_root())).with_children(|root| {
+        theme::spawn_backdrop(root, 53);
+        root.spawn(theme::panel(780.0)).with_children(|p| {
+            theme::heading(p, "Settings");
             p.spawn((SettingsContent, Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: Val::Px(10.0), width: Val::Percent(100.0), ..default() }));
-            spawn_button(p, "Back", crate::menu::MenuButton::BackToMainMenu);
+            theme::button(p, MenuButton::BackToMainMenu, "Back", ButtonOpts::new(ButtonStyle::Normal).size(220.0, 44.0));
         });
     });
 }
 
 fn dim(parent: &mut ChildSpawnerCommands, text: impl Into<String>, size: f32) {
-    parent.spawn((Text::new(text), TextFont { font_size: size, ..default() }, TextColor(TEXT_DIM), Node { max_width: Val::Px(620.0), ..default() }));
+    theme::hint(parent, text, size);
 }
 
-fn spawn_settings_button(
-    parent: &mut ChildSpawnerCommands,
-    label: &str,
-    action: SettingsButton,
-    width: f32,
-    height: f32,
-    font: f32,
-    color: Color,
-    border: Color,
-) {
-    parent
-        .spawn((
-            Button,
-            action,
-            Node {
-                width: Val::Px(width),
-                height: Val::Px(height),
-                border: UiRect::all(Val::Px(2.0)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            BorderColor(border),
-            BackgroundColor(BUTTON_IDLE),
-        ))
-        .with_children(|b| {
-            b.spawn((Text::new(label), TextFont { font_size: font, ..default() }, TextColor(color)));
-        });
+/// A settings button: `style`, size, optional selected look and accent border.
+#[allow(clippy::too_many_arguments)]
+fn sbutton(parent: &mut ChildSpawnerCommands, label: &str, action: SettingsButton, style: ButtonStyle, width: f32, height: f32, font: f32, selected: bool, text: Color, accent: Option<Color>) {
+    theme::button(parent, action, label, ButtonOpts::new(style).size(width, height).font(font).selected(selected).text(text).accent(accent));
 }
 
 fn rebuild_settings(
@@ -239,46 +205,63 @@ fn rebuild_settings(
     commands.entity(root).despawn_related::<Children>();
     commands.entity(root).with_children(|p| {
         // Section tabs.
-        p.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
+        p.spawn(Node { column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
             for section in Section::ALL {
-                let selected = section == view.section;
                 let clash = section == Section::Controls && !bindings.conflicting().is_empty();
-                let text = if clash { RED } else { Color::WHITE };
-                let border = if selected { Color::WHITE } else { BORDER_DIM };
-                let width = if section == Section::Controls { 210.0 } else { 100.0 };
-                spawn_settings_button(row, &tab_label(section, &bindings), SettingsButton::Section(section), width, 34.0, 15.0, text, border);
+                let width = if section == Section::Controls { 210.0 } else { 112.0 };
+                sbutton(
+                    row,
+                    &tab_label(section, &bindings),
+                    SettingsButton::Section(section),
+                    ButtonStyle::Choice,
+                    width,
+                    38.0,
+                    16.0,
+                    section == view.section,
+                    if clash { RED } else { theme::TEXT },
+                    clash.then_some(RED),
+                );
             }
         });
         // The selected section, in a box of fixed height so switching doesn't resize the panel.
-        p.spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(440.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(8.0),
-            padding: UiRect::top(Val::Px(8.0)),
-            ..default()
-        })
+        p.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(430.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(10.0),
+                padding: UiRect::all(Val::Px(18.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(theme::CARD_BG),
+            BorderColor(theme::PANEL_BORDER),
+        ))
         .with_children(|body| match view.section {
             Section::Player => {
-                dim(body, "Player settings - field of view, mouse sensitivity and the like - will live here.", 14.0);
+                body.spawn((Text::new("Player"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                dim(body, "Player settings - field of view, mouse sensitivity and the like - will live here.", 15.0);
             }
             Section::Rendering => {
-                body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(14.0), ..default() }).with_children(|row| {
-                    spawn_settings_button(row, "-", SettingsButton::RenderDistanceDelta(-1), 36.0, 36.0, 20.0, Color::WHITE, Color::NONE);
-                    row.spawn((Text::new(format!("Render distance: {}", world_settings.render_distance)), TextFont { font_size: 16.0, ..default() }, TextColor(Color::WHITE)));
-                    spawn_settings_button(row, "+", SettingsButton::RenderDistanceDelta(1), 36.0, 36.0, 20.0, Color::WHITE, Color::NONE);
+                body.spawn((Text::new("Video"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(16.0), margin: UiRect::top(Val::Px(8.0)), ..default() }).with_children(|row| {
+                    sbutton(row, "-", SettingsButton::RenderDistanceDelta(-1), ButtonStyle::Normal, 46.0, 46.0, 24.0, false, theme::TEXT, None);
+                    row.spawn((Text::new(format!("Render distance: {}", world_settings.render_distance)), TextFont { font_size: 19.0, ..default() }, TextColor(theme::TEXT)));
+                    sbutton(row, "+", SettingsButton::RenderDistanceDelta(1), ButtonStyle::Normal, 46.0, 46.0, 24.0, false, theme::TEXT, None);
                 });
-                dim(body, "Takes effect after restart.", 12.0);
+                dim(body, "How many chunks around you are drawn. Takes effect after restart.", 13.0);
                 dim(body, "More video options (fullscreen, vsync, brightness) will appear here.", 14.0);
             }
             Section::Sound => {
-                dim(body, "There is no sound in the game yet. Volume controls will live here.", 14.0);
+                body.spawn((Text::new("Sound"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                dim(body, "There is no sound in the game yet. Volume controls will live here.", 15.0);
             }
             Section::Mods => {
+                body.spawn((Text::new("Mods"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 let storage = store.load_graphics_settings().mod_storage;
-                spawn_settings_button(body, &mod_storage_label(storage), SettingsButton::ToggleDefaultModStorage, 380.0, 40.0, 15.0, Color::WHITE, Color::NONE);
-                dim(body, "Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't.", 12.0);
+                sbutton(body, &mod_storage_label(storage), SettingsButton::ToggleDefaultModStorage, ButtonStyle::Normal, 440.0, 44.0, 16.0, false, theme::TEXT, None);
+                dim(body, "Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't.", 13.0);
             }
             Section::Controls => spawn_controls(body, &view, &bindings, &capture, &notes, &options),
         });
@@ -288,22 +271,20 @@ fn rebuild_settings(
 fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes, options: &ControlOptions) {
     body.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
         for (tab, label) in [(ControlsTab::Keybinds, "Keybinds"), (ControlsTab::Options, "Options")] {
-            let border = if tab == view.controls_tab { Color::WHITE } else { BORDER_DIM };
-            let color = if tab == ControlsTab::Keybinds && !bindings.conflicting().is_empty() { RED } else { Color::WHITE };
-            spawn_settings_button(row, label, SettingsButton::ControlsTab(tab), 110.0, 30.0, 14.0, color, border);
+            let clash = tab == ControlsTab::Keybinds && !bindings.conflicting().is_empty();
+            sbutton(row, label, SettingsButton::ControlsTab(tab), ButtonStyle::Choice, 130.0, 32.0, 15.0, tab == view.controls_tab, if clash { RED } else { theme::TEXT }, clash.then_some(RED));
         }
     });
     match view.controls_tab {
         ControlsTab::Keybinds => spawn_keybinds(body, view, bindings, capture, notes),
         ControlsTab::Options => {
-            body.spawn((Text::new("Flight (Creative mode)"), TextFont { font_size: 16.0, ..default() }, TextColor(YELLOW), Node { margin: UiRect::top(Val::Px(8.0)), ..default() }));
-            body.spawn(Node { column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
+            body.spawn((Text::new("Flight (Creative mode)"), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }));
+            body.spawn(Node { column_gap: Val::Px(10.0), ..default() }).with_children(|row| {
                 for mode in FlightMode::ALL {
-                    let border = if mode == options.flight_mode { Color::WHITE } else { BORDER_DIM };
-                    spawn_settings_button(row, mode.label(), SettingsButton::SetFlightMode(mode), 190.0, 36.0, 15.0, Color::WHITE, border);
+                    sbutton(row, mode.label(), SettingsButton::SetFlightMode(mode), ButtonStyle::Choice, 210.0, 42.0, 16.0, mode == options.flight_mode, theme::TEXT, None);
                 }
             });
-            dim(body, options.flight_mode.description(), 13.0);
+            dim(body, options.flight_mode.description(), 14.0);
         }
     }
 }
@@ -311,17 +292,18 @@ fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
 fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes) {
     // Search box + clear + reset all.
     body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), width: Val::Percent(100.0), ..default() }).with_children(|row| {
+        let (bg, border) = theme::button_colors(ButtonStyle::Field, Interaction::None, !capture.active(), None);
         row.spawn((
             Node {
                 flex_grow: 1.0,
-                height: Val::Px(34.0),
+                height: Val::Px(36.0),
                 border: UiRect::all(Val::Px(2.0)),
                 align_items: AlignItems::Center,
-                padding: UiRect::horizontal(Val::Px(10.0)),
+                padding: UiRect::horizontal(Val::Px(12.0)),
                 ..default()
             },
-            BorderColor(if capture.active() { BORDER_DIM } else { Color::WHITE }),
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+            BorderColor(border),
+            BackgroundColor(bg),
         ))
         .with_children(|b| {
             let (text, color) = if view.search.is_empty() && capture.active() {
@@ -329,29 +311,29 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
             } else if view.search.is_empty() {
                 ("Search...  (try key:a)_".to_string(), TEXT_DIM)
             } else if capture.active() {
-                (view.search.clone(), Color::WHITE)
+                (view.search.clone(), theme::TEXT)
             } else {
-                (format!("{}_", view.search), Color::WHITE)
+                (format!("{}_", view.search), theme::TEXT)
             };
-            b.spawn((Text::new(text), TextFont { font_size: 15.0, ..default() }, TextColor(color)));
+            b.spawn((Text::new(text), TextFont { font_size: 16.0, ..default() }, TextColor(color)));
         });
         if !view.search.is_empty() {
-            spawn_settings_button(row, "Clear", SettingsButton::ClearSearch, 70.0, 34.0, 14.0, Color::WHITE, BORDER_DIM);
+            sbutton(row, "Clear", SettingsButton::ClearSearch, ButtonStyle::Normal, 72.0, 36.0, 14.0, false, theme::TEXT, None);
         }
-        spawn_settings_button(row, "Reset all", SettingsButton::ResetAll, 90.0, 34.0, 14.0, Color::WHITE, BORDER_DIM);
+        sbutton(row, "Reset all", SettingsButton::ResetAll, ButtonStyle::Normal, 96.0, 36.0, 14.0, false, theme::TEXT, None);
     });
     dim(body, "key:a = what uses A  -  key:ctrl+left = combos  -  is:conflict, is:unbound, is:changed", 12.0);
 
     if let Some(summary) = conflict_summary(bindings) {
-        body.spawn((Text::new(summary), TextFont { font_size: 13.0, ..default() }, TextColor(RED)));
+        body.spawn((Text::new(summary), TextFont { font_size: 14.0, ..default() }, TextColor(RED)));
     }
     if let Some(id) = &capture.target {
         let label = bindings.def(id).map(|d| d.label.as_str()).unwrap_or(id.as_str());
         body.spawn((
             Text::new(format!("Binding \"{label}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels.")),
-            TextFont { font_size: 13.0, ..default() },
+            TextFont { font_size: 14.0, ..default() },
             TextColor(YELLOW),
-            Node { max_width: Val::Px(620.0), ..default() },
+            Node { max_width: Val::Px(700.0), ..default() },
         ));
     }
 
@@ -365,7 +347,7 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
             flex_grow: 1.0,
             min_height: Val::Px(0.0),
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(4.0),
+            row_gap: Val::Px(2.0),
             overflow: Overflow::scroll_y(),
             padding: UiRect::right(Val::Px(8.0)),
             ..default()
@@ -373,29 +355,33 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
     ))
     .with_children(|list| {
         if rows.is_empty() {
-            dim(list, "No controls match.", 14.0);
+            dim(list, "No controls match.", 15.0);
         }
         for (category, ids) in rows {
-            list.spawn((Text::new(category), TextFont { font_size: 16.0, ..default() }, TextColor(YELLOW), Node { margin: UiRect::top(Val::Px(6.0)), ..default() }));
-            for id in ids {
+            list.spawn((Text::new(category), TextFont { font_size: 17.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(4.0)), ..default() }));
+            for (n, id) in ids.into_iter().enumerate() {
                 let Some(def) = bindings.def(&id) else { continue };
                 let clash = conflicting.contains(&id);
                 let listening = capture.target.as_deref() == Some(id.as_str());
-                list.spawn(Node { flex_direction: FlexDirection::Column, ..default() }).with_children(|entry| {
-                    entry.spawn(Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
-                        row.spawn((Text::new(def.label.clone()), TextFont { font_size: 15.0, ..default() }, TextColor(if clash { RED } else { Color::WHITE })));
+                list.spawn((
+                    Node { flex_direction: FlexDirection::Column, padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)), ..default() },
+                    BackgroundColor(if n % 2 == 0 { theme::CARD_BG_ALT } else { Color::NONE }),
+                ))
+                .with_children(|entry| {
+                    entry.spawn(Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
+                        row.spawn((Text::new(def.label.clone()), TextFont { font_size: 16.0, ..default() }, TextColor(if clash { RED } else { theme::TEXT })));
                         row.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).with_children(|buttons| {
                             let (text, color) = match (listening, bindings.get(&id)) {
                                 (true, _) => ("Press a key...".to_string(), YELLOW),
-                                (false, Some(chord)) => (chord.display(), if clash { RED } else { Color::WHITE }),
+                                (false, Some(chord)) => (chord.display(), if clash { RED } else { theme::TEXT }),
                                 (false, None) => ("Unbound".to_string(), TEXT_DIM),
                             };
-                            let border = if listening { YELLOW } else if clash { RED } else { BORDER_DIM };
-                            spawn_settings_button(buttons, &text, SettingsButton::Rebind(id.clone()), 190.0, 30.0, 14.0, color, border);
-                            let changed = if bindings.is_default(&id) { TEXT_DIM } else { Color::WHITE };
-                            spawn_settings_button(buttons, "Reset", SettingsButton::Reset(id.clone()), 58.0, 30.0, 13.0, changed, BORDER_DIM);
-                            let bound = if bindings.get(&id).is_some() { Color::WHITE } else { TEXT_DIM };
-                            spawn_settings_button(buttons, "Unbind", SettingsButton::Unbind(id.clone()), 66.0, 30.0, 13.0, bound, BORDER_DIM);
+                            let accent = if listening { Some(YELLOW) } else if clash { Some(RED) } else { None };
+                            sbutton(buttons, &text, SettingsButton::Rebind(id.clone()), ButtonStyle::Key, 200.0, 32.0, 15.0, false, color, accent);
+                            let changed = if bindings.is_default(&id) { TEXT_DIM } else { theme::TEXT };
+                            sbutton(buttons, "Reset", SettingsButton::Reset(id.clone()), ButtonStyle::Normal, 62.0, 32.0, 13.0, false, changed, None);
+                            let bound = if bindings.get(&id).is_some() { theme::TEXT } else { TEXT_DIM };
+                            sbutton(buttons, "Unbind", SettingsButton::Unbind(id.clone()), ButtonStyle::Normal, 72.0, 32.0, 13.0, false, bound, None);
                         });
                     });
                     if let Some(note) = also_used_by(bindings, &id) {
@@ -409,23 +395,13 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
         }
     });
     for note in &notes.0 {
-        body.spawn((Text::new(format!("Mod control skipped: {note}")), TextFont { font_size: 12.0, ..default() }, TextColor(Color::srgb(0.95, 0.6, 0.4)), Node { max_width: Val::Px(620.0), ..default() }));
+        body.spawn((Text::new(format!("Mod control skipped: {note}")), TextFont { font_size: 12.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(700.0), ..default() }));
     }
 }
 
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
-
-fn settings_button_visuals(mut buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<SettingsButton>)>) {
-    for (interaction, mut bg) in &mut buttons {
-        *bg = BackgroundColor(match interaction {
-            Interaction::Pressed => BUTTON_PRESS,
-            Interaction::Hovered => BUTTON_HOVER,
-            Interaction::None => BUTTON_IDLE,
-        });
-    }
-}
 
 /// Typing goes into the search box while the Keybinds section is open. Typed
 /// text is read from the keyboard events (not key codes), same as every other
@@ -562,6 +538,9 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<theme::ThemePlugin>() {
+            app.add_plugins(theme::ThemePlugin);
+        }
         app.init_resource::<SettingsView>()
             .init_resource::<Capture>()
             .add_systems(OnEnter(AppState::Settings), setup_settings)
@@ -569,7 +548,6 @@ impl Plugin for SettingsPlugin {
             .add_systems(
                 Update,
                 (
-                    settings_button_visuals,
                     search_input,
                     handle_settings_buttons,
                     capture_binding,

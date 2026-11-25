@@ -3230,3 +3230,26 @@ etc.) instead of inventing a new approach:
   (`flight_app`), not just the pure function - the wiring is the thing that could be wrong. Next options that
   belong here rather than in Keybinds: sprint/sneak hold-vs-toggle, mouse sensitivity.
 
+
+- **Menus share one theme (`ui_theme.rs`); a screen picks a `ButtonStyle` and never paints
+  its own colours.** `ThemedButton { style, selected, accent }` is repainted by one system
+  from the pure `button_colors`, so a screen shows a tab/toggle as chosen by flipping
+  `selected` (not by recolouring), and `accent` (conflict red, listening yellow) replaces
+  the border. Things learned from actually looking at screenshots:
+  - **UI alpha blends in linear space**, so a faint white-alpha card reads much lighter than
+    the sRGB number suggests (the first cards came out grey). Panels, cards and borders are
+    opaque colours; only the full-screen dim (`OVERLAY`) uses alpha, and it was checked to
+    darken the world by comparing a `game` shot against a `pause` shot.
+  - **A bundle can't hold the same component twice** (Bevy panics): to tint
+    `overlay_root()` differently (the death screen) `.insert(BackgroundColor(..))` after
+    spawning instead of adding one to the tuple.
+  - **`Added<T>` as well as `Changed`**: a text field spawned already focused/filled showed
+    blank until typed in, because the sync system only ran on resource change. It now also
+    runs for `Added<TextInputDisplay>`.
+  - **Menus are inspectable from a session with no display**: `CRAFT_SHOT=<screen>` +
+    `CRAFT_SHOT_OUT` (see `main.rs`'s `ui_shot`), run under `xvfb-run` with lavapipe
+    (`apt-get install mesa-vulkan-drivers libxkbcommon-x11-0`), then read the PNG. Do this
+    after any UI change; layout bugs (tabs wider than their card) only showed up this way.
+  - The backdrop (`spawn_backdrop(root, seed)`) is banded sky + stars + three parallax-less
+    hill layers from seeded noise, quantised to 8px so it stays blocky; each screen passes
+    its own seed so they differ.

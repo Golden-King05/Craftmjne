@@ -47,4 +47,5 @@ pub mod text_color;
 pub mod tools;
 pub mod texture_report;
 pub mod ui;
+pub mod ui_theme;
 pub mod world;

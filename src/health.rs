@@ -29,6 +29,7 @@ use crate::inventory::{HeldStack, Inventory, InventoryState};
 use crate::items::{SpawnDrop, THROWN_PICKUP_DELAY};
 use crate::player::{Player, PlayerSet};
 use crate::save::GameMode;
+use crate::ui_theme as theme;
 use crate::state::{AppState, DeathState, PauseState};
 use crate::world::ChunkMap;
 
@@ -338,39 +339,12 @@ fn sync_death_screen(mut commands: Commands, death: Res<DeathState>, screens: Qu
     if !death.open {
         return;
     }
-    commands
-        .spawn((
-            DeathScreen,
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: Val::Px(24.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.45, 0.0, 0.0, 0.45)),
-        ))
-        .with_children(|screen| {
-            screen.spawn((Text::new("You died!"), TextFont { font_size: 48.0, ..default() }, TextColor(Color::WHITE)));
-            screen.spawn((
-                Text::new("Everything you were carrying was dropped where you fell."),
-                TextFont { font_size: 16.0, ..default() },
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
-            ));
-            screen
-                .spawn((
-                    Button,
-                    RespawnButton,
-                    Node { padding: UiRect::axes(Val::Px(28.0), Val::Px(10.0)), ..default() },
-                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                ))
-                .with_children(|b| {
-                    b.spawn((Text::new("Respawn"), TextFont { font_size: 20.0, ..default() }, TextColor(Color::WHITE)));
-                });
-        });
+    commands.spawn((DeathScreen, theme::overlay_root())).insert(BackgroundColor(Color::srgba(0.30, 0.0, 0.0, 0.72))).with_children(|screen| {
+        screen.spawn((Text::new("You died!"), TextFont { font_size: 56.0, ..default() }, TextColor(theme::ERROR)));
+        screen.spawn((Node { width: Val::Px(70.0), height: Val::Px(4.0), ..default() }, BackgroundColor(theme::ERROR)));
+        theme::hint(screen, "Everything you were carrying was dropped where you fell.", 17.0);
+        theme::button(screen, RespawnButton, "Respawn", theme::ButtonOpts::new(theme::ButtonStyle::Primary).size(260.0, 50.0));
+    });
 }
 
 /// "Respawn": a fresh player at the world's spawn (found the same way as on
@@ -378,15 +352,10 @@ fn sync_death_screen(mut commands: Commands, death: Res<DeathState>, screens: Qu
 fn respawn(
     mut death: ResMut<DeathState>,
     mut players: Query<&mut Player>,
-    mut buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<RespawnButton>)>,
+    buttons: Query<&Interaction, (Changed<Interaction>, With<RespawnButton>)>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    for (interaction, mut bg) in &mut buttons {
-        bg.0 = match interaction {
-            Interaction::Pressed => Color::srgba(1.0, 1.0, 1.0, 0.35),
-            Interaction::Hovered => Color::srgba(1.0, 1.0, 1.0, 0.25),
-            Interaction::None => Color::srgba(1.0, 1.0, 1.0, 0.15),
-        };
+    for interaction in &buttons {
         if *interaction != Interaction::Pressed {
             continue;
         }

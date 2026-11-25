@@ -84,10 +84,14 @@ fn main() {
     attach_console();
     let args = parse_args();
     let smoke = std::env::var_os("CRAFT_SMOKE").is_some();
+    // UI preview mode: `CRAFT_SHOT=<screen> CRAFT_SHOT_OUT=<file.png> craftmjne` opens one
+    // screen over a throwaway save folder, saves a screenshot and exits. See `ui_shot`.
+    let shot = std::env::var("CRAFT_SHOT").ok();
+    let smoke_like = smoke || shot.is_some();
 
     // CI / smoke mode: redirect saves to a throwaway directory so automated
     // runs never touch (or depend on) a real user profile.
-    let store = if smoke {
+    let store = if smoke_like {
         let dir = std::env::temp_dir().join(format!("craftmjne-smoke-{}", std::process::id()));
         SaveStore::at(dir)
     } else {
@@ -140,6 +144,16 @@ fn main() {
     // CI / smoke mode: skip the menu, drop straight into a throwaway world,
     // let it stream in, save a screenshot, and exit. Run with:
     // CRAFT_SMOKE=1 cargo run -- --seed 7
+    if let Some(name) = shot {
+        for (i, world) in ["Survival Island", "Creative Sandbox", "Modded Test"].iter().enumerate() {
+            let store = app.world().resource::<SaveStore>().clone();
+            let _ = store.create_world(world, 100 + i as u32, if i == 1 { GameMode::Creative } else { GameMode::Survival });
+        }
+        if name == "pause" || name == "game" {
+            app.add_systems(Update, enter_smoke_world.run_if(in_state(AppState::MainMenu)));
+        }
+        app.insert_resource(ShotScreen(name)).add_systems(Update, ui_shot);
+    }
     if smoke {
         app.add_systems(Update, enter_smoke_world.run_if(in_state(AppState::MainMenu)))
             .add_systems(Update, smoke_test);
@@ -182,5 +196,72 @@ fn smoke_test(
     } else if *phase == 1 && t > 24.0 {
         info!("smoke: done");
         exit.write(AppExit::Success);
+    }
+}
+
+/// Which screen `CRAFT_SHOT` asked for.
+#[derive(Resource)]
+struct ShotScreen(String);
+
+/// Opens the requested screen, waits for it to draw, saves a screenshot and exits.
+/// Screens: `main`, `worlds`, `create`, `mods`, `settings-<player|rendering|sound|
+/// controls|options|mods>`, `pause`, and `game` (the world with nothing over it). There is no other way to look at the UI from a
+/// machine with no screen, so this is how menu changes get checked by eye.
+fn ui_shot(
+    mut commands: Commands,
+    time: Res<Time>,
+    shot: Res<ShotScreen>,
+    mut phase: Local<u32>,
+    mut next: ResMut<NextState<AppState>>,
+    mut worlds_mode: ResMut<craftmjne::menu::WorldsScreenMode>,
+    mut view: ResMut<craftmjne::settings::SettingsView>,
+    mut paused: ResMut<craftmjne::state::PauseState>,
+    mut exit: EventWriter<AppExit>,
+) {
+    use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+    use craftmjne::settings::{ControlsTab, Section};
+    let t = time.elapsed_secs();
+    let name = shot.0.as_str();
+    let in_game = name == "pause" || name == "game";
+    let out = std::env::var("CRAFT_SHOT_OUT").unwrap_or_else(|_| "shot.png".to_string());
+    match *phase {
+        0 if t > 1.0 => {
+            match name {
+                "worlds" | "create" => next.set(AppState::Worlds),
+                "mods" => next.set(AppState::Mods),
+                n if n.starts_with("settings") => next.set(AppState::Settings),
+                _ => {}
+            }
+            *phase = 1;
+        }
+        1 if t > 3.0 => {
+            match name {
+                "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
+                "settings-rendering" => view.section = Section::Rendering,
+                "settings-sound" => view.section = Section::Sound,
+                "settings-mods" => view.section = Section::Mods,
+                "settings-controls" => view.section = Section::Controls,
+                "settings-options" => {
+                    view.section = Section::Controls;
+                    view.controls_tab = ControlsTab::Options;
+                }
+                _ => {}
+            }
+            *phase = 2;
+        }
+        2 if t > if in_game { 14.0 } else { 5.0 } => {
+            if name == "pause" {
+                paused.open = true;
+            }
+            *phase = 3;
+        }
+        3 if t > if in_game { 16.0 } else { 7.0 } => {
+            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(out));
+            *phase = 4;
+        }
+        4 if t > if in_game { 19.0 } else { 10.0 } => {
+            exit.write(AppExit::Success);
+        }
+        _ => {}
     }
 }

@@ -103,6 +103,20 @@ of which Rendering (render distance, applied on next launch), Keybinds and
 Mods (where new worlds keep their mods) do something today and Player and
 Sound are placeholders. **Mods** lists the installed mods.
 
+### How the menus look, and previewing them
+
+Every screen (main menu, worlds, create, mods, settings, pause, death) shares one
+theme in `src/ui_theme.rs`: a painted sky-and-hills backdrop, a block-shadow
+title, dark cards and panels, and buttons in four styles (Primary green, Normal,
+Choice for tabs/toggles, Danger red, plus Key and Field for the controls menu).
+A screen picks a style; hover, press and "selected" colours come from one place.
+
+To see a screen without playing, run with `CRAFT_SHOT=<screen>` and
+`CRAFT_SHOT_OUT=<file.png>`: it opens that screen, saves a screenshot and exits.
+Screens: `main`, `worlds`, `create`, `mods`, `settings-<section>`, `pause`, `game`.
+On a machine with no GPU/display use `xvfb-run` with Mesa's software Vulkan
+(`mesa-vulkan-drivers`, plus `libxkbcommon-x11-0`).
+
 ### Flight mode
 
 **Settings → Controls → Options** chooses how flying starts and stops in Creative:
