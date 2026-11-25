@@ -35,7 +35,6 @@ use crate::world::{Atlas, BlockSetEvent, ChunkMap};
 
 const REACH: f32 = 6.0;
 /// Seconds between hits while the button is held.
-const ATTACK_COOLDOWN: f32 = 0.45;
 const ACTION_REPEAT: f32 = 0.22; // seconds between repeats while a button is held
 /// After a block breaks, the next one starts after this pause, so holding
 /// the button on instant blocks (torches) doesn't clear a whole row in a
@@ -435,7 +434,7 @@ fn interact(
     let breakable = mineable(registry.def(aimed), shift) && !throwing;
     // A plain click on something hittable hits it, with whatever is in hand.
     if !throwing && registry.def(aimed).hittable && !shift && mouse.pressed(MouseButton::Left) && timers.attack_t <= 0.0 {
-        timers.attack_t = ATTACK_COOLDOWN;
+        timers.attack_t = content.items.attack_cooldown(&hotbar.slots[hotbar.selected]);
         damage.write(DamageEvent {
             cell: hit.pos,
             amount: content.items.attack_damage(&hotbar.slots[hotbar.selected]),

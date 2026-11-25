@@ -19,7 +19,7 @@
 //! in `CommandRegistry::execute`, not per-handler, so a mod's command gets
 //! it for free without having to know the flag exists.
 
-use bevy::prelude::{Resource, Vec3};
+use bevy::prelude::{IVec3, Resource, Vec3};
 
 use crate::biome::Biome;
 use crate::config::SEA_LEVEL;
@@ -254,6 +254,48 @@ pub struct CommandContext<'a> {
 pub struct WorldRequests {
     pub spawns: Vec<SpawnEntity>,
     pub clear_entities: bool,
+    /// Reads/changes of a block's state tags (`states.rs`).
+    pub state_edits: Vec<crate::states::StateEditRequest>,
+}
+
+/// One coordinate of `/blockstate`: a whole number, or `~` / `~N` relative
+/// to where the player stands.
+pub fn parse_coord(token: &str, player: f32) -> Option<i32> {
+    match token.strip_prefix('~') {
+        Some("") => Some(player.floor() as i32),
+        Some(offset) => offset.parse::<i32>().ok().map(|o| player.floor() as i32 + o),
+        None => token.parse().ok(),
+    }
+}
+
+fn blockstate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
+    let usage = || CommandOutcome::Usage("Usage: /blockstate <x> <y> <z> [tag] [value]  (~ is your position)".to_string());
+    if args.len() < 3 || args.len() > 5 {
+        return usage();
+    }
+    let p = ctx.player_pos;
+    let (Some(x), Some(y), Some(z)) = (parse_coord(args[0], p.x), parse_coord(args[1], p.y), parse_coord(args[2], p.z)) else {
+        return usage();
+    };
+    ctx.requests.state_edits.push(crate::states::StateEditRequest {
+        pos: IVec3::new(x, y, z),
+        tag: args.get(3).map(|t| t.to_lowercase()),
+        value: args.get(4).map(|v| v.to_string()),
+    });
+    CommandOutcome::Ok(String::new())
+}
+
+fn blockstate_arg_candidates(prior: &[&str]) -> Vec<ArgCandidate> {
+    match prior {
+        [_, _, _] => crate::states::STATE_TAGS.iter().map(|t| ArgCandidate::new(t.name, t.description)).collect(),
+        [_, _, _, tag] => match *tag {
+            "axis" => ["x", "y", "z"].into_iter().map(|v| ArgCandidate::new(v, "An axis")).collect(),
+            "waterlogged" => ["none", "water", "ice"].into_iter().map(|v| ArgCandidate::new(v, "What shares the cell")).collect(),
+            "level" => ["source", "falling"].into_iter().map(|v| ArgCandidate::new(v, "A fluid level")).collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
 }
 
 /// Where `/summon` puts something: two and a half blocks ahead of a player
@@ -443,6 +485,16 @@ impl CommandRegistry {
                 CommandOutcome::Ok("Removed all entities.".to_string())
             },
         ));
+        reg.register(
+            CommandSpec::new(
+                "blockstate",
+                "/blockstate <x> <y> <z> [tag] [value]",
+                "Show or change a placed block's state tags (axis, waterlogged, level).",
+                blockstate_handler,
+            )
+            .alias("bs")
+            .with_arg_candidates(blockstate_arg_candidates),
+        );
         reg.register(
             CommandSpec::new(
                 "locate",
@@ -759,7 +811,7 @@ mod tests {
         let names: Vec<String> = registry.suggestions("").into_iter().map(|s| s.text).collect();
         assert_eq!(
             names,
-            vec!["clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
+            vec!["blockstate", "bs", "clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
         );
     }
 

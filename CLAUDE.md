@@ -2869,3 +2869,38 @@ etc.) instead of inventing a new approach:
   a `const` is only right for something no content should ever vary.
   Still global and *not* tags: `DAMAGE_PER_JOULE`, `ATTACK_COOLDOWN`,
   `HAND_DAMAGE`, gravity - say so if those should become tags too.
+- **Two kinds of tags, and one table for each.** *Definition tags* are the
+  fixed facts about a block/item type (the JSON keys: `hardness`, `shape`,
+  `light`, ...); *state tags* are values on one placed cell that change at
+  runtime (`axis`, `waterlogged`, `level`). Don't mix them: a thing that is a
+  fact of the type goes in the JSON, a thing a player/command/simulation can
+  change per cell is a state tag. `tags::DEFINITION_TAGS` lists every
+  definition tag (name, scope Block/Item/Both, group, description);
+  `warn_unknown_tags` (called from both loaders) warns on any other key with
+  a nearest-match suggestion - a warning, not a panic, because an unknown key
+  is also what an older build sees in newer content. `states::STATE_TAGS` is
+  the matching list of state tags, each a row of three fn pointers (`values`
+  for a block - empty means "doesn't apply", `get`, `set`), with
+  `read_states`/`set_state` as the single generic algorithm and
+  `StateEditRequest` + `apply_state_requests` as the in-game entry point
+  (`/blockstate`, which queues a request through `WorldRequests::state_edits`
+  and gets feedback via the chat log). A `set` returns the `BlockSetEvent`s to
+  announce, because that is what remeshes, saves (`EditLog` keeps `(id, axis)`)
+  and wakes the fluid sim - a state change that skipped the event would look
+  right and then silently not survive a reload (the headless test reloads, and
+  goes red with the event removed).
+  **Honest limit:** only the *interface* is unified. `axis`/`level` are still
+  the parallel `Chunk::axis`/`fluid_level` arrays and `waterlogged` is still a
+  variant block id; each keeps its own persistence. Do not describe the
+  storage as unified. A new per-cell array is *not* the way to add a state
+  tag - add a row in `STATE_TAGS` first and decide storage by the earlier
+  "sparse-and-event-driven vs dense-and-continuous" rule.
+  **Testing a table against the code it describes:** can't enumerate a serde
+  struct's fields, so `every_listed_block_tag_is_a_field_the_block_loader_reads`
+  probes each listed name with mistyped values (an unread key is silently
+  ignored; a real field rejects at least one), and the shipped-files test covers
+  the other direction (a field a shipped file uses but the table lacks). A
+  field no shipped file uses and the table omits slips through; add the row when
+  adding the field. Also now a tag: `attack_cooldown` (was the global
+  `ATTACK_COOLDOWN`), per item/block, default 0.45; no existing item sets it
+  yet (daggers fast / greatswords slow is the obvious use).

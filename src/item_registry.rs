@@ -94,6 +94,8 @@ pub struct ItemDef {
     /// Left click throws it.
     pub throwable: bool,
     pub throw: crate::blocks::ThrowSpec,
+    /// Seconds between melee hits while held.
+    pub attack_cooldown: f32,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +114,7 @@ struct ItemFile {
     mass: Option<f32>,
     #[serde(default)]
     throwable: bool,
+    attack_cooldown: Option<f32>,
     #[serde(flatten)]
     throw: crate::blocks::ThrowFile,
 }
@@ -170,6 +173,7 @@ impl ItemRegistry {
             .map(|path| {
                 let text = std::fs::read_to_string(path)
                     .unwrap_or_else(|err| panic!("failed to read item file {path:?}: {err}"));
+                crate::tags::warn_unknown_tags(path, &text, crate::tags::Scope::Item);
                 let file: ItemFile = serde_json::from_str(&text)
                     .unwrap_or_else(|err| panic!("failed to parse item file {path:?}: {err}"));
                 let tool = file.tool.map(|t| ToolSpec { kind: t.kind, tier: t.tier });
@@ -182,6 +186,7 @@ impl ItemRegistry {
                     mass: file.mass.filter(|m| *m > 0.0).unwrap_or(crate::blocks::DEFAULT_MASS),
                     throwable: file.throwable,
                     throw: file.throw.spec(),
+                    attack_cooldown: file.attack_cooldown.filter(|c| *c > 0.0).unwrap_or(crate::blocks::DEFAULT_ATTACK_COOLDOWN),
                     id: file.id,
                 }
             })
@@ -190,7 +195,7 @@ impl ItemRegistry {
     }
 
     pub fn build(blocks: &BlockRegistry, plain: Vec<ItemDef>) -> Self {
-        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false, throw: Default::default() };
+        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false, throw: Default::default(), attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN };
         let mut reg = Self {
             defs: vec![empty],
             by_name: HashMap::new(),
@@ -211,6 +216,7 @@ impl ItemRegistry {
                 mass: def.mass,
                 throwable: def.throwable,
                 throw: def.throw,
+                attack_cooldown: def.attack_cooldown,
             });
             reg.of_block[block] = id;
         }
@@ -298,6 +304,15 @@ impl ItemRegistry {
 
     pub fn throw_spec(&self, id: ItemId) -> crate::blocks::ThrowSpec {
         self.def(id).throw
+    }
+
+    /// Seconds between melee hits with `stack` in hand (a bare hand is the default).
+    pub fn attack_cooldown(&self, stack: &ItemStack) -> f32 {
+        if stack.is_empty() {
+            crate::blocks::DEFAULT_ATTACK_COOLDOWN
+        } else {
+            self.def(stack.id).attack_cooldown
+        }
     }
 
     pub fn mass(&self, id: ItemId) -> f32 {
@@ -463,6 +478,7 @@ mod tests {
             mass: 1.0,
             throwable: false,
             throw: Default::default(),
+            attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN,
         };
         ItemRegistry::build(&blocks, vec![def]);
     }
@@ -530,6 +546,7 @@ mod tests {
             mass: 1.0,
             throwable: false,
             throw: Default::default(),
+            attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN,
         };
         ItemRegistry::build(&blocks, vec![def]).with_tiers(TierBook::with_defaults());
     }

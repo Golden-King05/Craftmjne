@@ -197,6 +197,8 @@ pub use crate::item_registry::ItemStack;
 pub const DEFAULT_MAX_STACK: u32 = 124;
 /// Mass (kg) of anything that doesn't say.
 pub const DEFAULT_MASS: f32 = 1.0;
+/// Seconds between melee hits with anything that doesn't say (`attack_cooldown`).
+pub const DEFAULT_ATTACK_COOLDOWN: f32 = 0.45;
 
 /// Everything about how a thing behaves when thrown, apart from its mass.
 /// The same four tags work in a block file and an item file, and every
@@ -247,6 +249,13 @@ impl ThrowFile {
             damage_scale: pos(self.throw_damage, d.damage_scale),
         }
     }
+}
+
+/// Parses block-file JSON the way the loader does, for tests that probe
+/// which keys it reads (`tags.rs`).
+#[cfg(test)]
+pub(crate) fn parse_block_file_for_test(text: &str) -> Result<(), serde_json::Error> {
+    serde_json::from_str::<BlockFile>(text).map(|_| ())
 }
 
 /// A block file's `hardness` when it doesn't give one.
@@ -796,6 +805,8 @@ pub struct BlockDef {
     /// A plain left click hits it instead of mining it: it takes damage from
     /// what's in hand and shows the number (the training dummy).
     pub hittable: bool,
+    /// Seconds between melee hits while this is held (`attack_cooldown`).
+    pub attack_cooldown: f32,
     /// A thrown object at least this fast (m/s) shatters it (glass); `None`
     /// means it never breaks that way.
     pub shatters_at: Option<f32>,
@@ -879,6 +890,7 @@ impl Default for BlockDef {
             tool_response: 1.0,
             requires_crouch: false,
             hittable: false,
+            attack_cooldown: DEFAULT_ATTACK_COOLDOWN,
             shatters_at: None,
             shatter_keep: 1.0,
             mass: DEFAULT_MASS,
@@ -962,6 +974,7 @@ struct BlockFile {
     requires_crouch: bool,
     #[serde(default)]
     hittable: bool,
+    attack_cooldown: Option<f32>,
     shatters_at: Option<f32>,
     shatter_keep: Option<f32>,
     mass: Option<f32>,
@@ -1033,6 +1046,7 @@ impl BlockFile {
             tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
             requires_crouch: self.requires_crouch,
             hittable: self.hittable,
+            attack_cooldown: self.attack_cooldown.filter(|c| *c > 0.0).unwrap_or(DEFAULT_ATTACK_COOLDOWN),
             shatters_at: self.shatters_at,
             shatter_keep: self.shatter_keep.unwrap_or(1.0).clamp(0.0, 1.0),
             mass: self.mass.filter(|m| *m > 0.0).unwrap_or(DEFAULT_MASS),
@@ -1243,6 +1257,7 @@ impl BlockRegistry {
         for path in paths {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("failed to read block file {path:?}: {err}"));
+            crate::tags::warn_unknown_tags(&path, &text, crate::tags::Scope::Block);
             let file: BlockFile = serde_json::from_str(&text)
                 .unwrap_or_else(|err| panic!("failed to parse block file {path:?}: {err}"));
             if file.id.contains(char::is_whitespace) {

@@ -102,7 +102,7 @@ fn reload_app(temp: &TempSaves) -> App {
 /// (chat, the inventory screen, input).
 fn add_gameplay(app: &mut App) {
     app.init_asset::<bevy::pbr::StandardMaterial>();
-    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin, craftmjne::entities::EntitiesPlugin, craftmjne::block_models::BlockModelsPlugin));
+    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin, craftmjne::entities::EntitiesPlugin, craftmjne::block_models::BlockModelsPlugin, craftmjne::states::StatesPlugin));
     app.init_resource::<craftmjne::crafting::NearbyStations>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.init_resource::<craftmjne::chat::ChatState>();
@@ -1373,4 +1373,33 @@ fn a_thrown_pebble_shatters_up_to_two_panes_and_a_second_one_the_third() {
 
     throw(&mut app);
     assert!(run_until(&mut app, |app| pane_states(app)[2] == false, 500), "a second pebble breaks the last pane");
+}
+
+/// `/blockstate` end to end: a request changes a placed log's axis through
+/// the real schedule, and the change survives leaving and re-entering the
+/// world (it rides the edit log like any placement).
+#[test]
+fn a_state_edit_changes_the_block_and_survives_a_reload() {
+    use craftmjne::blocks::AXIS_X;
+    use craftmjne::states::StateEditRequest;
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 25, 2000));
+    let pos = open_air_run(&app, 2);
+    let log = app.world().resource::<craftmjne::blocks::BlockRegistry>().id("log");
+    app.world_mut().resource_mut::<ChunkMap>().set_block(pos, log);
+    app.world_mut().send_event(craftmjne::world::BlockSetEvent { pos, id: log, prev: craftmjne::blocks::AIR, axis: craftmjne::blocks::AXIS_Y });
+    app.world_mut().send_event(StateEditRequest { pos, tag: Some("axis".into()), value: Some("x".into()) });
+    app.update();
+    app.update();
+    assert_eq!(app.world().resource::<ChunkMap>().get_axis(pos), AXIS_X);
+    assert_eq!(app.world().resource::<ChunkMap>().get_block(pos), log);
+
+    // Leave (saving) and come back: the new axis is still there.
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(&mut app2, |a| a.world().resource::<ChunkMap>().is_loaded(pos), 2000));
+    assert_eq!(app2.world().resource::<ChunkMap>().get_block(pos), log);
+    assert_eq!(app2.world().resource::<ChunkMap>().get_axis(pos), AXIS_X, "the axis was saved");
 }

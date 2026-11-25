@@ -332,6 +332,41 @@ impl ChunkMap {
         }
     }
 
+    /// A cell's stored rotation axis (`blocks::AXIS_*`); `AXIS_Y` where
+    /// nothing is stored or the chunk isn't loaded.
+    pub fn get_axis(&self, pos: IVec3) -> u8 {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return crate::blocks::AXIS_Y;
+        }
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        self.chunks
+            .get(&Self::chunk_coord(pos.x, pos.z))
+            .and_then(|c| c.axis.as_ref())
+            .map_or(crate::blocks::AXIS_Y, |a| a[idx])
+    }
+
+    /// Marks a cell as changed without changing its block id: remeshes the
+    /// chunk (and a neighbour if it's on a border) and counts it as touched,
+    /// for a change to per-cell state (`states.rs`) that `set_block` didn't
+    /// make. No-op if the chunk isn't loaded.
+    pub fn refresh_cell(&mut self, pos: IVec3) {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
+        let Some(chunk) = self.chunks.get_mut(&coord) else { return };
+        chunk.touched = true;
+        chunk.version += 1;
+        chunk.dirty = true;
+        self.touch_borders(coord, lx, lz);
+        self.needs_scan = true;
+    }
+
     /// Directly overwrites a cell's stored rotation axis without touching
     /// its block id - mirrors `set_fluid_level_raw` exactly. No-op if the
     /// chunk isn't loaded.
@@ -353,7 +388,7 @@ impl ChunkMap {
     /// Reads a cell's stored fluid level. Only meaningful when `get_block`
     /// for the same position is a fluid id; returns `FLUID_SOURCE` for
     /// unloaded chunks (harmless, since callers gate on the block id first).
-    fn get_fluid_level(&self, pos: IVec3) -> u8 {
+    pub fn get_fluid_level(&self, pos: IVec3) -> u8 {
         if pos.y < 0 || pos.y >= WORLD_HEIGHT {
             return FLUID_SOURCE;
         }

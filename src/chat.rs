@@ -252,6 +252,7 @@ fn chat_text_input(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut spawn_events: EventWriter<SpawnEntity>,
     mut clear_events: EventWriter<ClearEntities>,
+    mut state_requests: EventWriter<crate::states::StateEditRequest>,
 ) {
     if !chat.open {
         events.clear();
@@ -295,7 +296,13 @@ fn chat_text_input(
                             requests: &mut requests,
                         };
                         let outcome = registry.execute(rest, &mut ctx);
-                        log.push(outcome.message());
+                        let message = outcome.message();
+                        if !message.is_empty() {
+                            log.push(message);
+                        }
+                        for request in requests.state_edits.drain(..) {
+                            state_requests.write(request);
+                        }
                         for spawn in requests.spawns.drain(..) {
                             spawn_events.write(spawn);
                         }
@@ -603,7 +610,7 @@ mod tests {
         let names: Vec<String> = command_suggestions("/", &registry).into_iter().map(|s| s.text).collect();
         assert_eq!(
             names,
-            vec!["clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
+            vec!["blockstate", "bs", "clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
         );
     }
 

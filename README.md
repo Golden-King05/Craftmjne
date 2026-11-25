@@ -674,6 +674,13 @@ mainly as a place to type `/`-prefixed commands.
   `structure` is reserved for when this game actually generates
   structures to find, and currently just says so.
 
+- `/blockstate <x> <y> <z> [tag] [value]` (alias `/bs`) — shows a placed
+  block's [state tags](#the-two-kinds-of-tags), or sets one: `/blockstate ~ ~ ~
+  axis x` turns the log you stand in on its side, `waterlogged ice` freezes the
+  water a pebble sits in, `level 3` sets a fluid cell's flow level. `~` means
+  your own position (`~2` is two blocks over). Tab completes tag names and
+  values.
+
 Running *any* recognized command — even one that fails with a usage error —
 permanently sets a `cheats: true` flag on the world's `meta.json`
 (`save::WorldMeta::cheats`). This mirrors Minecraft's own "cheats" world flag:
@@ -1140,6 +1147,41 @@ resumes the same time of day/phase rather than resetting to dawn and a new
 moon), the same way fluid state does — see "Fluid flow" above for the
 general "don't silently lose continuous state on reload" principle this
 follows.
+
+## The two kinds of tags
+
+Everything that defines or adjusts a block is one of two kinds of tag, and
+they do different jobs.
+
+| | **Definition tags** | **State tags** |
+|---|---|---|
+| What | A fixed fact about a block or item *type* | A value on one *placed* block |
+| Example | torches glow, glass shatters at 5 m/s, stone's hardness | which way this log lies, whether this pebble is in water, how far this water has flowed |
+| Where | `blocks/*.json`, `items/*.json` | per cell, in the world |
+| Changes | never in play; read once at startup | at runtime: a player action, a command, the simulation |
+| Code | `src/tags.rs` (`DEFINITION_TAGS`) | `src/states.rs` (`STATE_TAGS`) |
+
+**Definition tags** are listed in one table, grouped as identity, appearance,
+world, mining, combat, throwing and breaking, each with the files that take it
+and what it does. The loaders warn about any key that isn't in the table and
+suggest the nearest real one (`hardnes` -> did you mean `hardness`), so a typo no
+longer silently leaves a block that doesn't glow. Unknown keys still load: they
+are almost always typos, but they're also what an older build sees in content
+written for a newer one.
+
+**State tags** are `axis` (which way a rotating block lies), `waterlogged`
+(`none`, `water` or `ice` sharing the cell) and `level` (a fluid's flow level:
+`source`, `1`..., `falling`). Each is one row in `STATE_TAGS`: its values for a
+given block, how to read it, how to write it. `states::read_states` and
+`states::set_state` are the one interface; the `/blockstate` command and any
+future interaction use them, and a tag only exists on blocks it applies to
+(`level` isn't a thing on stone). To add one, add a row.
+
+What isn't unified yet is *storage*: `axis` and `level` are still parallel
+per-chunk arrays and `waterlogged` is still a variant block id (`pebble@water`),
+each saved by its own path (edit log, fluid scan, the block id). The interface
+hides that, so moving them into one per-cell store later changes only
+`states.rs`.
 
 ## Extending the framework
 
