@@ -266,7 +266,7 @@ fn edit_candidates(
     found.sort_by(|a, b| a.folder.cmp(&b.folder));
     let mut out: Vec<(String, String, bool)> = found
         .iter()
-        .map(|m| (m.folder.clone(), format!("{} {}", m.name, m.version).trim().to_string(), meta.mods.contains(&m.folder)))
+        .map(|m| (m.folder.clone(), with_warning_mark(format!("{} {}", m.name, m.version).trim().to_string(), m), meta.mods.contains(&m.folder)))
         .collect();
     for folder in &meta.mods {
         if !found.iter().any(|m| &m.folder == folder) {
@@ -274,6 +274,11 @@ fn edit_candidates(
         }
     }
     out
+}
+
+/// Adds " (!)" to a mod's label when it isn't made for this game version.
+fn with_warning_mark(label: String, m: &crate::mods::ModInfo) -> String {
+    if m.warning(crate::mods::GAME_VERSION).is_some() { format!("{label} (!)") } else { label }
 }
 
 /// What a world's mod setup looks like in the list, e.g. "2 mods in this world".
@@ -527,7 +532,7 @@ fn rebuild_worlds_content(
                         .with_children(|list| {
                             for m in &mods {
                                 let on = form.chosen_mods.contains(&m.folder);
-                                let label = format!("[{}] {} {}", if on { "x" } else { " " }, m.name, m.version);
+                                let label = with_warning_mark(format!("[{}] {} {}", if on { "x" } else { " " }, m.name, m.version).trim_end().to_string(), m);
                                 spawn_choice_button(list, label.trim_end(), MenuButton::ToggleMod(m.folder.clone()), on, 280.0);
                             }
                         });
@@ -782,6 +787,14 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
                         ));
                         if !m.description.is_empty() {
                             dim_text(row, m.description.clone(), 12.0);
+                        }
+                        if let Some(w) = m.warning(crate::mods::GAME_VERSION) {
+                            row.spawn((
+                                Text::new(format!("Warning: {w}")),
+                                TextFont { font_size: 12.0, ..default() },
+                                TextColor(Color::srgb(0.95, 0.75, 0.3)),
+                                Node { width: Val::Px(380.0), ..default() },
+                            ));
                         }
                     });
                 }
@@ -1080,11 +1093,11 @@ mod tests {
         assert_eq!(
             list,
             vec![
-                ("a".to_string(), "a".to_string(), true),
-                ("b".to_string(), "b".to_string(), false),
+                ("a".to_string(), "a (!)".to_string(), true),
+                ("b".to_string(), "b (!)".to_string(), false),
                 ("ghost".to_string(), "ghost (missing)".to_string(), true),
             ],
-            "a missing mod is listed, ticked, so it can be unticked to fix the world"
+            "a missing mod is listed, ticked, so it can be unticked to fix the world; (!) marks a mod with no target_ver"
         );
         let _ = std::fs::remove_dir_all(root);
     }

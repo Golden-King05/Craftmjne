@@ -1249,7 +1249,7 @@ something a block or item file already says (see
 
 ```text
 mods/any_folder_name/
-  mod.json            { "id": "granite_pack", "name": "Granite Pack", "version": "1.0" }
+  mod.json            { "id": "granite_pack", "name": "Granite Pack", "version": "1.0", "target_ver": ["1.3"] }
   blocks/*.json       same format as the game's own blocks/
   items/*.json
   recipes/*.json
@@ -1266,6 +1266,15 @@ lists it as "won't work" and says why). The id is the prefix of everything the m
 adds: a mod `granite_pack` with a block `granite` adds `granite_pack:granite`. So two
 mods can both add a `granite` and both exist, where before they would have clashed.
 Ids are letters, digits, `_` and `-`; `craftmjne` is the game's own.
+
+**`target_ver` says which game versions the mod was made for** - one string or a
+list (`"1.3"`, `["1.2", "1.3.x"]`). An entry covers every version that starts with
+it (`1.3` covers `1.3.0` and `1.3.7`), and `x` or `*` matches any number in that
+place. Load a mod against a version it doesn't name (or one that names none) and the
+game **warns, never refuses**: an orange line on the Mods screen, `(!)` beside it in
+the create/change-mods lists, and a "Mod warning" line in chat on entering the world.
+It's how a mod's author tells players which mod goes with which game version as the
+game keeps updating.
 
 **If two mods in a world declare the same id, nothing breaks**: the game renames
 them for that world (`granite_pack_1`, `granite_pack_2`, in folder order), keeps

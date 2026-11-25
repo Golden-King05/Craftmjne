@@ -3112,3 +3112,15 @@ etc.) instead of inventing a new approach:
   `turning_a_mod_off_and_on_loses_nothing_it_made` goes red with `merge_into` removed.
   Not covered: entities (mods can't add any) and chunk snapshots (they only ever hold
   generated terrain, which never contains a mod's blocks).
+- **`target_ver` is a warning, not a gate, and it's checked against `mods::GAME_VERSION`
+  (`env!("CARGO_PKG_VERSION")`).** `mod.json` takes a string or a list (an
+  untagged serde enum). `version_matches` treats an entry as dotted numbers: a
+  shorter entry covers every longer version with that prefix, `x`/`*` match any
+  component. `ModInfo::warning(game)` is the one place the wording lives (no
+  `target_ver`, or none matching); `ResolvedMods::warnings` carries them, `apply_world_mods`
+  pushes them to `ChatLog` (as an `Option<ResMut<..>>`, since headless apps may lack the
+  chat plugin) and the menu shows them via the same method. Don't make it refuse: an
+  author may simply not have bumped the line yet. Tests that go red without it:
+  the "any one of several will do" and world-warning tests (break-tested by forcing the
+  match). A test mod without `target_ver` now shows `(!)` in `edit_candidates`.
+

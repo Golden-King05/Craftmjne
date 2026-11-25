@@ -982,6 +982,7 @@ fn apply_world_mods(
     mut notice: ResMut<MenuNotice>,
     mut next_state: ResMut<NextState<AppState>>,
     mut hotbar: ResMut<Hotbar>,
+    chat: Option<ResMut<crate::chat::ChatLog>>,
 ) {
     let refuse = |why: String, ok: &mut ContentOk, notice: &mut MenuNotice, next: &mut NextState<AppState>| {
         ok.0 = false;
@@ -997,6 +998,12 @@ fn apply_world_mods(
     if active.meta.branch_of.is_none() && resolved.ids != active.meta.mod_ids {
         active.meta.mod_ids = resolved.ids.clone();
         let _ = store.save_meta(&active.slug, &active.meta);
+    }
+    // A mod made for another game version still loads; the player is just told.
+    if let Some(mut chat) = chat {
+        for warning in &resolved.warnings {
+            chat.push(format!("Mod warning: {warning}"));
+        }
     }
     let mods = resolved.sources;
     // No mods now and none before: the content is already right. Anything else

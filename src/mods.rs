@@ -71,13 +71,40 @@ use crate::save::{ModStorage, SaveStore, WorldMeta};
 /// The file that makes a directory a mod.
 pub const MANIFEST: &str = "mod.json";
 
-/// What `mod.json` says. Only `id` is required.
+/// The version of the game this build is (`Cargo.toml`'s `version`).
+pub const GAME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// `target_ver` in `mod.json`: one version, or a list of them.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum TargetVer {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// What `mod.json` says. Only `id` is required to work; `target_ver` is what a
+/// mod should always say (see [`ModInfo::warning`]).
 #[derive(Deserialize, Default)]
 struct Manifest {
     id: Option<String>,
     name: Option<String>,
     version: Option<String>,
     description: Option<String>,
+    target_ver: Option<TargetVer>,
+}
+
+/// Whether one `target_ver` entry covers `game`. An entry is dotted numbers; a
+/// shorter one covers every version that starts with it (`"1.3"` covers `1.3.0`
+/// and `1.3.7`), and `x` or `*` in any place matches any number there
+/// (`"1.x.2"`). So a mod can name one exact version, a whole minor series, or a
+/// whole major one.
+pub fn version_matches(entry: &str, game: &str) -> bool {
+    let entry: Vec<&str> = entry.trim().trim_start_matches('v').split('.').collect();
+    let game: Vec<&str> = game.trim().trim_start_matches('v').split('.').collect();
+    if entry.is_empty() || entry.iter().any(|p| p.is_empty()) || entry.len() > game.len() {
+        return false;
+    }
+    entry.iter().zip(&game).all(|(e, g)| matches!(*e, "x" | "X" | "*") || e == g)
 }
 
 /// An installed mod.
@@ -90,7 +117,33 @@ pub struct ModInfo {
     pub name: String,
     pub version: String,
     pub description: String,
+    /// The game versions it says it works with (`target_ver`); empty if it
+    /// doesn't say.
+    pub target_ver: Vec<String>,
     pub path: PathBuf,
+}
+
+impl ModInfo {
+    /// A warning to show when this mod is used with game version `game`, or `None`
+    /// if it says it works with it. Only ever a warning: the mod still loads, since
+    /// the author may simply not have updated the line yet. It exists so a player
+    /// isn't left guessing which mod goes with which version of the game.
+    pub fn warning(&self, game: &str) -> Option<String> {
+        if self.target_ver.is_empty() {
+            return Some(format!(
+                "{} doesn't say which game version it's made for (no \"target_ver\"); this is {game}.",
+                self.name
+            ));
+        }
+        if self.target_ver.iter().any(|t| version_matches(t, game)) {
+            return None;
+        }
+        Some(format!(
+            "{} is made for game version {}, but this is {game}; it may not work.",
+            self.name,
+            self.target_ver.join(" or ")
+        ))
+    }
 }
 
 /// A mod as a world runs it: where it is, and the namespace it was given there.
@@ -144,6 +197,11 @@ pub fn read_mod(path: &Path) -> Result<ModInfo, String> {
         name: manifest.name.unwrap_or_else(|| id.clone()),
         version: manifest.version.unwrap_or_default(),
         description: manifest.description.unwrap_or_default(),
+        target_ver: match manifest.target_ver {
+            Some(TargetVer::One(v)) => vec![v],
+            Some(TargetVer::Many(v)) => v,
+            None => Vec::new(),
+        },
         id,
         folder,
         path: path.to_path_buf(),
@@ -278,12 +336,16 @@ impl ModError {
 pub struct ResolvedMods {
     pub sources: Vec<ModSource>,
     pub ids: std::collections::BTreeMap<String, String>,
+    /// One line for each mod that isn't made for this game version
+    /// ([`ModInfo::warning`]).
+    pub warnings: Vec<String>,
 }
 
 fn resolved(infos: Vec<ModInfo>, existing: &std::collections::BTreeMap<String, String>) -> ResolvedMods {
     let ids = assign_namespaces(&infos, existing);
     let sources = infos.iter().map(|m| ModSource { ns: ids[&m.folder].clone(), path: m.path.clone() }).collect();
-    ResolvedMods { sources, ids }
+    let warnings = infos.iter().filter_map(|m| m.warning(GAME_VERSION)).collect();
+    ResolvedMods { sources, ids, warnings }
 }
 
 /// The mods world `slug` runs, in load order (by folder name), each with its
@@ -580,6 +642,7 @@ mod tests {
             name: id.into(),
             version: String::new(),
             description: String::new(),
+            target_ver: Vec::new(),
             path: PathBuf::from(folder),
         }
     }
@@ -811,5 +874,73 @@ mod tests {
         let (branch, _) = env.create("Branch", &ModSetup::Branch(host));
         let err = set_world_mods(&env.store, &branch, &env.installed, &[]).unwrap_err();
         assert!(err.to_string().contains("host"));
+    }
+
+    #[test]
+    fn a_target_version_covers_exact_prefix_and_wildcard_matches_only() {
+        for (entry, game, expect) in [
+            ("1.3.0", "1.3.0", true),
+            ("1.3.0", "1.3.1", false),
+            ("1.3", "1.3.0", true),
+            ("1.3", "1.3.7", true),
+            ("1.3", "1.4.0", false),
+            ("1", "1.9.2", true),
+            ("1", "2.0.0", false),
+            ("1.x", "1.9.2", true),
+            ("1.*.0", "1.4.0", true),
+            ("1.x.0", "1.4.1", false),
+            ("v1.3", "1.3.0", true),
+            ("1.3.0.1", "1.3.0", false),
+            ("", "1.3.0", false),
+            ("1..0", "1.3.0", false),
+            ("abc", "1.3.0", false),
+        ] {
+            assert_eq!(version_matches(entry, game), expect, "{entry:?} vs {game:?}");
+        }
+    }
+
+    fn with_target(target: &[&str]) -> ModInfo {
+        ModInfo { target_ver: target.iter().map(|s| s.to_string()).collect(), ..info("f", "id") }
+    }
+
+    #[test]
+    fn a_mod_made_for_another_version_gets_a_warning_and_one_made_for_this_one_does_not() {
+        assert_eq!(with_target(&["1.3"]).warning("1.3.0"), None);
+        assert_eq!(with_target(&["1.2", "1.3.x"]).warning("1.3.4"), None, "any one of several will do");
+        let w = with_target(&["1.2", "1.1"]).warning("1.3.0").expect("a warning");
+        assert!(w.contains("1.2 or 1.1") && w.contains("1.3.0") && w.contains("may not work"), "{w}");
+        let none = with_target(&[]).warning("1.3.0").expect("a warning");
+        assert!(none.contains("target_ver"), "{none}");
+    }
+
+    #[test]
+    fn target_ver_can_be_one_version_or_a_list_and_a_mod_without_it_still_loads() {
+        let env = Env::new();
+        let write = |folder: &str, body: &str| {
+            let dir = env.installed.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(MANIFEST), body).unwrap();
+            read_mod(&dir).unwrap()
+        };
+        assert_eq!(write("a", r#"{"id": "a", "target_ver": "1.3"}"#).target_ver, names(&["1.3"]));
+        assert_eq!(write("b", r#"{"id": "b", "target_ver": ["1.2", "1.3"]}"#).target_ver, names(&["1.2", "1.3"]));
+        assert!(write("c", r#"{"id": "c"}"#).target_ver.is_empty(), "still a working mod, with a warning");
+    }
+
+    #[test]
+    fn a_worlds_mods_report_a_warning_for_each_one_made_for_another_version() {
+        let env = Env::new();
+        let install = |folder: &str, target: &str| {
+            env.install(folder);
+            std::fs::write(env.installed.join(folder).join(MANIFEST), format!(r#"{{"id": "{folder}", "target_ver": {target}}}"#)).unwrap();
+        };
+        install("good", &format!("\"{GAME_VERSION}\""));
+        install("old", r#"["0.1"]"#);
+        let (slug, _) = env.create("W", &ModSetup::Instance(names(&["good", "old"])));
+        let meta = env.store.load_meta(&slug).unwrap();
+        let resolved = resolve_world_mods(&env.store, &slug, &meta, &env.installed).unwrap();
+        assert_eq!(resolved.warnings.len(), 1);
+        assert!(resolved.warnings[0].contains("old") && resolved.warnings[0].contains("0.1"), "{:?}", resolved.warnings);
+        assert_eq!(resolved.sources.len(), 2, "a warning doesn't stop the mod loading");
     }
 }
