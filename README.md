@@ -551,6 +551,13 @@ anything else, over time - 10 seconds by hand in Survival (`hardness: 2.0`) -
 and drops the dummy item; Creative breaks it instantly while crouching.
 Breaking either half removes the other, with one drop.
 
+**Damage from anything.** All damage goes through one `DamageEvent` (the cell
+it landed on, how much, and a source: `Melee`, `Projectile` or `Falling`), and
+one system (`src/damage.rs`) hands it to whatever's there. The dummy takes all
+of them the same way and shows the number - a sword swing, a thrown pebble, and
+(once they exist) a falling block just write the event; none needs to know the
+dummy exists. Hitting a block that isn't hittable does nothing.
+
 **Hitting it.** A plain left click (no Shift) hits the dummy with whatever's
 in your hand, every 0.45 seconds while held. The damage is the held tool's
 tier damage at its quality (a stone axe does about 2.3 at quality 0 up to
@@ -830,6 +837,7 @@ src/
 ├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
 ├── knapping.rs  # knapping rules: stone, strikes, cracks, scoring, quality (pure)
 ├── knap_ui.rs   # the knapping screen
+├── damage.rs    # DamageEvent + sources; delivers damage to hittable blocks (the dummy)
 ├── particles.rs # particle effects (damage numbers): the arc, the pixel font, the billboards
 ├── block_models.rs # draws the model of Shape::Model blocks (the dummy) from the blocks
 ├── entities.rs  # entity definitions, summoning, collision boxes (the training dummy)

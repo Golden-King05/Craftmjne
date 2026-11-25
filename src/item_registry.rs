@@ -548,4 +548,12 @@ mod tests {
         assert!(!items.throwable(&ItemStack::EMPTY));
         assert_eq!(items.mass(items.id("stick")), crate::blocks::DEFAULT_MASS);
     }
+
+    #[test]
+    fn the_pebble_is_the_only_throwable_thing() {
+        let (blocks, items) = shipped();
+        let throwable: Vec<&str> = items.defs.iter().skip(1).filter(|d| d.throwable).map(|d| d.id.as_str()).collect();
+        assert_eq!(throwable, vec!["pebble"]);
+        assert_eq!(blocks.defs.iter().filter(|d| d.throwable && d.layered.is_none()).map(|d| d.id.as_str()).collect::<Vec<_>>(), vec!["pebble"]);
+    }
 }

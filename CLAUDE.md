@@ -2817,3 +2817,22 @@ etc.) instead of inventing a new approach:
   - **Not done:** hit marks/bounces, throwing heavier things with a charge-up,
     damage to anything but the dummy, an in-flight spin, `mass` on tools, and
     the thrown stack doesn't carry the thrower's own movement.
+- **"Accept all forms of damage" meant one event, not a list of cases.**
+  Melee and thrown pebbles used to each write a `DamageNumberEvent`
+  themselves, which would have meant every future source (a falling block,
+  an explosion) re-implementing "is this the dummy, where are its feet". Now
+  every source writes a `damage::DamageEvent { cell, amount, source }` and
+  `damage_blocks` is the single receiver: a `hittable` block takes it and shows
+  the number (`hit_origin` moved there). `DamageSource` has `Melee`,
+  `Projectile` and `Falling`; `Falling` has no producer yet, but is in
+  `DamageSource::ALL` so the test that loops every source (both halves of the
+  dummy) fails the moment a new source is added and not handled. Break-tested
+  by making the receiver ignore `Falling`.
+  - **Pebble-only throwing is data, and tested:** only `pebble.json` has
+    `"throwable": true`; `the_pebble_is_the_only_throwable_thing` fails if
+    anything else gains it. (The `pebble@water`/`pebble@ice` variants copy
+    the flag; they have no item, so the test excludes `layered` blocks.)
+    `Q` still drops any item - throwing-as-a-weapon is only the click.
+  - **Test hazard:** reading `Events::iter_current_update_events()` after an
+    `app.update()` returned each event twice (two buffers), so the damage tests
+    collect through a system into a resource instead.

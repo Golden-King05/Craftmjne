@@ -29,7 +29,7 @@ use crate::player::{cursor_grabbed, Player};
 use crate::render::{bucket_to_mesh, ChunkMaterials};
 use crate::save::GameMode;
 use crate::state::{AppState, DeathState, PauseState};
-use crate::particles::DamageNumberEvent;
+use crate::damage::{DamageEvent, DamageSource};
 use crate::tools::{harvests, mining_seconds};
 use crate::world::{Atlas, BlockSetEvent, ChunkMap};
 
@@ -332,30 +332,16 @@ fn throw_on_click(
     }
 }
 
-/// A thrown thing hit a block: if that's something hittable (the dummy), it
-/// takes damage from the impact's energy and shows the number.
-fn projectile_impacts(
-    mut hits: EventReader<ProjectileHit>,
-    map: Res<ChunkMap>,
-    blocks: Res<BlockRegistry>,
-    mut numbers: EventWriter<DamageNumberEvent>,
-) {
+/// A thrown thing hit a block: it deals its impact energy as damage there
+/// (`damage.rs` decides whether what it hit takes it).
+fn projectile_impacts(mut hits: EventReader<ProjectileHit>, mut damage: EventWriter<DamageEvent>) {
     for hit in hits.read() {
-        let block = map.get_block(hit.cell);
-        if block != AIR && blocks.def(block).hittable {
-            numbers.write(DamageNumberEvent {
-                origin: hit_origin(&blocks, hit.cell, block),
-                amount: impact_damage(hit.mass, hit.speed),
-            });
-        }
+        damage.write(DamageEvent {
+            cell: hit.cell,
+            amount: impact_damage(hit.mass, hit.speed),
+            source: DamageSource::Projectile,
+        });
     }
-}
-
-/// The feet of whatever a block hit belongs to: the cell itself, or for the
-/// upper half of a two-cell-tall block the cell below it, centred.
-pub fn hit_origin(registry: &BlockRegistry, pos: IVec3, block: BlockId) -> Vec3 {
-    let base = if registry.lower_half(block).is_some() { pos - IVec3::Y } else { pos };
-    Vec3::new(base.x as f32 + 0.5, base.y as f32, base.z as f32 + 0.5)
 }
 
 /// Whether a block can be mined right now: breakable at all, and, for one
@@ -392,7 +378,7 @@ fn interact(
     players: Query<&Player>,
     mut block_events: EventWriter<BlockSetEvent>,
     mut drops: EventWriter<SpawnDrop>,
-    mut damage_numbers: EventWriter<DamageNumberEvent>,
+    mut damage: EventWriter<DamageEvent>,
     mut gizmos: Gizmos,
 ) {
     let Ok(player) = players.single() else { return };
@@ -451,9 +437,10 @@ fn interact(
     // A plain click on something hittable hits it, with whatever is in hand.
     if !throwing && registry.def(aimed).hittable && !shift && mouse.pressed(MouseButton::Left) && timers.attack_t <= 0.0 {
         timers.attack_t = ATTACK_COOLDOWN;
-        damage_numbers.write(DamageNumberEvent {
-            origin: hit_origin(registry, hit.pos, aimed),
+        damage.write(DamageEvent {
+            cell: hit.pos,
             amount: content.items.attack_damage(&hotbar.slots[hotbar.selected]),
+            source: DamageSource::Melee,
         });
     }
     if *mode == GameMode::Creative {
@@ -917,14 +904,5 @@ mod tests {
         assert!(!upper_fits(&map, &reg, lower, at), "a block overhead leaves no room");
         assert!(upper_fits(&map, &reg, stone, at), "a one-cell block doesn't care");
         assert!(!upper_fits(&map, &reg, lower, IVec3::new(4, WORLD_HEIGHT - 1, 4)), "nor does the top of the world");
-    }
-
-    #[test]
-    fn a_hit_on_either_half_shows_its_number_at_the_dummys_feet() {
-        let reg = BlockRegistry::with_defaults();
-        let (lower, upper) = (reg.id("training_dummy"), reg.id("training_dummy_top"));
-        assert!(reg.def(lower).hittable && reg.def(upper).hittable && !reg.def(reg.id("stone")).hittable);
-        assert_eq!(hit_origin(&reg, IVec3::new(4, 10, -3), lower), Vec3::new(4.5, 10.0, -2.5));
-        assert_eq!(hit_origin(&reg, IVec3::new(4, 11, -3), upper), Vec3::new(4.5, 10.0, -2.5));
     }
 }

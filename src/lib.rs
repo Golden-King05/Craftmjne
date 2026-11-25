@@ -10,6 +10,7 @@ pub mod chat;
 pub mod commands;
 pub mod config;
 pub mod crafting;
+pub mod damage;
 pub mod drainage;
 pub mod health;
 pub mod icons;
