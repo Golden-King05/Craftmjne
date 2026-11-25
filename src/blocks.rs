@@ -195,6 +195,8 @@ pub use crate::item_registry::ItemStack;
 /// How many of a block a single slot holds unless a block file overrides it
 /// with `max_stack`.
 pub const DEFAULT_MAX_STACK: u32 = 124;
+/// Mass (kg) of anything that doesn't say.
+pub const DEFAULT_MASS: f32 = 1.0;
 
 /// A block file's `hardness` when it doesn't give one.
 pub const DEFAULT_HARDNESS: f32 = 1.0;
@@ -743,6 +745,12 @@ pub struct BlockDef {
     /// A plain left click hits it instead of mining it: it takes damage from
     /// what's in hand and shows the number (the training dummy).
     pub hittable: bool,
+    /// Mass in kilograms, for what it does when thrown (a pebble is 0.05).
+    /// Lighter things are thrown faster for the same effort, and slowed more
+    /// by the air. See `items::throw_speed`.
+    pub mass: f32,
+    /// Left click throws it instead of mining or hitting (a pebble).
+    pub throwable: bool,
     /// A block that stands two cells tall: the name of the block placed in
     /// the cell above this one. Placing needs both cells free; breaking
     /// either takes the other with it (and only one drop). See
@@ -813,6 +821,8 @@ impl Default for BlockDef {
             tool_response: 1.0,
             requires_crouch: false,
             hittable: false,
+            mass: DEFAULT_MASS,
+            throwable: false,
             upper: None,
             waterloggable: false,
             freezes_to: None,
@@ -891,6 +901,9 @@ struct BlockFile {
     requires_crouch: bool,
     #[serde(default)]
     hittable: bool,
+    mass: Option<f32>,
+    #[serde(default)]
+    throwable: bool,
     upper: Option<String>,
 }
 
@@ -955,6 +968,8 @@ impl BlockFile {
             tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
             requires_crouch: self.requires_crouch,
             hittable: self.hittable,
+            mass: self.mass.filter(|m| *m > 0.0).unwrap_or(DEFAULT_MASS),
+            throwable: self.throwable,
             upper: self.upper,
             waterloggable: self.waterloggable,
             freezes_to: self.freezes_to,

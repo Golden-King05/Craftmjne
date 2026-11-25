@@ -188,6 +188,29 @@ Mine the block under one and it drops as an item. Both are
 cell, and you swim past it as if it were water. They're the first step
 toward the first tools.
 
+### Throwing
+
+**Left click with a pebble in hand throws it** (it stacks like any block item).
+It leaves your eye along your look direction every 0.35 seconds while held,
+and Survival uses one up. Anything with `"throwable": true` in its block or
+item file works the same way; so far that's only the pebble, and holding one
+means left click doesn't mine or hit (right click still places it).
+
+Every throw has the same 8 joules of effort behind it, so **mass decides
+everything else** (`"mass"` in kilograms; a pebble is `0.05`, anything unsaid
+is `1.0`): a lighter thing leaves your hand faster (`v = sqrt(2E/m)`, so a
+pebble goes about 18 m/s and a 1 kg thing 4 m/s) and the air slows it more
+(`deceleration = 0.002/m * v^2`), while a heavy one hangs in the air longer
+and has dropped further by the time it arrives. In flight it's an ordinary
+dropped item with gravity and drag (`items::step_projectile`), and when it
+hits something it lands where it hit and can be picked up again.
+
+**Damage is the kinetic energy at impact** (`0.25 * 0.5 * m * v^2`), so speed
+counts for more than mass: a pebble thrown at something a few blocks away does
+about 1.5, deliberately little (ranged weapons come later). Hit the training
+dummy and the damage number pops up as usual. A long lob that falls a long
+way hits a bit harder, since it's gained speed.
+
 ### Tools, tiers and quality
 
 Tools are items with a `"tool"` entry, and they come in **tiers** (`tiers/*.json`,
@@ -540,6 +563,8 @@ to one decimal (`2.9`).
 In block files that's `"shape": "model"` (the mesher draws nothing, and its
 neighbours' faces still draw), `"upper": "<block>"` (two cells tall) and
 `"requires_crouch": true` and `"hittable": true` (a plain click hits it).
+For items and blocks, `"mass"` (kg) and `"throwable": true` - see
+[Throwing](#throwing).
 
 **Entities** are the other way to do it, for things that shouldn't be locked
 to the grid: `/summon training_dummy` also stands a free-standing dummy

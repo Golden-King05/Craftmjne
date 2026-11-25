@@ -56,6 +56,50 @@ pub const THROWN_PICKUP_DELAY: f32 = 1.5;
 const MERGE_RADIUS: f32 = 0.9;
 const THROW_SPEED: f32 = 6.0;
 
+/// Joules of effort behind a click-throw: the same for everything, so a
+/// lighter thing leaves your hand faster ([`throw_speed`]).
+pub const THROW_ENERGY: f32 = 8.0;
+/// Air resistance, in kg/m: deceleration is `AIR_RESISTANCE / mass * speed^2`,
+/// so a light pebble is slowed far more than a heavy block.
+const AIR_RESISTANCE: f32 = 0.002;
+/// Damage per joule of kinetic energy at the moment of impact. A pebble
+/// thrown at a target a few blocks away (about 6 joules by then) does about 1.5.
+pub const DAMAGE_PER_JOULE: f32 = 0.25;
+
+/// How fast a thing of `mass` kilograms leaves the hand: `THROW_ENERGY`
+/// worth of kinetic energy, `v = sqrt(2E / m)`.
+pub fn throw_speed(mass: f32) -> f32 {
+    (2.0 * THROW_ENERGY / mass.max(1e-3)).sqrt()
+}
+
+/// Damage from a thing of `mass` hitting at `speed`: proportional to its
+/// kinetic energy, so speed counts for more than mass.
+pub fn impact_damage(mass: f32, speed: f32) -> f32 {
+    DAMAGE_PER_JOULE * 0.5 * mass * speed * speed
+}
+
+/// One step of a thrown thing in flight: gravity and air resistance (heavier
+/// things are slowed less). Returns the solid cell it ran into, if it did -
+/// `pos` is then left where it was, in the open cell before it.
+pub fn step_projectile(
+    pos: &mut Vec3,
+    vel: &mut Vec3,
+    mass: f32,
+    dt: f32,
+    solid: impl Fn(IVec3) -> bool,
+) -> Option<IVec3> {
+    let speed = vel.length();
+    let drag = AIR_RESISTANCE / mass.max(1e-3) * speed;
+    *vel += (Vec3::new(0.0, GRAVITY, 0.0) - *vel * drag) * dt;
+    let next = *pos + *vel * dt;
+    let cell = next.floor().as_ivec3();
+    if solid(cell) {
+        return Some(cell);
+    }
+    *pos = next;
+    None
+}
+
 #[derive(Component)]
 pub struct DroppedItem {
     pub stack: ItemStack,
@@ -67,6 +111,10 @@ pub struct DroppedItem {
     /// be kept forever by reloading.
     pub age: f32,
     pub pickup_delay: f32,
+    /// `Some(mass)` while it's a thrown projectile still in flight (see
+    /// [`step_projectile`]); it lands as an ordinary item when it hits
+    /// something.
+    pub thrown_mass: Option<f32>,
     /// The light its mesh was last built with - rebuilt when the cell's light
     /// changes (`refresh_item_meshes`).
     lit: Option<LightCell>,
@@ -75,7 +123,7 @@ pub struct DroppedItem {
 
 impl DroppedItem {
     pub fn new(stack: ItemStack, pos: Vec3, vel: Vec3, pickup_delay: f32) -> Self {
-        Self { stack, pos, vel, age: 0.0, pickup_delay, lit: None, mesh: None }
+        Self { stack, pos, vel, age: 0.0, pickup_delay, thrown_mass: None, lit: None, mesh: None }
     }
 }
 
@@ -87,6 +135,23 @@ pub struct SpawnDrop {
     pub stack: ItemStack,
     pub vel: Vec3,
     pub pickup_delay: f32,
+}
+
+/// Something was thrown (left click with a throwable item).
+#[derive(Event, Clone, Copy)]
+pub struct SpawnProjectile {
+    pub pos: Vec3,
+    pub stack: ItemStack,
+    pub vel: Vec3,
+    pub mass: f32,
+}
+
+/// A thrown thing hit the solid cell `cell`.
+#[derive(Event, Clone, Copy, Debug)]
+pub struct ProjectileHit {
+    pub cell: IVec3,
+    pub speed: f32,
+    pub mass: f32,
 }
 
 /// Items read from the save by `world::enter_world`, waiting for
@@ -222,11 +287,19 @@ pub fn in_pickup_range(feet: Vec3, item: Vec3) -> bool {
 fn spawn_drops(
     mut commands: Commands,
     mut events: EventReader<SpawnDrop>,
+    mut thrown: EventReader<SpawnProjectile>,
     mut loaded: ResMut<LoadedItems>,
 ) {
     for e in events.read() {
         if !e.stack.is_empty() {
             commands.spawn(item_bundle(DroppedItem::new(e.stack, e.pos, e.vel, e.pickup_delay)));
+        }
+    }
+    for e in thrown.read() {
+        if !e.stack.is_empty() {
+            let mut item = DroppedItem::new(e.stack, e.pos, e.vel, 0.0);
+            item.thrown_mass = Some(e.mass);
+            commands.spawn(item_bundle(item));
         }
     }
     for (stack, pos, age) in loaded.0.drain(..) {
@@ -248,6 +321,7 @@ fn simulate_items(
     map: Res<ChunkMap>,
     tables: Option<Res<BlockTables>>,
     paused: Res<PauseState>,
+    mut hits: EventWriter<ProjectileHit>,
     mut items: Query<(Entity, &mut DroppedItem)>,
 ) {
     if paused.open {
@@ -274,6 +348,17 @@ fn simulate_items(
         let mut left = dt;
         while left > 0.0 {
             let step = left.min(MAX_STEP);
+            if let Some(mass) = item.thrown_mass {
+                if let Some(cell) = step_projectile(&mut item.pos, &mut item.vel, mass, step, solid) {
+                    hits.write(ProjectileHit { cell, speed: item.vel.length(), mass });
+                    // Lands where it hit, as an ordinary item that can be picked up again.
+                    item.thrown_mass = None;
+                    item.vel *= 0.1;
+                    item.pickup_delay = item.pickup_delay.max(0.5);
+                }
+                left -= step;
+                continue;
+            }
             step_item(&mut item.pos, &mut item.vel, step, solid, wet);
             left -= step;
         }
@@ -294,7 +379,8 @@ fn merge_items(
         return;
     }
     *timer = 0.0;
-    let mut all: Vec<(Entity, ItemStack, Vec3)> = items.iter().map(|(e, i)| (e, i.stack, i.pos)).collect();
+    let mut all: Vec<(Entity, ItemStack, Vec3)> =
+        items.iter().filter(|(_, i)| i.thrown_mass.is_none()).map(|(e, i)| (e, i.stack, i.pos)).collect();
     for i in 0..all.len() {
         for j in (i + 1)..all.len() {
             let (a, b) = (all[i], all[j]);
@@ -336,7 +422,7 @@ fn pick_up_items(
         return;
     }
     for (entity, mut item) in &mut items {
-        if item.pickup_delay > 0.0 || !in_pickup_range(player.pos, item.pos) {
+        if item.thrown_mass.is_some() || item.pickup_delay > 0.0 || !in_pickup_range(player.pos, item.pos) {
             continue;
         }
         let max = registry.max_stack(item.stack.id);
@@ -454,6 +540,8 @@ pub struct ItemsPlugin;
 impl Plugin for ItemsPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<SpawnDrop>()
+            .add_event::<SpawnProjectile>()
+            .add_event::<ProjectileHit>()
             .init_resource::<LoadedItems>()
             .init_resource::<DeathState>()
             .init_resource::<Hotbar>()
@@ -582,5 +670,79 @@ mod tests {
         let mut hotbar = vec![ItemStack::EMPTY];
         assert_eq!(give(&mut hotbar, &mut [], stack(AIR, 5), 64), 0);
         assert!(hotbar[0].is_empty());
+    }
+
+    /// Throws something of `mass` level from (0.5, 40, 0.5) along +x at a
+    /// wall of solid cells from x = `wall`; returns the impact's height
+    /// above the throw and its speed.
+    fn throw_at_wall(mass: f32, wall: i32) -> (f32, f32) {
+        let mut pos = Vec3::new(0.5, 40.0, 0.5);
+        let mut vel = Vec3::X * throw_speed(mass);
+        for _ in 0..20_000 {
+            if step_projectile(&mut pos, &mut vel, mass, 1.0 / 120.0, |c| c.x >= wall).is_some() {
+                return (pos.y - 40.0, vel.length());
+            }
+        }
+        panic!("never hit the wall");
+    }
+
+    const PEBBLE: f32 = 0.05;
+
+    #[test]
+    fn a_pebble_thrown_at_something_a_few_blocks_away_does_about_one_and_a_half() {
+        for wall in [4, 5, 6] {
+            let (_, speed) = throw_at_wall(PEBBLE, wall);
+            let damage = impact_damage(PEBBLE, speed);
+            assert!((1.3..=1.7).contains(&damage), "{damage} at {wall} blocks (speed {speed})");
+        }
+    }
+
+    #[test]
+    fn air_slows_a_light_thing_much_more_than_a_heavy_one() {
+        // Launch speed against speed on arrival, compared along the first few
+        // blocks where gravity hasn't yet sped it up again.
+        let lost = |mass: f32| 1.0 - throw_at_wall(mass, 5).1 / throw_speed(mass);
+        assert!(lost(PEBBLE) > 0.1, "a pebble slows noticeably: {}", lost(PEBBLE));
+        assert!(lost(PEBBLE) > lost(0.5) * 5.0, "pebble {} vs heavy {}", lost(PEBBLE), lost(0.5));
+    }
+
+    #[test]
+    fn a_long_lob_that_falls_a_long_way_hits_harder_not_softer() {
+        // Honest physics: what falls gains speed, and damage is its energy.
+        let near = impact_damage(PEBBLE, throw_at_wall(PEBBLE, 5).1);
+        let lob = impact_damage(PEBBLE, throw_at_wall(PEBBLE, 24).1);
+        assert!(lob > near * 0.9, "{lob} vs {near}");
+    }
+
+    #[test]
+    fn lighter_things_are_thrown_faster_and_heavier_ones_drop_sooner() {
+        assert!(throw_speed(PEBBLE) > throw_speed(0.5) && throw_speed(0.5) > throw_speed(5.0));
+        // Same distance, same aim: the heavy thing is slow, hangs in the air
+        // longer, and has fallen much further by the time it arrives.
+        let (pebble_drop, _) = throw_at_wall(PEBBLE, 6);
+        let (heavy_drop, _) = throw_at_wall(2.0, 6);
+        assert!(pebble_drop < 0.0 && heavy_drop < pebble_drop * 5.0, "pebble {pebble_drop}, heavy {heavy_drop}");
+    }
+
+    #[test]
+    fn damage_follows_kinetic_energy_so_speed_counts_for_more_than_mass() {
+        // Twice as fast is four times the damage; twice as heavy only two.
+        let base = impact_damage(0.05, 10.0);
+        assert!((impact_damage(0.05, 20.0) / base - 4.0).abs() < 1e-4);
+        assert!((impact_damage(0.10, 10.0) / base - 2.0).abs() < 1e-4);
+        assert_eq!(impact_damage(0.05, 0.0), 0.0);
+    }
+
+    #[test]
+    fn a_thrown_thing_stops_in_the_open_cell_before_what_it_hit() {
+        let mut pos = Vec3::new(0.5, 40.0, 0.5);
+        let mut vel = Vec3::X * 10.0;
+        let cell = loop {
+            if let Some(c) = step_projectile(&mut pos, &mut vel, 0.05, 1.0 / 60.0, |c| c.x >= 3) {
+                break c;
+            }
+        };
+        assert_eq!(cell.x, 3);
+        assert!(pos.x < 3.0, "pos {pos}");
     }
 }

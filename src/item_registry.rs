@@ -89,6 +89,10 @@ pub struct ItemDef {
     pub kind: ItemKind,
     /// `Some` for a tool: its kind and which tier's stats it uses.
     pub tool: Option<ToolSpec>,
+    /// Kilograms, for throwing.
+    pub mass: f32,
+    /// Left click throws it.
+    pub throwable: bool,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +108,9 @@ struct ItemFile {
     max_stack: Option<u32>,
     texture: Option<String>,
     tool: Option<ToolFile>,
+    mass: Option<f32>,
+    #[serde(default)]
+    throwable: bool,
 }
 
 #[derive(Resource)]
@@ -169,6 +176,8 @@ impl ItemRegistry {
                     max_stack: if tool.is_some() { 1 } else { file.max_stack.unwrap_or(DEFAULT_MAX_STACK).max(1) },
                     kind: ItemKind::Plain { texture: file.texture.unwrap_or_else(|| file.id.clone()) },
                     tool,
+                    mass: file.mass.filter(|m| *m > 0.0).unwrap_or(crate::blocks::DEFAULT_MASS),
+                    throwable: file.throwable,
                     id: file.id,
                 }
             })
@@ -177,7 +186,7 @@ impl ItemRegistry {
     }
 
     pub fn build(blocks: &BlockRegistry, plain: Vec<ItemDef>) -> Self {
-        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None };
+        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false };
         let mut reg = Self {
             defs: vec![empty],
             by_name: HashMap::new(),
@@ -195,6 +204,8 @@ impl ItemRegistry {
                 max_stack: def.max_stack.max(1),
                 kind: ItemKind::Block(block as BlockId),
                 tool: None,
+                mass: def.mass,
+                throwable: def.throwable,
             });
             reg.of_block[block] = id;
         }
@@ -273,6 +284,15 @@ impl ItemRegistry {
         self.tool(stack.id)
             .and_then(|spec| self.tiers.get(&spec.tier))
             .map_or(crate::tools::HAND_DAMAGE, |tier| tier.damage_at(stack.quality))
+    }
+
+    /// Whether left click throws `stack` (it isn't empty and is throwable).
+    pub fn throwable(&self, stack: &ItemStack) -> bool {
+        !stack.is_empty() && self.def(stack.id).throwable
+    }
+
+    pub fn mass(&self, id: ItemId) -> f32 {
+        self.def(id).mass
     }
 
     /// A fresh stack of `count` of `id`: a tool starts at the default
@@ -431,6 +451,8 @@ mod tests {
             max_stack: 1,
             kind: ItemKind::Plain { texture: "dirt".into() },
             tool: None,
+            mass: 1.0,
+            throwable: false,
         };
         ItemRegistry::build(&blocks, vec![def]);
     }
@@ -495,6 +517,8 @@ mod tests {
             max_stack: 1,
             kind: ItemKind::Plain { texture: "stick".into() },
             tool: Some(ToolSpec { kind: ToolKind::Pickaxe, tier: "mithril".into() }),
+            mass: 1.0,
+            throwable: false,
         };
         ItemRegistry::build(&blocks, vec![def]).with_tiers(TierBook::with_defaults());
     }
@@ -510,5 +534,18 @@ mod tests {
         assert!(at(100) > at(0), "quality hits harder");
         assert_eq!(items.attack_damage(&ItemStack::EMPTY), crate::tools::HAND_DAMAGE);
         assert_eq!(items.attack_damage(&ItemStack::new(items.id("stick"), 3)), crate::tools::HAND_DAMAGE);
+    }
+
+    #[test]
+    fn a_pebble_is_a_light_throwable_that_stacks_and_most_things_are_not_throwable() {
+        let (_blocks, items) = shipped();
+        let pebble = items.id("pebble");
+        assert!(items.throwable(&ItemStack::new(pebble, 1)));
+        assert_eq!(items.mass(pebble), 0.05);
+        assert!(items.max_stack(pebble) > 1, "pebbles stack");
+        assert!(!items.throwable(&ItemStack::new(items.id("stick"), 1)));
+        assert!(!items.throwable(&ItemStack::new(items.id("stone_axe"), 1)));
+        assert!(!items.throwable(&ItemStack::EMPTY));
+        assert_eq!(items.mass(items.id("stick")), crate::blocks::DEFAULT_MASS);
     }
 }

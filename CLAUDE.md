@@ -2787,3 +2787,33 @@ etc.) instead of inventing a new approach:
   - **Not done:** hit knockback or flash, a health bar, damage from anything
     but the held item, different attack speeds per sword kind (the dagger is
     meant to be fast and the greatsword slow; they all share the cooldown).
+- **Throwing reuses the dropped-item entity as the projectile.** A thrown
+  pebble is a `DroppedItem` with `thrown_mass: Some(m)`: `simulate_items` flies
+  it with `step_projectile` (gravity + drag) instead of the normal item
+  physics, and on hitting a solid cell it writes a `ProjectileHit`, drops the
+  flag and becomes an ordinary item (lighting, rendering, pickup, merging and
+  saving all came free; merging and pickup skip it while it flies).
+  - **Mass is one rule, not per-item code.** Every throw has the same energy
+    (`THROW_ENERGY`, 8 J), so `throw_speed = sqrt(2E/m)` and drag is
+    `AIR_RESISTANCE / m * v^2`; `impact_damage = DAMAGE_PER_JOULE * 0.5 m v^2`.
+    The user's constraint was ~1.5 damage for a pebble at close range, so the
+    constants were chosen by simulating throws (a throwaway script mirroring
+    the Rust step, then a test: `a_pebble_thrown_at_something_a_few_blocks_
+    away_does_about_one_and_a_half`), not guessed. Drag was raised from
+    0.0005 to 0.002 so a pebble visibly loses speed over a few blocks.
+  - **A long lob hits harder, and that's physics, not a bug.** The first test
+    asserted damage falls with distance and failed: a level throw over 24
+    blocks falls ~20 blocks and arrives faster. Damage is the energy at
+    impact, so it does; the test now documents that
+    (`a_long_lob_that_falls_a_long_way_hits_harder_not_softer`) and a separate
+    one checks the drag effect over the first few blocks, before gravity
+    dominates. Compare like with like.
+  - **Left click throws only for `throwable` items**, in `throw_on_click`
+    (`interact.rs`), with `interact` skipping mine/hit while one is held.
+    Throwing was not given its own `SpawnDrop` field because that struct is
+    built in a dozen places; a separate `SpawnProjectile` event avoids
+    touching them. `projectile_impacts` turns a hit on a `hittable` block into
+    a `DamageNumberEvent`.
+  - **Not done:** hit marks/bounces, throwing heavier things with a charge-up,
+    damage to anything but the dummy, an in-flight spin, `mass` on tools, and
+    the thrown stack doesn't carry the thrower's own movement.

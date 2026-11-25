@@ -23,7 +23,7 @@ use crate::crafting::RecipeBook;
 use crate::inventory::{open_inventory, InventoryState};
 use crate::item_registry::ItemRegistry;
 use bevy::ecs::system::SystemParam;
-use crate::items::{SpawnDrop, MINED_PICKUP_DELAY};
+use crate::items::{impact_damage, throw_speed, ProjectileHit, SpawnDrop, SpawnProjectile, MINED_PICKUP_DELAY};
 use crate::light::{LightCell, MAX_LIGHT};
 use crate::player::{cursor_grabbed, Player};
 use crate::render::{bucket_to_mesh, ChunkMaterials};
@@ -286,9 +286,74 @@ fn partner_of(map: &ChunkMap, registry: &BlockRegistry, pos: IVec3, broken: Bloc
     (map.get_block(cell) == block).then_some((cell, block))
 }
 
+/// Seconds between throws while the button is held.
+const THROW_COOLDOWN: f32 = 0.35;
+
+/// Left click with a throwable item (a pebble) in hand throws one: it leaves
+/// the eye along the look direction at the speed its mass allows
+/// (`items::throw_speed`). Survival uses one up; Creative's are free.
+#[allow(clippy::too_many_arguments)]
+fn throw_on_click(
+    time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mode: Res<GameMode>,
+    items: Res<ItemRegistry>,
+    mut hotbar: ResMut<Hotbar>,
+    players: Query<&Player>,
+    mut cooldown: Local<f32>,
+    mut projectiles: EventWriter<SpawnProjectile>,
+) {
+    *cooldown -= time.delta_secs();
+    if !mouse.pressed(MouseButton::Left) || *cooldown > 0.0 || !cursor_grabbed(windows) {
+        return;
+    }
+    let Ok(player) = players.single() else { return };
+    let selected = hotbar.selected;
+    let held = hotbar.slots[selected];
+    if !items.throwable(&held) {
+        return;
+    }
+    *cooldown = THROW_COOLDOWN;
+    let mass = items.mass(held.id);
+    let dir = player.look_dir();
+    projectiles.write(SpawnProjectile {
+        pos: player.eye() - Vec3::Y * 0.1 + dir * 0.4,
+        stack: ItemStack { count: 1, ..held },
+        vel: dir * throw_speed(mass),
+        mass,
+    });
+    if *mode == GameMode::Survival {
+        let slot = &mut hotbar.slots[selected];
+        slot.count -= 1;
+        if slot.count == 0 {
+            *slot = ItemStack::EMPTY;
+        }
+    }
+}
+
+/// A thrown thing hit a block: if that's something hittable (the dummy), it
+/// takes damage from the impact's energy and shows the number.
+fn projectile_impacts(
+    mut hits: EventReader<ProjectileHit>,
+    map: Res<ChunkMap>,
+    blocks: Res<BlockRegistry>,
+    mut numbers: EventWriter<DamageNumberEvent>,
+) {
+    for hit in hits.read() {
+        let block = map.get_block(hit.cell);
+        if block != AIR && blocks.def(block).hittable {
+            numbers.write(DamageNumberEvent {
+                origin: hit_origin(&blocks, hit.cell, block),
+                amount: impact_damage(hit.mass, hit.speed),
+            });
+        }
+    }
+}
+
 /// The feet of whatever a block hit belongs to: the cell itself, or for the
 /// upper half of a two-cell-tall block the cell below it, centred.
-fn hit_origin(registry: &BlockRegistry, pos: IVec3, block: BlockId) -> Vec3 {
+pub fn hit_origin(registry: &BlockRegistry, pos: IVec3, block: BlockId) -> Vec3 {
     let base = if registry.lower_half(block).is_some() { pos - IVec3::Y } else { pos };
     Vec3::new(base.x as f32 + 0.5, base.y as f32, base.z as f32 + 0.5)
 }
@@ -379,9 +444,12 @@ fn interact(
     // click: hold Shift to mine it.
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let aimed = map.get_block(hit.pos);
-    let breakable = mineable(registry.def(aimed), shift);
+    // Holding something throwable, left click throws it (`throw_on_click`),
+    // so it neither mines nor hits.
+    let throwing = content.items.throwable(&hotbar.slots[hotbar.selected]);
+    let breakable = mineable(registry.def(aimed), shift) && !throwing;
     // A plain click on something hittable hits it, with whatever is in hand.
-    if registry.def(aimed).hittable && !shift && mouse.pressed(MouseButton::Left) && timers.attack_t <= 0.0 {
+    if !throwing && registry.def(aimed).hittable && !shift && mouse.pressed(MouseButton::Left) && timers.attack_t <= 0.0 {
         timers.attack_t = ATTACK_COOLDOWN;
         damage_numbers.write(DamageNumberEvent {
             origin: hit_origin(registry, hit.pos, aimed),
@@ -672,7 +740,7 @@ impl Plugin for InteractPlugin {
             .add_systems(OnExit(AppState::InGame), reset_mining)
             .add_systems(
                 Update,
-                (select_slot, interact, pop_unsupported, open_station, sync_crack_overlay)
+                (select_slot, throw_on_click, interact, projectile_impacts, pop_unsupported, open_station, sync_crack_overlay)
                     .chain()
                     .after(crate::player::PlayerSet)
                     .run_if(in_state(AppState::InGame)),

@@ -3,5 +3,7 @@
   "name": "Pebble",
   "shape": "floor",
   "hardness": 0,
-  "waterloggable": true
+  "waterloggable": true,
+  "mass": 0.05,
+  "throwable": true
 }

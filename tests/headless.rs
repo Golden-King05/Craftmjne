@@ -1288,3 +1288,40 @@ fn the_dummy_block_shows_its_model_and_it_follows_the_block_through_a_reload() {
     app2.update();
     assert!(models(&mut app2).is_empty(), "no block, no model");
 }
+
+/// A thrown pebble flies, hits the ground, reports the hit, and lands as an
+/// ordinary item that can be picked up again.
+#[test]
+fn a_thrown_pebble_hits_the_ground_and_lands_as_an_item() {
+    use craftmjne::items::{DroppedItem, ProjectileHit, SpawnProjectile};
+    #[derive(Resource, Default)]
+    struct Hits(Vec<ProjectileHit>);
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    app.init_resource::<Hits>();
+    app.add_systems(Update, |mut events: EventReader<ProjectileHit>, mut log: ResMut<Hits>| {
+        log.0.extend(events.read().copied());
+    });
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+    let (pebble, ground) = {
+        let items = app.world().resource::<craftmjne::item_registry::ItemRegistry>();
+        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().clone();
+        let y = app.world().resource::<ChunkMap>().surface_y(&tables.0, 8, 8).expect("spawn column");
+        (items.id("pebble"), IVec3::new(8, y, 8))
+    };
+    app.world_mut().send_event(SpawnProjectile {
+        pos: Vec3::new(8.5, ground.y as f32 + 4.5, 8.5),
+        stack: craftmjne::item_registry::ItemStack::new(pebble, 1),
+        vel: Vec3::new(0.0, -12.0, 0.0),
+        mass: 0.05,
+    });
+    assert!(run_until(&mut app, |app| !app.world().resource::<Hits>().0.is_empty(), 500), "it hit something");
+    let hit = app.world().resource::<Hits>().0[0];
+    assert_eq!(hit.cell, ground, "the cell it struck is the ground under it");
+    assert_eq!(hit.mass, 0.05);
+    assert!(hit.speed > 10.0, "it was still moving fast: {}", hit.speed);
+    // It's now an ordinary dropped item, no longer in flight.
+    app.update();
+    let items: Vec<_> = app.world_mut().query::<&DroppedItem>().iter(app.world()).map(|i| (i.stack.id, i.thrown_mass)).collect();
+    assert_eq!(items, vec![(pebble, None)]);
+}
