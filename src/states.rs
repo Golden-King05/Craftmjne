@@ -14,14 +14,23 @@
 //! command, and any future interaction, treats `axis`, `waterlogged` and
 //! `level` identically. Adding a tag is adding a row.
 //!
-//! ## What is and isn't unified yet
+//! ## Storage
 //!
-//! The *interface* is unified: nothing outside this file needs to know that
-//! `axis` and `level` are parallel per-chunk arrays while `waterlogged` is a
-//! variant block id (`pebble@water`). Storage and saving still differ per
-//! tag (axis through the edit log, level through the fluid scan, waterlogged
-//! as part of the block id). Moving them into one per-cell store is a
-//! separate change; this seam is where it would plug in.
+//! Every cell has one **state word** (`Chunk::state`, a `u16` per cell, the
+//! same two bytes a cell used to spend on separate fluid-level and axis
+//! arrays). Each tag stored in it owns a [`Field`] - a run of bits - declared
+//! in its table row as [`Storage::Cell`]: `level` takes 8 bits, `axis` 2,
+//! leaving 6 free. A new tag that fits in the spare bits costs no memory.
+//!
+//! `waterlogged` is the one deliberate exception ([`Storage::BlockId`]): its
+//! value *is* which block id the cell holds (`pebble@water`), because the
+//! collision, light and mesher tables are all indexed by block id and would
+//! each have to become state-dependent to move it. The interface hides that
+//! difference; the storage is still one extra case, not a hidden one.
+//!
+//! What is saved, and how, is unchanged on disk so older worlds still open:
+//! `axis` through the edit log (`BlockSetEvent`), `level` through the fluid
+//! scan. They read and write the word through these fields.
 
 use bevy::prelude::*;
 
@@ -29,10 +38,63 @@ use crate::blocks::{BlockDef, BlockId, BlockRegistry, BlockTables, Rotation, Sha
 use crate::chat::ChatLog;
 use crate::world::{BlockSetEvent, ChunkMap};
 
+/// A run of bits in a cell's state word (`Chunk::state`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub shift: u8,
+    pub bits: u8,
+}
+
+impl Field {
+    pub const fn mask(self) -> u16 {
+        (((1u32 << self.bits) - 1) as u16) << self.shift
+    }
+    /// This field's value in `word`.
+    pub const fn get(self, word: u16) -> u16 {
+        (word & self.mask()) >> self.shift
+    }
+    /// `word` with this field set to `value` (extra high bits are dropped).
+    pub const fn set(self, word: u16, value: u16) -> u16 {
+        (word & !self.mask()) | ((value << self.shift) & self.mask())
+    }
+    /// `value` placed in this field, for building a word from scratch.
+    pub const fn pack(self, value: u16) -> u16 {
+        self.set(0, value)
+    }
+}
+
+/// A fluid's flow level: `FLUID_SOURCE` (0), 1.. blocks from a supply, or
+/// `FLUID_FALLING` (255).
+pub const LEVEL: Field = Field { shift: 0, bits: 8 };
+/// Which axis a rotating block lies on (`AXIS_X/Y/Z`).
+pub const AXIS: Field = Field { shift: 8, bits: 2 };
+
+/// Every cell's state word before anything has happened to it: a source-level
+/// cell on the default axis. A fresh chunk is filled with this.
+pub const DEFAULT_STATE: u16 = LEVEL.pack(FLUID_SOURCE as u16) | AXIS.pack(AXIS_Y as u16);
+
+/// Builds a state word from a fluid level and an axis.
+pub const fn pack_state(level: u8, axis: u8) -> u16 {
+    LEVEL.pack(level as u16) | AXIS.pack(axis as u16)
+}
+
+/// Where a state tag's value lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Storage {
+    /// In the cell's one state word, in these bits.
+    Cell(Field),
+    /// Part of the block's identity: the value is *which block id the cell
+    /// holds* (`pebble@water`). Used where every per-id table (light,
+    /// collision, meshing) would otherwise have to become state-dependent.
+    BlockId,
+}
+
 /// One state tag: what it is, and how to read and write it.
 pub struct StateTagDef {
     pub name: &'static str,
     pub description: &'static str,
+    /// Where its value is stored.
+    pub storage: Storage,
     /// The definition tag that enables this state tag. Every state tag is
     /// switched on per block through the `states` definition tag; this names
     /// the behaviour tag that also implies it, so a block that already says
@@ -59,6 +121,7 @@ pub const STATE_TAGS: &[StateTagDef] = &[
     StateTagDef {
         name: "axis",
         description: "Which way a rotating block (a log) lies.",
+        storage: Storage::Cell(AXIS),
         enabled_by: "rotation",
         implied: |def, _| def.rotation != Rotation::None,
         compatible: |def, _| {
@@ -71,6 +134,7 @@ pub const STATE_TAGS: &[StateTagDef] = &[
     StateTagDef {
         name: "waterlogged",
         description: "The fluid or ice sharing this block's cell: none, water, ice.",
+        storage: Storage::BlockId,
         enabled_by: "waterloggable",
         implied: |def, _| def.waterloggable,
         compatible: |def, _| {
@@ -83,6 +147,7 @@ pub const STATE_TAGS: &[StateTagDef] = &[
     StateTagDef {
         name: "level",
         description: "How far a fluid has flowed: source, 1 (next to a source) upward, or falling.",
+        storage: Storage::Cell(LEVEL),
         enabled_by: "fluid",
         implied: |def, freezes_into| def.fluid || freezes_into,
         compatible: |def, freezes_into| {
@@ -373,8 +438,7 @@ mod tests {
         let n = (CHUNK_SIZE * CHUNK_SIZE * WORLD_HEIGHT) as usize;
         let chunk = crate::world::Chunk {
             blocks: Some(vec![AIR; n]),
-            fluid_level: Some(vec![FLUID_SOURCE; n]),
-            axis: Some(vec![AXIS_Y; n]),
+            state: Some(vec![DEFAULT_STATE; n]),
             light: Some(vec![LightCell::DARK; n]),
             ..Default::default()
         };
@@ -558,5 +622,71 @@ mod enabling_tests {
             set_state(&mut map, &reg, &tables, tests::P, "waterlogged", "water"),
             Err(StateError::NotApplicable { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    fn cell_fields() -> Vec<(&'static str, Field)> {
+        STATE_TAGS
+            .iter()
+            .filter_map(|t| match t.storage {
+                Storage::Cell(f) => Some((t.name, f)),
+                Storage::BlockId => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tags_stored_in_the_cell_word_fit_it_and_never_overlap() {
+        let fields = cell_fields();
+        let mut used = 0u16;
+        for (name, f) in &fields {
+            assert!(f.bits > 0 && f.shift as u32 + f.bits as u32 <= 16, "{name} doesn't fit in 16 bits");
+            assert_eq!(used & f.mask(), 0, "{name} shares bits with another tag");
+            used |= f.mask();
+        }
+        assert!(!fields.is_empty());
+    }
+
+    #[test]
+    fn writing_one_field_leaves_the_others_alone() {
+        let word = pack_state(7, AXIS_X);
+        assert_eq!(LEVEL.get(word), 7);
+        assert_eq!(AXIS.get(word), AXIS_X as u16);
+        let w = LEVEL.set(word, FLUID_FALLING as u16);
+        assert_eq!((LEVEL.get(w), AXIS.get(w)), (FLUID_FALLING as u16, AXIS_X as u16));
+        let w = AXIS.set(w, AXIS_Z as u16);
+        assert_eq!((LEVEL.get(w), AXIS.get(w)), (FLUID_FALLING as u16, AXIS_Z as u16));
+        // A value too wide for its field is cut off rather than spilling over.
+        assert_eq!(AXIS.get(AXIS.set(0, 0b111)), 0b11);
+        assert_eq!(LEVEL.get(AXIS.set(0, 0b111)), 0);
+    }
+
+    #[test]
+    fn a_fresh_cell_is_a_source_on_the_default_axis() {
+        assert_eq!(LEVEL.get(DEFAULT_STATE) as u8, FLUID_SOURCE);
+        assert_eq!(AXIS.get(DEFAULT_STATE) as u8, AXIS_Y);
+    }
+
+    #[test]
+    fn a_cell_costs_no_more_than_it_did_as_two_arrays() {
+        // Fluid level (u8) + axis (u8) used to be two bytes a cell.
+        assert_eq!(std::mem::size_of::<u16>(), 2);
+    }
+
+    #[test]
+    fn changing_a_cells_axis_does_not_disturb_its_fluid_level_in_a_chunk() {
+        let (reg, tables, mut map) = tests::setup();
+        let p = tests::P;
+        map.set_block(p, reg.id("log"));
+        map.set_fluid_level_raw(p, 5);
+        set_state(&mut map, &reg, &tables, p, "axis", "z").unwrap();
+        assert_eq!(map.get_fluid_level(p), 5, "the level survived an axis change");
+        assert_eq!(map.get_axis(p), AXIS_Z);
+        map.set_fluid_level_raw(p, FLUID_FALLING);
+        assert_eq!(map.get_axis(p), AXIS_Z, "and the axis survived a level change");
     }
 }

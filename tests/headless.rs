@@ -978,7 +978,7 @@ fn chunks_unloaded_far_away_come_back_exactly_as_they_were() {
     let spawn = IVec2::ZERO;
     let capture = |app: &App| {
         let chunk = &app.world().resource::<ChunkMap>().chunks[&spawn];
-        (chunk.blocks.clone().unwrap(), chunk.fluid_level.clone().unwrap())
+        (chunk.blocks.clone().unwrap(), chunk.state.clone().unwrap())
     };
     let before = capture(&app);
     assert_eq!(before.0[craftmjne::config::block_index(

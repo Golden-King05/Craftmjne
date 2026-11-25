@@ -9,6 +9,7 @@
 //! chunks to exist (the mesher gets a 1-block padded shell for seamless
 //! culling and ambient occlusion across chunk borders).
 
+use crate::states::{pack_state, AXIS, LEVEL};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
@@ -99,19 +100,16 @@ fn forget_base_fluid(base_fluid: &mut Option<Vec<u64>>, idx: usize) {
 #[derive(Default)]
 pub struct Chunk {
     pub blocks: Option<Vec<BlockId>>,
-    /// Parallel to `blocks`; meaningful only where the corresponding block id
-    /// is a fluid (see `blocks::FLUID_SOURCE`/`FLUID_FALLING`). Always
-    /// `Some` whenever `blocks` is.
-    pub fluid_level: Option<Vec<u8>>,
-    /// Parallel to `blocks`; meaningful only where the corresponding block id
-    /// rotates (`blocks::Tables::rotates`). Always `Some` whenever `blocks`
-    /// is - same lifecycle as `fluid_level`. Unlike `fluid_level` (simulated,
-    /// re-derivable, never saved), this *is* player-chosen state and round-
-    /// trips through `BlockSetEvent`/`EditLog`/`save::BlockEdit`.
-    pub axis: Option<Vec<u8>>,
+    /// Parallel to `blocks`: every cell's **state word** (see `states.rs`'s
+    /// `Field`s). Holds the fluid level and the rotation axis today, each in
+    /// its own bits, and is only meaningful where the block id uses it (a
+    /// fluid's level, a rotating block's axis). Always `Some` whenever
+    /// `blocks` is. Read and written through `ChunkMap::get_fluid_level` /
+    /// `get_axis` and their setters, never by indexing the bits directly.
+    pub state: Option<Vec<u16>>,
     /// Parallel to `blocks`; the propagated colored block light and sky light
     /// for every cell (see `light.rs`). Always `Some` whenever `blocks` is -
-    /// same lifecycle as `fluid_level`/`axis`. Never saved: unlike fluid
+    /// same lifecycle as `state`. Never saved: unlike fluid
     /// spread, light is a pure function of the block grid, so loading a world
     /// recomputes it exactly rather than risking a different answer.
     pub light: Option<Vec<LightCell>>,
@@ -323,12 +321,12 @@ impl ChunkMap {
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         );
         let Some(chunk) = self.chunks.get_mut(&coord) else { return };
-        if let Some(levels) = chunk.fluid_level.as_mut() {
-            if levels[idx] != level {
+        if let Some(states) = chunk.state.as_mut() {
+            if LEVEL.get(states[idx]) != level as u16 {
                 forget_base_fluid(&mut chunk.base_fluid, idx);
                 chunk.touched = true;
             }
-            levels[idx] = level;
+            states[idx] = LEVEL.set(states[idx], level as u16);
         }
     }
 
@@ -345,8 +343,8 @@ impl ChunkMap {
         );
         self.chunks
             .get(&Self::chunk_coord(pos.x, pos.z))
-            .and_then(|c| c.axis.as_ref())
-            .map_or(crate::blocks::AXIS_Y, |a| a[idx])
+            .and_then(|c| c.state.as_ref())
+            .map_or(crate::blocks::AXIS_Y, |s| AXIS.get(s[idx]) as u8)
     }
 
     /// Marks a cell as changed without changing its block id: remeshes the
@@ -380,8 +378,8 @@ impl ChunkMap {
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         );
-        if let Some(axes) = self.chunks.get_mut(&coord).and_then(|c| c.axis.as_mut()) {
-            axes[idx] = axis;
+        if let Some(states) = self.chunks.get_mut(&coord).and_then(|c| c.state.as_mut()) {
+            states[idx] = AXIS.set(states[idx], axis as u16);
         }
     }
 
@@ -395,12 +393,12 @@ impl ChunkMap {
         let Some(chunk) = self.chunks.get(&Self::chunk_coord(pos.x, pos.z)) else {
             return FLUID_SOURCE;
         };
-        let Some(levels) = &chunk.fluid_level else { return FLUID_SOURCE };
-        levels[block_index(
+        let Some(states) = &chunk.state else { return FLUID_SOURCE };
+        LEVEL.get(states[block_index(
             pos.x.rem_euclid(CHUNK_SIZE) as usize,
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
-        )]
+        )]) as u8
     }
 
     /// Sets both a cell's block id and fluid level in one write, used by the
@@ -416,17 +414,17 @@ impl ChunkMap {
         let lx = pos.x.rem_euclid(CHUNK_SIZE);
         let lz = pos.z.rem_euclid(CHUNK_SIZE);
         let Some(chunk) = self.chunks.get_mut(&coord) else { return false };
-        let (Some(blocks), Some(levels)) = (chunk.blocks.as_mut(), chunk.fluid_level.as_mut())
+        let (Some(blocks), Some(states)) = (chunk.blocks.as_mut(), chunk.state.as_mut())
         else {
             return false;
         };
         let idx = block_index(lx as usize, pos.y as usize, lz as usize);
-        if blocks[idx] != id || levels[idx] != level {
+        if blocks[idx] != id || LEVEL.get(states[idx]) != level as u16 {
             forget_base_fluid(&mut chunk.base_fluid, idx);
             chunk.touched = true;
         }
         blocks[idx] = id;
-        levels[idx] = level;
+        states[idx] = LEVEL.set(states[idx], level as u16);
         chunk.version += 1;
         chunk.dirty = true;
 
@@ -475,16 +473,17 @@ impl ChunkMap {
                 let lx = px.rem_euclid(CHUNK_SIZE) as usize;
                 let chunk = &self.chunks[&IVec2::new(ncx, ncz)];
                 let src = chunk.blocks.as_ref().unwrap();
-                let src_fluid = chunk.fluid_level.as_ref().unwrap();
-                let src_axis = chunk.axis.as_ref().unwrap();
+                let src_state = chunk.state.as_ref().unwrap();
                 let src_light = chunk.light.as_ref().unwrap();
                 let src_base = block_index(lx, 0, lz);
                 let dst_base = padded_index(px, 0, pz);
                 padded.blocks[dst_base..dst_base + H].copy_from_slice(&src[src_base..src_base + H]);
-                padded.fluid[dst_base..dst_base + H]
-                    .copy_from_slice(&src_fluid[src_base..src_base + H]);
-                padded.axis[dst_base..dst_base + H]
-                    .copy_from_slice(&src_axis[src_base..src_base + H]);
+                // The mesher wants plain per-cell level and axis arrays, so
+                // unpack the state word's fields as the column is copied.
+                for (i, &word) in src_state[src_base..src_base + H].iter().enumerate() {
+                    padded.fluid[dst_base + i] = LEVEL.get(word) as u8;
+                    padded.axis[dst_base + i] = AXIS.get(word) as u8;
+                }
                 padded.light[dst_base..dst_base + H]
                     .copy_from_slice(&src_light[src_base..src_base + H]);
                 padded.blocks[dst_base - 1] = 1; // below the world: solid, culls bottom faces
@@ -1094,7 +1093,7 @@ fn write_save(
 
     let mut fluids = Vec::new();
     for (coord, chunk) in &map.chunks {
-        let (Some(blocks), Some(levels)) = (&chunk.blocks, &chunk.fluid_level) else { continue };
+        let (Some(blocks), Some(levels)) = (&chunk.blocks, &chunk.state) else { continue };
         if !chunk.touched {
             continue;
         }
@@ -1199,7 +1198,7 @@ impl CarriedState<'_, '_> {
 fn chunk_fluid_cells(
     coord: IVec2,
     blocks: &[BlockId],
-    levels: &[u8],
+    states: &[u16],
     base_fluid: Option<&[u64]>,
     registry: &BlockRegistry,
     tables: &Tables,
@@ -1210,7 +1209,8 @@ fn chunk_fluid_cells(
             for y in 0..H {
                 let idx = block_index(x, y, z);
                 let id = blocks[idx];
-                if !tables.holds_level(id, levels[idx]) {
+                let level = LEVEL.get(states[idx]) as u8;
+                if !tables.holds_level(id, level) {
                     continue;
                 }
                 if base_fluid.is_some_and(|bits| bits[idx / 64] >> (idx % 64) & 1 == 1) {
@@ -1221,7 +1221,7 @@ fn chunk_fluid_cells(
                     y: y as i32,
                     z: coord.y * CHUNK_SIZE + z as i32,
                     block: registry.def(id).id.clone(),
-                    level: levels[idx],
+                    level,
                 });
             }
         }
@@ -1485,8 +1485,7 @@ fn collect_gen_tasks(
         }
         chunk.base_fluid = Some(base_fluid);
         chunk.blocks = Some(generated.blocks);
-        chunk.fluid_level = Some(generated.fluid);
-        chunk.axis = Some(generated.axis);
+        chunk.state = Some(generated.fluid.iter().zip(&generated.axis).map(|(&f, &a)| pack_state(f, a)).collect());
         chunk.light = Some(generated.light);
         // Re-apply any saved edits for this chunk on top of the fresh terrain.
         if let Some(edits) = pending.0.remove(&gen_task.coord) {
@@ -1593,7 +1592,7 @@ fn unload_far_chunks(
         let chunk = map.chunks.remove(coord).unwrap();
         cache.0.remove(coord);
         // An untouched chunk's only fluid is what its snapshot restores.
-        let cells = match (chunk.touched, &chunk.blocks, &chunk.fluid_level) {
+        let cells = match (chunk.touched, &chunk.blocks, &chunk.state) {
             (true, Some(blocks), Some(levels)) => {
                 chunk_fluid_cells(*coord, blocks, levels, chunk.base_fluid.as_deref(), &registry, &tables.0)
             }
@@ -1757,12 +1756,13 @@ impl Plugin for WorldPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::states::DEFAULT_STATE;
     use crate::blocks::BlockRegistry;
 
     fn empty_chunk() -> Chunk {
         Chunk {
             blocks: Some(vec![AIR; CS * CS * H]),
-            fluid_level: Some(vec![FLUID_SOURCE; CS * CS * H]),
+            state: Some(vec![DEFAULT_STATE; CS * CS * H]),
             light: Some(vec![LightCell::DARK; CS * CS * H]),
             ..Chunk::default()
         }
@@ -2075,7 +2075,7 @@ mod tests {
         let cells = chunk_fluid_cells(
             IVec2::ZERO,
             chunk.blocks.as_ref().unwrap(),
-            chunk.fluid_level.as_ref().unwrap(),
+            chunk.state.as_ref().unwrap(),
             None,
             &reg,
             &tables,

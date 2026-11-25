@@ -63,7 +63,7 @@
 //!
 //! Light is a pure function of the block grid, so `save.rs` stores none of
 //! it - loading a world recomputes it exactly. That's a real difference from
-//! `Chunk::fluid_level`, which *is* saved (see CLAUDE.md): fluid spread is
+//! `Chunk::state`, which *is* saved (see CLAUDE.md): fluid spread is
 //! path-dependent, so re-deriving it on load could legitimately converge
 //! somewhere other than where the live simulation was. Light has a single
 //! well-defined fixpoint (per channel, the max over all paths from every

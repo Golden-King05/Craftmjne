@@ -928,7 +928,8 @@ session's accumulated block edits and current player pose back out.
 
 Any block with `fluid: true` (water today) spreads and dries up
 automatically — no fluid-specific code required. `world.rs` keeps a per-cell
-`fluid_level` byte alongside the block grid:
+fluid level (a field of the cell's state word, see
+[tags](#the-two-kinds-of-tags)) alongside the block grid:
 
 - **`0` (source)** — permanent, full height, never recomputed. Ocean water
   generated at sea level and any fluid block a player places both start here.
@@ -1188,11 +1189,16 @@ with a block that breaks that rule: a full cube can't be `waterlogged` ("nowhere
 for water to go"), only a full block can have an `axis`, and only a fluid (or
 what freezes from one) has a `level`. A misspelled state name is refused too.
 
-What isn't unified yet is *storage*: `axis` and `level` are still parallel
-per-chunk arrays and `waterlogged` is still a variant block id (`pebble@water`),
-each saved by its own path (edit log, fluid scan, the block id). The interface
-hides that, so moving them into one per-cell store later changes only
-`states.rs`.
+**Storage.** Every cell has one 16-bit *state word* (`Chunk::state`), the same
+two bytes it used to spend on a separate fluid-level array and axis array, so
+memory is unchanged. Each state tag stored there owns a run of bits declared in
+its table row (`level` takes 8, `axis` 2, so 6 bits are free: a new tag that
+fits costs no memory). One exception is deliberate: `waterlogged` *is* which
+block id the cell holds (`pebble@water`), because collision, light and meshing
+are all looked up by block id and would each have to become state-dependent to
+move it. On disk nothing changed, so older worlds still open: `axis` is saved
+through the edit log and `level` through the fluid scan, both reading and writing
+the word through its fields.
 
 ## Extending the framework
 

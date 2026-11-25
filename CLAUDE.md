@@ -2889,12 +2889,24 @@ etc.) instead of inventing a new approach:
   and wakes the fluid sim - a state change that skipped the event would look
   right and then silently not survive a reload (the headless test reloads, and
   goes red with the event removed).
-  **Honest limit:** only the *interface* is unified. `axis`/`level` are still
-  the parallel `Chunk::axis`/`fluid_level` arrays and `waterlogged` is still a
-  variant block id; each keeps its own persistence. Do not describe the
-  storage as unified. A new per-cell array is *not* the way to add a state
-  tag - add a row in `STATE_TAGS` first and decide storage by the earlier
-  "sparse-and-event-driven vs dense-and-continuous" rule.
+  **Storage is unified, with one stated exception.** `Chunk::state` is one
+  `u16` per cell (the two bytes `fluid_level: Vec<u8>` + `axis: Vec<u8>` took,
+  so no memory change); each tag's row has `storage: Storage::Cell(Field)`
+  (`LEVEL` = bits 0-7, `AXIS` = bits 8-9, 6 spare) or `Storage::BlockId`
+  (`waterlogged`: the value is which block id the cell holds, because light,
+  collision and the mesher are all per-id tables). **A new state tag goes in a
+  spare field of the word - never a new per-cell `Vec`** - and the accessors
+  (`get_fluid_level`, `get_axis`, `set_*_raw`) are the only code that touches
+  the bits. `DEFAULT_STATE` is what a fresh cell holds; `pack_state(level, axis)`
+  builds one from the generator's separate arrays (`GeneratedChunk` still
+  produces `fluid`/`axis` vectors; they're packed on install, and the mesher's
+  `PaddedChunk` still wants plain arrays, so `build_padded` unpacks per cell).
+  On-disk formats are deliberately unchanged (no `SAVE_FORMAT` bump): axis via
+  the edit log, level via the fluid scan. Moving *persistence* onto one path is
+  separate and would need that bump and a migration. Not measured: the
+  per-cell unpack in `build_padded` replaced two slice `copy_from_slice`s; the
+  headless streaming tests still pass but I did not time mesh preparation.
+  Break-tested: moving `AXIS` onto `LEVEL`'s bits turns four storage tests red.
   **Testing a table against the code it describes:** can't enumerate a serde
   struct's fields, so `every_listed_block_tag_is_a_field_the_block_loader_reads`
   probes each listed name with mistyped values (an unread key is silently

@@ -320,7 +320,7 @@ impl From<DropsFile> for Drops {
 }
 
 /// A fluid cell's stored level, meaningful only while that cell's block id is
-/// a fluid (see `Chunk::fluid_level` in `world.rs`). `0` is a permanent
+/// a fluid (see `Chunk::state` in `world.rs`). `0` is a permanent
 /// source (never dries, always full height); `1..=flow_distance` is a
 /// flowing cell that many blocks from its supply; `FLUID_FALLING` is a full
 /// -height column fed from directly above (a waterfall), which — unlike a
