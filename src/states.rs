@@ -116,6 +116,103 @@ pub const fn pack_state(level: u8, axis: u8) -> u16 {
     with_axis(with_level(0, level), axis)
 }
 
+/// The most bits one block's extended states may use in all. A cap, not a
+/// target: it bounds a single cell's table entry (and so the save file) so one
+/// block can't quietly cost kilobytes per placed instance.
+pub const MAX_EXTENDED_BITS: usize = 256;
+
+/// A run of bits inside an extended block's per-cell byte string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtField {
+    /// Bit offset from the start of the byte string.
+    pub shift: u16,
+    pub bits: u8,
+}
+
+/// An extended state's value in `bytes` (little-endian bit order). Bits past
+/// the end of a too-short string read as zero, i.e. the default.
+pub fn ext_get(bytes: &[u8], field: ExtField) -> u16 {
+    let mut value = 0u16;
+    for i in 0..field.bits as u16 {
+        let bit = field.shift + i;
+        let byte = bytes.get((bit / 8) as usize).copied().unwrap_or(0);
+        value |= (((byte >> (bit % 8)) & 1) as u16) << i;
+    }
+    value
+}
+
+/// Sets an extended state in `bytes` (which must be long enough).
+pub fn ext_set(bytes: &mut [u8], field: ExtField, value: u16) {
+    for i in 0..field.bits as u16 {
+        let bit = field.shift + i;
+        let mask = 1u8 << (bit % 8);
+        if (value >> i) & 1 == 1 {
+            bytes[(bit / 8) as usize] |= mask;
+        } else {
+            bytes[(bit / 8) as usize] &= !mask;
+        }
+    }
+}
+
+/// How many bits a state with `n` values needs: `ceil(log2(n))`.
+fn bits_for(n: usize) -> u8 {
+    (usize::BITS - (n - 1).leading_zeros()) as u8
+}
+
+/// Checks a block's own `state_defs` for the problems both storage tiers
+/// share (names, value counts). `Ok` means every state has a usable name and
+/// two or more distinct values.
+fn check_defs(block: &str, defs: &[crate::blocks::StateDef]) -> Result<(), String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for def in defs {
+        if def.name.is_empty() || !def.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!("block {block:?}: state name {:?} must be letters, digits and underscores", def.name));
+        }
+        if state_tag(&def.name).is_some() {
+            return Err(format!("block {block:?}: state {:?} is a built-in state tag's name", def.name));
+        }
+        if seen.contains(&def.name.as_str()) {
+            return Err(format!("block {block:?}: state {:?} is declared twice", def.name));
+        }
+        seen.push(&def.name);
+        if def.values.len() < 2 {
+            return Err(format!("block {block:?}: state {:?} needs at least two values", def.name));
+        }
+        if def.values.len() > 65_536 {
+            return Err(format!("block {block:?}: state {:?} has more than 65536 values", def.name));
+        }
+        let mut distinct = def.values.clone();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() != def.values.len() {
+            return Err(format!("block {block:?}: state {:?} lists a value twice", def.name));
+        }
+    }
+    Ok(())
+}
+
+/// Lays out a block's `state_defs` for *extended* storage: one after another
+/// from bit 0 of the cell's byte string. Returns each state's field and the
+/// byte string's length. Errors past [`MAX_EXTENDED_BITS`].
+pub fn allocate_extended(block: &str, defs: &[crate::blocks::StateDef]) -> Result<(Vec<ExtField>, usize), String> {
+    check_defs(block, defs)?;
+    let mut fields = Vec::new();
+    let mut next = 0usize;
+    for def in defs {
+        let bits = bits_for(def.values.len());
+        if next + bits as usize > MAX_EXTENDED_BITS {
+            return Err(format!(
+                "block {block:?}: its states need more than the {MAX_EXTENDED_BITS} bits extended storage allows \
+                 (state {:?} doesn't fit)",
+                def.name
+            ));
+        }
+        fields.push(ExtField { shift: next as u16, bits });
+        next += bits as usize;
+    }
+    Ok((fields, next.div_ceil(8)))
+}
+
 /// Lays out a block's own `state_defs` in the bits its built-in tags leave
 /// free: first fit, in declaration order, lowest bits first.
 ///
@@ -133,30 +230,10 @@ pub fn allocate_fields(block: &str, states: &[String], defs: &[crate::blocks::St
     if has("axis") {
         taken |= AXIS.mask();
     }
+    check_defs(block, defs)?;
     let mut fields = Vec::new();
-    let mut seen: Vec<&str> = Vec::new();
     for def in defs {
-        if def.name.is_empty() || !def.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(format!("block {block:?}: state name {:?} must be letters, digits and underscores", def.name));
-        }
-        if state_tag(&def.name).is_some() {
-            return Err(format!("block {block:?}: state {:?} is a built-in state tag's name", def.name));
-        }
-        if seen.contains(&def.name.as_str()) {
-            return Err(format!("block {block:?}: state {:?} is declared twice", def.name));
-        }
-        seen.push(&def.name);
-        let n = def.values.len();
-        if n < 2 {
-            return Err(format!("block {block:?}: state {:?} needs at least two values", def.name));
-        }
-        let mut distinct = def.values.clone();
-        distinct.sort();
-        distinct.dedup();
-        if distinct.len() != n {
-            return Err(format!("block {block:?}: state {:?} lists a value twice", def.name));
-        }
-        let bits = (usize::BITS - (n - 1).leading_zeros()) as u8; // ceil(log2(n))
+        let bits = bits_for(def.values.len());
         let slot = (0..=16u8.saturating_sub(bits)).find(|&shift| {
             let field = Field { shift, bits };
             taken & field.mask() == 0
@@ -165,7 +242,8 @@ pub fn allocate_fields(block: &str, states: &[String], defs: &[crate::blocks::St
             let free = 16 - taken.count_ones();
             return Err(format!(
                 "block {block:?}: its states need more bits than the {free} free in a cell's state word \
-                 (state {:?} needs {bits} more); give the block fewer or smaller states",
+                 (state {:?} needs {bits} more); give the block fewer or smaller states, or set \
+                 \"state_storage\": \"extended\"",
                 def.name
             ));
         };
@@ -314,8 +392,13 @@ pub fn read_states(map: &ChunkMap, registry: &BlockRegistry, tables: &Tables, po
     // Then whatever this block declared for itself.
     let word = map.state_word(pos);
     let def = registry.def(id);
-    for (state, field) in def.state_defs.iter().zip(&def.state_fields) {
-        let value = state.values.get(field.get(word) as usize).cloned().unwrap_or_else(|| "?".into());
+    let ext = map.extended_state(pos).unwrap_or(&[]);
+    for (i, state) in def.state_defs.iter().enumerate() {
+        let raw = match def.state_storage {
+            crate::blocks::StateStorage::Compact => def.state_fields[i].get(word),
+            crate::blocks::StateStorage::Extended => ext_get(ext, def.ext_fields[i]),
+        };
+        let value = state.values.get(raw as usize).cloned().unwrap_or_else(|| "?".into());
         states.push(CellState { name: state.name.clone(), value, allowed: state.values.clone() });
     }
     states
@@ -337,13 +420,24 @@ pub fn set_state(
     let id = map.get_block(pos);
     // A state the block declared itself?
     let block = registry.def(id);
-    if let Some((state, field)) = block.state_defs.iter().zip(&block.state_fields).find(|(s, _)| s.name == tag) {
+    if let Some(i) = block.state_defs.iter().position(|s| s.name == tag) {
+        let state = &block.state_defs[i];
         let value = value.to_lowercase();
         let Some(index) = state.values.iter().position(|v| v.to_lowercase() == value) else {
             return Err(StateError::BadValue { tag: tag.to_string(), value, allowed: state.values.clone() });
         };
-        let word = field.set(map.state_word(pos), index as u16);
-        map.set_state_word_raw(pos, word);
+        match block.state_storage {
+            crate::blocks::StateStorage::Compact => {
+                let word = block.state_fields[i].set(map.state_word(pos), index as u16);
+                map.set_state_word_raw(pos, word);
+            }
+            crate::blocks::StateStorage::Extended => {
+                let mut bytes = map.extended_state(pos).map_or_else(|| vec![0; block.ext_bytes], <[u8]>::to_vec);
+                bytes.resize(block.ext_bytes, 0);
+                ext_set(&mut bytes, block.ext_fields[i], index as u16);
+                map.set_extended_raw(pos, Some(bytes.into_boxed_slice()));
+            }
+        }
         return Ok(vec![BlockSetEvent { pos, id, prev: id }]);
     }
     let def = state_tag(tag).ok_or_else(|| StateError::UnknownTag(tag.to_string()))?;
@@ -946,7 +1040,7 @@ mod janitor_tests {
         const TOUCHES: &[&str] = &[
             "LEVEL.", "AXIS.", "level_of(", "with_level(", "axis_of(", "with_axis(", "state_word", "chunk.state",
             ".state.as_", "pack_state", "set_fluid_level_raw", "set_axis_raw", "get_fluid_level", "get_axis(",
-            "set_block_keep_level",
+            "set_block_keep_level", "extended_state", "set_extended_raw", "chunk.extended", ".extended.",
         ];
         let mut found: Vec<String> = std::fs::read_dir("src")
             .unwrap()
@@ -976,5 +1070,125 @@ mod janitor_tests {
         for file in &listed {
             assert!(doc.contains(&format!("`{file}`")), "{file} is listed but not described");
         }
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    use crate::blocks::{BlockFile, BlockRegistry, StateDef};
+
+    fn def(name: &str, n: usize) -> StateDef {
+        StateDef { name: name.into(), values: (0..n).map(|i| i.to_string()).collect() }
+    }
+
+    /// Ten 256-valued states: 80 bits, far more than the 16 a cell's word holds.
+    fn machine_json() -> String {
+        let defs: Vec<String> = (0..10).map(|i| format!("\"s{i}\": 256")).collect();
+        format!(r#"{{"id": "machine", "state_storage": "extended", "state_defs": {{{}}}}}"#, defs.join(", "))
+    }
+
+    fn registry_with(files: &[String]) -> (BlockRegistry, std::sync::Arc<Tables>) {
+        let mut reg = BlockRegistry::with_defaults();
+        for f in files {
+            reg.register(serde_json::from_str::<BlockFile>(f).unwrap().into_def());
+        }
+        reg.add_layered_variants();
+        let mut painters = crate::atlas::default_painters();
+        for name in reg.texture_names().collect::<Vec<_>>() {
+            painters.ensure_registered(&name);
+        }
+        let atlas = crate::atlas::build_atlas(&painters);
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        (reg, tables)
+    }
+
+    #[test]
+    fn bits_are_read_and_written_across_byte_boundaries() {
+        let mut bytes = [0u8; 4];
+        let a = ExtField { shift: 3, bits: 8 }; // straddles bytes 0 and 1
+        let b = ExtField { shift: 11, bits: 13 };
+        ext_set(&mut bytes, a, 0xA5);
+        ext_set(&mut bytes, b, 0x1ABC);
+        assert_eq!((ext_get(&bytes, a), ext_get(&bytes, b)), (0xA5, 0x1ABC));
+        ext_set(&mut bytes, a, 0);
+        assert_eq!((ext_get(&bytes, a), ext_get(&bytes, b)), (0, 0x1ABC), "neighbours untouched");
+        assert_eq!(ext_get(&[], a), 0, "a missing byte string reads as the defaults");
+    }
+
+    #[test]
+    fn extended_layout_runs_on_from_bit_zero_up_to_the_cap() {
+        let (fields, bytes) = allocate_extended("m", &[def("a", 2), def("b", 256), def("c", 5)]).unwrap();
+        assert_eq!(fields, vec![ExtField { shift: 0, bits: 1 }, ExtField { shift: 1, bits: 8 }, ExtField { shift: 9, bits: 3 }]);
+        assert_eq!(bytes, 2);
+        // 32 states of 256 values is exactly the 256-bit cap; one more is too many.
+        let ok: Vec<_> = (0..32).map(|i| def(&format!("s{i}"), 256)).collect();
+        assert_eq!(allocate_extended("m", &ok).unwrap().1, 32);
+        let too_many: Vec<_> = (0..33).map(|i| def(&format!("s{i}"), 256)).collect();
+        assert!(allocate_extended("m", &too_many).unwrap_err().contains("256 bits"));
+        assert!(allocate_extended("m", &[def("a", 70_000)]).unwrap_err().contains("65536"));
+    }
+
+    #[test]
+    fn a_compact_block_that_is_too_big_is_told_about_extended() {
+        let err = allocate_fields("b", &[], &[def("a", 256), def("b", 256), def("c", 2)]).unwrap_err();
+        assert!(err.contains("extended"), "{err}");
+    }
+
+    #[test]
+    fn an_extended_block_holds_far_more_than_sixteen_bits_and_only_while_not_default() {
+        let (reg, tables) = registry_with(&[machine_json()]);
+        let machine = reg.id("machine");
+        let (_, _, mut map) = tests::setup();
+        let p = tests::P;
+        map.set_block(p, machine);
+        assert!(map.extended_state(p).is_none(), "a fresh block has no table entry at all");
+        let read = |map: &ChunkMap| -> Vec<String> {
+            read_states(map, &reg, &tables, p).into_iter().map(|s| s.value).collect()
+        };
+        assert_eq!(read(&map), vec!["0"; 10]);
+        for i in 0..10 {
+            set_state(&mut map, &reg, &tables, p, &format!("s{i}"), &format!("{}", 200 + i)).unwrap();
+        }
+        assert_eq!(read(&map), (0..10).map(|i| format!("{}", 200 + i)).collect::<Vec<_>>(), "all 80 bits held");
+        assert_eq!(map.extended_state(p).unwrap().len(), 10);
+        assert_eq!(map.state_word(p), DEFAULT_STATE, "none of it is in the shared word");
+        // Back to every default: the entry goes away rather than sitting there as zeros.
+        for i in 0..10 {
+            set_state(&mut map, &reg, &tables, p, &format!("s{i}"), "0").unwrap();
+        }
+        assert!(map.extended_state(p).is_none());
+        assert!(map.chunks[&IVec2::ZERO].extended.is_empty());
+    }
+
+    #[test]
+    fn replacing_the_block_clears_its_extended_states_and_cells_are_independent() {
+        let (reg, tables) = registry_with(&[machine_json()]);
+        let (machine, stone) = (reg.id("machine"), reg.id("stone"));
+        let (_, _, mut map) = tests::setup();
+        let (a, b) = (tests::P, tests::P + IVec3::X * 2);
+        map.set_block(a, machine);
+        map.set_block(b, machine);
+        set_state(&mut map, &reg, &tables, a, "s3", "9").unwrap();
+        set_state(&mut map, &reg, &tables, b, "s3", "77").unwrap();
+        assert_eq!(read_states(&map, &reg, &tables, a)[3].value, "9");
+        assert_eq!(read_states(&map, &reg, &tables, b)[3].value, "77");
+        map.set_block(a, stone);
+        assert!(map.extended_state(a).is_none(), "nothing left for whatever is placed next");
+        assert_eq!(read_states(&map, &reg, &tables, b)[3].value, "77", "the other cell is untouched");
+        // Mining a waterlogged-style swap keeps only the level, not extended states.
+        map.set_block_keep_level(b, stone);
+        assert!(map.extended_state(b).is_none());
+    }
+
+    #[test]
+    fn a_waterloggable_extended_block_and_its_water_variant_share_a_layout() {
+        let (reg, _) = registry_with(&[
+            r#"{"id": "coil", "shape": "floor", "waterloggable": true, "state_storage": "extended", "state_defs": {"turns": 1000}}"#.to_string(),
+        ]);
+        let coil = reg.def(reg.id("coil"));
+        let wet = reg.def(reg.variant(reg.id("coil"), reg.id("water")).unwrap());
+        assert_eq!(coil.ext_fields, wet.ext_fields);
+        assert_eq!((coil.ext_bytes, wet.state_storage), (2, crate::blocks::StateStorage::Extended));
     }
 }

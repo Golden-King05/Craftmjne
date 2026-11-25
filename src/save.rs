@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 7;
+pub const SAVE_FORMAT: u32 = 8;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +108,9 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
         // a format-4 build would read a saved tool back as quality 0 and
         // write that over the real value.
+        // Step 7 -> 8 (extended block states) needs no rewrite: an old edit
+        // has no `ext`. Bumped because a format-7 build would load a world
+        // whose blocks carry extended states and write it back without them.
         // Step 6 -> 7 (an edit saves the cell's whole state word, not just its
         // axis) needs no rewrite: an old edit has no `state` and is read from
         // its `axis`. Bumped because a format-6 build would read only the axis
@@ -271,6 +274,11 @@ pub struct BlockEdit {
     /// knew `axis`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<u16>,
+    /// The cell's extended state bytes (`BlockDef::state_storage: extended`),
+    /// for the blocks that use them. Absent for everything else, and for any
+    /// world saved before format 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<Vec<u8>>,
 }
 
 /// One fluid cell's exact state, saved so a reload restores water (and any
@@ -733,7 +741,7 @@ mod tests {
                 health: 13.0,
                 air: 4.5,
             }),
-            edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0, state: None }],
+            edits: vec![BlockEdit { x: 1, y: 2, z: 3, block: "stone".into(), axis: 0, state: None, ext: None }],
             fluids: vec![FluidCell { x: 4, y: 5, z: 6, block: "water".into(), level: 2 }],
             time_of_day: 456.0,
             day_count: 12,

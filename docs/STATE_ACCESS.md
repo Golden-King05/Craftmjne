@@ -21,6 +21,12 @@ file *and* describe the new janitor below.
 
 <!-- janitor-files: src/interact.rs src/states.rs src/world.rs -->
 
+There are two tiers. **Compact** states live in the shared word. **Extended**
+states (a block sets `"state_storage": "extended"`) live in `Chunk::extended`, a
+per-chunk table of byte strings keyed by cell index: only blocks that ask for it,
+only while a state differs from its default. A block uses one tier for all its
+own `state_defs`; its built-in tags (`axis`, `level`) are still in the word.
+
 ## The rule
 
 > A janitor that reads or writes a vanilla field (`level`, `axis`) must be gated
@@ -41,8 +47,10 @@ file *and* describe the new janitor below.
 | `recompute_cell` + `fluid_rank` + the lateral/falling checks | read levels | `is_fluid_here` / the neighbour's fluid id |
 | `build_padded` | unpacks level and axis for **every** cell for the mesher | the mesher gates: axis by `tables.rotates[id]`, level by fluid / level-shaped id |
 | `chunk_fluid_cells` | the fluid save scan reads each cell's level | `Tables::holds_level(id, level)` |
-| `record_edits` | reads the cell's **whole word** into `EditLog` | runs on every `BlockSetEvent`, so any state change must send one |
-| `enter_world` / `collect_gen_tasks` | rebuild `EditLog`/`PendingEdits` from the save; install a generated chunk (`pack_state`); reapply saved edits (`set_state_word_raw`) and saved fluid (`set_fluid_level_raw`) | the saved edit's block; the saved fluid cell's block |
+| `record_edits` | reads the cell's **whole word** and its **extended bytes** into `EditLog` | runs on every `BlockSetEvent`, so any state change must send one |
+| `write_block` (inside `set_block`) | also **removes the cell's extended entry** | n/a - it is the clearing rule |
+| `extended_state`, `set_extended_raw` | read / set / clear a cell's extended bytes; all-zero bytes (the defaults) are stored as *no entry* | callers: `set_state`, edit reload |
+| `enter_world` / `collect_gen_tasks` | rebuild `EditLog`/`PendingEdits` from the save (word and `ext`); install a generated chunk (`pack_state`); reapply saved edits (`set_state_word_raw`, `set_extended_raw`) and saved fluid (`set_fluid_level_raw`) | the saved edit's block; the saved fluid cell's block |
 | `try_freeze_cell` | reads the level, then `set_block_keep_level` | fluid id |
 | `unload_far_chunks` | puts a chunk's `EditLog` entries back into `PendingEdits` | n/a |
 
@@ -59,8 +67,8 @@ file *and* describe the new janitor below.
 | janitor | does | gated by |
 |---|---|---|
 | `STATE_TAGS` rows (`axis_*`, `level_*`, `layer_*`) | read/write the built-in fields | `BlockDef::states` (`enabled`) |
-| `set_state` (a block's own state) | writes one field of the word | the block's `state_fields` |
-| `allocate_fields` | decides where a block's own states live | n/a - it *is* the layout |
+| `set_state` (a block's own state) | writes one field of the word, or of the extended bytes | the block's `state_storage`, `state_fields` / `ext_fields` |
+| `allocate_fields`, `allocate_extended` | decide where a block's own states live (compact: free bits; extended: one after another, up to `MAX_EXTENDED_BITS` = 256) | n/a - they *are* the layout |
 
 ### Anything that only calls `set_block`
 
@@ -71,11 +79,9 @@ field themselves.
 
 ## Not done yet (and where it would plug in)
 
-- **Extended storage** for a block that needs more than 16 bits: a sparse
-  per-chunk table keyed by cell, for only the blocks that ask for it. It would
-  add a janitor of its own (clear on `set_block`, save and load) and a new row
-  here.
-- **Mods declaring layouts.** `state_defs` already works from any block file,
-  and `finalize_states` already lays them out per block; a mod loader only has
-  to register its blocks before that runs. Anything a mod adds that reads the
-  word belongs in this list.
+- **Mods declaring layouts.** `state_defs` and `state_storage` already work from
+  any block file, and `finalize_states` already lays them out per block; a mod
+  loader only has to register its blocks before that runs. Anything a mod adds
+  that reads the word or the extended table belongs in this list.
+- **Anything that *uses* a state.** A state is data until something reads it:
+  a texture per value, a light level per value, a rule. None exist yet.

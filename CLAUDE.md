@@ -2974,3 +2974,23 @@ etc.) instead of inventing a new approach:
   before, 0 of 20 after). The test now retries the delete. I did not run the
   old commit to prove the race pre-dated the state-word change; the cause is
   in the test's own cleanup either way.
+- **Extended state storage is a sparse per-chunk table, and the default is
+  "no entry".** `BlockDef::state_storage` (`compact` default | `extended`)
+  picks the tier for a block's `state_defs`. Extended: `states::allocate_extended`
+  lays the states out one after another from bit 0 of the cell's byte string
+  (`ExtField` { bit offset, bits }, `ext_get`/`ext_set` handle byte-straddling
+  fields), capped at `MAX_EXTENDED_BITS` (256) so one block can't make a cell
+  cost kilobytes; each state is also capped at 65,536 values. `Chunk::extended`
+  is `HashMap<u32, Box<[u8]>>`; `set_extended_raw` stores *nothing* for all-zero
+  bytes (first value = default = zero), which is what keeps memory proportional
+  to non-default cells. `write_block` removes the entry on any block change
+  (guarded by `!is_empty()` so the common case costs no hash). Persistence rides
+  the edit: `EditLog`/`PendingEdits` hold `(BlockId, u16, Ext)`, `BlockEdit.ext`,
+  `SAVE_FORMAT` 8, reapplied after the word on load. A derived `block@layer`
+  variant copies its block's extended layout in `finalize_states` (same ordering
+  rule as the compact fields). Break-tested: dropping the clear in `write_block`
+  turns the replace test and the headless reload test red; recording no bytes in
+  `record_edits` turns the reload test red. Janitor additions are in
+  `docs/STATE_ACCESS.md`. Nothing *reads* a state yet; a texture or light per
+  state value is the obvious next consumer. Not measured: the table's real memory
+  or lookup cost at scale (the claim is structural: no entry, no cost).

@@ -1440,3 +1440,37 @@ fn a_cells_whole_state_word_survives_a_reload() {
     assert_eq!(app2.world().resource::<ChunkMap>().get_block(pos), stone);
     assert_eq!(app2.world().resource::<ChunkMap>().state_word(pos), word, "every bit came back");
 }
+
+/// A cell's extended state bytes are saved with its edit and come back after a
+/// reload, and replacing the block clears them (so a later save drops them).
+#[test]
+fn a_cells_extended_state_survives_a_reload_and_is_cleared_when_replaced() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 25, 2000));
+    let pos = open_air_run(&app, 4);
+    let (kept, replaced) = (pos, pos + IVec3::X * 2);
+    let stone = app.world().resource::<craftmjne::blocks::BlockRegistry>().id("stone");
+    let bytes: Box<[u8]> = vec![1, 0, 200, 3, 0, 0, 77].into_boxed_slice();
+    for p in [kept, replaced] {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        map.set_block(p, stone);
+        map.set_extended_raw(p, Some(bytes.clone()));
+        app.world_mut().send_event(BlockSetEvent { pos: p, id: stone, prev: craftmjne::blocks::AIR });
+    }
+    app.update();
+    // Replace one: its bytes must not follow it into the save.
+    let dirt = app.world().resource::<craftmjne::blocks::BlockRegistry>().id("dirt");
+    app.world_mut().resource_mut::<ChunkMap>().set_block(replaced, dirt);
+    app.world_mut().send_event(BlockSetEvent { pos: replaced, id: dirt, prev: stone });
+    app.update();
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(&mut app2, |a| a.world().resource::<ChunkMap>().is_loaded(kept), 2000));
+    let map = app2.world().resource::<ChunkMap>();
+    assert_eq!(map.extended_state(kept), Some(&bytes[..]), "every byte came back");
+    assert_eq!(map.get_block(replaced), dirt);
+    assert!(map.extended_state(replaced).is_none(), "replaced, so nothing carried over");
+}

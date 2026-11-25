@@ -103,6 +103,12 @@ pub struct Chunk {
     /// `blocks` is. Read and written through `ChunkMap::get_fluid_level` /
     /// `get_axis` and their setters, never by indexing the bits directly.
     pub state: Option<Vec<u16>>,
+    /// Extended states (`BlockDef::state_storage: extended`): cell index ->
+    /// that cell's byte string. Only cells whose block asked for it *and*
+    /// whose states differ from their defaults have an entry, so a world with
+    /// ten machines holds ten small entries however large it is. Cleared with
+    /// the cell's block (`write_block`); saved with its edit.
+    pub extended: HashMap<u32, Box<[u8]>>,
     /// Parallel to `blocks`; the propagated colored block light and sky light
     /// for every cell (see `light.rs`). Always `Some` whenever `blocks` is -
     /// same lifecycle as `state`. Never saved: unlike fluid
@@ -313,10 +319,15 @@ impl ChunkMap {
             return None;
         }
         blocks[idx] = id;
-        if clear_state {
-            if let Some(states) = chunk.state.as_mut() {
+        // `clear_state` is every caller but a continuing fluid; keep_level
+        // clears the extended entry too (it restores only the level after).
+        if let Some(states) = chunk.state.as_mut() {
+            if clear_state {
                 states[idx] = crate::states::DEFAULT_STATE;
             }
+        }
+        if !chunk.extended.is_empty() {
+            chunk.extended.remove(&(idx as u32));
         }
         forget_base_fluid(&mut chunk.base_fluid, idx);
         chunk.touched = true;
@@ -388,6 +399,53 @@ impl ChunkMap {
             forget_base_fluid(&mut chunk.base_fluid, idx);
         }
         states[idx] = word;
+        chunk.touched = true;
+        chunk.version += 1;
+        chunk.dirty = true;
+        self.touch_borders(coord, lx, lz);
+        self.needs_scan = true;
+    }
+
+    /// A cell's extended state bytes, if it has any set (`Chunk::extended`).
+    pub fn extended_state(&self, pos: IVec3) -> Option<&[u8]> {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return None;
+        }
+        let idx = block_index(
+            pos.x.rem_euclid(CHUNK_SIZE) as usize,
+            pos.y as usize,
+            pos.z.rem_euclid(CHUNK_SIZE) as usize,
+        );
+        self.chunks.get(&Self::chunk_coord(pos.x, pos.z))?.extended.get(&(idx as u32)).map(|b| &b[..])
+    }
+
+    /// Sets or clears (`None`, or all zero bytes, which is the default) a
+    /// cell's extended state. Remeshes and counts as touched if it changed.
+    /// No-op if the chunk isn't loaded.
+    pub fn set_extended_raw(&mut self, pos: IVec3, bytes: Option<Box<[u8]>>) {
+        if pos.y < 0 || pos.y >= WORLD_HEIGHT {
+            return;
+        }
+        let coord = Self::chunk_coord(pos.x, pos.z);
+        let (lx, lz) = (pos.x.rem_euclid(CHUNK_SIZE), pos.z.rem_euclid(CHUNK_SIZE));
+        let idx = block_index(lx as usize, pos.y as usize, lz as usize) as u32;
+        let Some(chunk) = self.chunks.get_mut(&coord) else { return };
+        let bytes = bytes.filter(|b| b.iter().any(|&x| x != 0));
+        let changed = match &bytes {
+            Some(b) => chunk.extended.get(&idx) != Some(b),
+            None => chunk.extended.contains_key(&idx),
+        };
+        if !changed {
+            return;
+        }
+        match bytes {
+            Some(b) => {
+                chunk.extended.insert(idx, b);
+            }
+            None => {
+                chunk.extended.remove(&idx);
+            }
+        }
         chunk.touched = true;
         chunk.version += 1;
         chunk.dirty = true;
@@ -604,14 +662,17 @@ struct MeshTask {
 /// save). Stores `(id, axis)` rather than just `id` so a rotated block's
 /// orientation survives a save/reload, not just its type.
 #[derive(Resource, Default)]
-pub struct EditLog(pub HashMap<IVec3, (BlockId, u16)>);
+pub struct EditLog(pub HashMap<IVec3, (BlockId, u16, Ext)>);
+
+/// A cell's extended state bytes, when it has any (`Chunk::extended`).
+pub type Ext = Option<Box<[u8]>>;
 
 /// Edits loaded from a save, grouped by chunk so `collect_gen_tasks` can
 /// apply them in O(1) right after a chunk finishes procedurally generating.
 /// Drained per-chunk as each one is applied - `EditLog` (above) is the
 /// resource that actually needs the complete picture for the whole session.
 #[derive(Resource, Default)]
-struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId, u16)>>);
+struct PendingEdits(HashMap<IVec2, Vec<(IVec3, BlockId, u16, Ext)>>);
 
 /// Saved fluid cells (`save::FluidCell`), grouped by chunk exactly like
 /// `PendingEdits` - reapplied verbatim (id *and* level, no simulation
@@ -955,8 +1016,8 @@ fn enter_world(
     if is_new_world {
         data.time_of_day = NEW_WORLD_START_TIME;
     }
-    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u16)>> = HashMap::new();
-    let mut edit_log: HashMap<IVec3, (BlockId, u16)> = HashMap::new();
+    let mut grouped: HashMap<IVec2, Vec<(IVec3, BlockId, u16, Ext)>> = HashMap::new();
+    let mut edit_log: HashMap<IVec3, (BlockId, u16, Ext)> = HashMap::new();
     for edit in &data.edits {
         // Unknown block names (e.g. from a mod no longer installed) are
         // skipped rather than failing the whole load.
@@ -966,10 +1027,11 @@ fn enter_world(
         // A format-7 edit carries the whole state word; an older one only
         // knew the rotation axis.
         let word = edit.state.unwrap_or_else(|| with_axis(0, edit.axis));
-        grouped.entry(coord).or_default().push((pos, id, word));
+        let ext: Ext = edit.ext.clone().map(Vec::into_boxed_slice);
+        grouped.entry(coord).or_default().push((pos, id, word, ext.clone()));
         // EditLog needs the complete picture (old + new) from the start, not
         // just what this session adds - see its doc comment for why.
-        edit_log.insert(pos, (id, word));
+        edit_log.insert(pos, (id, word, ext));
     }
     commands.insert_resource(PendingEdits(grouped));
     commands.insert_resource(EditLog(edit_log));
@@ -1040,7 +1102,7 @@ fn record_edits(mut events: EventReader<BlockSetEvent>, map: Res<ChunkMap>, mut 
         // The cell's whole state word as it is now (its axis, a mod block's
         // states, ...), read from the world rather than carried on the event,
         // so no sender can forget some of it.
-        log.0.insert(e.pos, (e.id, map.state_word(e.pos)));
+        log.0.insert(e.pos, (e.id, map.state_word(e.pos), map.extended_state(e.pos).map(|b| b.to_vec().into_boxed_slice())));
     }
 }
 
@@ -1153,13 +1215,14 @@ fn write_save(
     let edits = log
         .0
         .iter()
-        .map(|(pos, &(id, word))| BlockEdit {
+        .map(|(pos, (id, word, ext))| BlockEdit {
             x: pos.x,
             y: pos.y,
             z: pos.z,
-            block: registry.def(id).id.clone(),
+            block: registry.def(*id).id.clone(),
             axis: 0,
-            state: Some(word),
+            state: Some(*word),
+            ext: ext.as_ref().map(|b| b.to_vec()),
         })
         .collect();
 
@@ -1561,9 +1624,10 @@ fn collect_gen_tasks(
         chunk.light = Some(generated.light);
         // Re-apply any saved edits for this chunk on top of the fresh terrain.
         if let Some(edits) = pending.0.remove(&gen_task.coord) {
-            for (pos, id, word) in edits {
+            for (pos, id, word, ext) in edits {
                 map.set_block(pos, id);
                 map.set_state_word_raw(pos, word);
+                map.set_extended_raw(pos, ext);
             }
         }
         // Re-apply this chunk's exact saved fluid state - id *and* level,
@@ -1684,10 +1748,10 @@ fn unload_far_chunks(
         pending.0.remove(coord);
     }
     let gone: std::collections::HashSet<IVec2> = gone.into_iter().collect();
-    for (pos, &(id, word)) in &log.0 {
+    for (pos, (id, word, ext)) in &log.0 {
         let coord = ChunkMap::chunk_coord(pos.x, pos.z);
         if gone.contains(&coord) {
-            pending.0.entry(coord).or_default().push((*pos, id, word));
+            pending.0.entry(coord).or_default().push((*pos, *id, *word, ext.clone()));
         }
     }
     map.needs_scan = true;

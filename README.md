@@ -1208,8 +1208,22 @@ value names, the first value being the default.
 
 `/blockstate x y z charge 5` reads and sets them like any built-in tag, they're
 saved with the world, and breaking or replacing the block clears them. A block
-that needs more bits than are free is refused at startup with a message saying
-so (extended storage for those isn't built yet).
+that needs more bits than are free is refused at startup with a message that
+points at extended storage.
+
+**Extended storage.** Add `"state_storage": "extended"` and the block's states live
+in a per-chunk table instead of the shared word: up to 256 bits per block, enough
+for dozens of small states. Only cells of that block pay for it, and only while a
+state differs from its default (a freshly placed one has no entry; setting
+everything back to default removes it), so a world with ten machines stores ten
+small entries however big it is. Normal blocks never look in the table. It is
+saved with the cell's edit (`SAVE_FORMAT` 8) and cleared when the block is replaced.
+A block uses one tier for all its own states; `axis` and `level` stay in the word.
+
+```json
+{ "id": "machine", "state_storage": "extended",
+  "state_defs": { "fuel": 256, "heat": 256, "recipe": 256, "output": 256, "mode": ["idle", "run"] } }
+```
 
 `waterlogged` is the one tag *not* in the word: its value is which block id the
 cell holds (`pebble@water`), because collision, light and meshing are all looked

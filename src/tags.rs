@@ -82,6 +82,7 @@ pub const DEFINITION_TAGS: &[DefinitionTag] = &[
     tag("waterloggable", Block, World, "May share its cell with a fluid (state tag: waterlogged)."),
     tag("states", Block, World, "Which state tags a placed one has (axis, waterlogged, level). Behaviour tags imply theirs: rotation, waterloggable, fluid."),
     tag("state_defs", Block, World, "States this block declares for itself: a name and a value count (\"charge\": 8) or value names (\"mode\": [\"off\", \"on\"]). The first value is the default."),
+    tag("state_storage", Block, World, "compact (default): this block's state_defs share the cell's 16-bit word. extended: they live in a per-chunk table, for far more room."),
     tag("freezes_to", Block, World, "What this fluid becomes when it freezes."),
     tag("upper", Block, World, "A two-cell-tall block: the block placed above it."),
     tag("max_stack", Both, Mining, "How many fit in one slot."),

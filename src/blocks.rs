@@ -209,6 +209,20 @@ pub struct StateDef {
     pub values: Vec<String>,
 }
 
+/// Where a block's own `state_defs` are kept.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StateStorage {
+    /// In the cell's shared 16-bit state word, in the bits its built-in tags
+    /// leave free. No extra memory, but at most 16 bits in all.
+    #[default]
+    Compact,
+    /// In a per-chunk table keyed by cell, for this block's cells only and only
+    /// while a state differs from its default. Far more room (up to
+    /// `states::MAX_EXTENDED_BITS`), and a little more to read and write.
+    Extended,
+}
+
 /// How a `state_defs` entry is written: `"charge": 8` (values `0`..`7`) or
 /// `"mode": ["off", "on", "auto"]`.
 #[derive(Deserialize, Clone)]
@@ -858,6 +872,12 @@ pub struct BlockDef {
     /// Where each of `state_defs` lives in the state word - filled in by
     /// `BlockRegistry::finalize_states`, parallel to `state_defs`.
     pub state_fields: Vec<crate::states::Field>,
+    /// Compact (the shared word) or extended (a per-chunk table).
+    pub state_storage: StateStorage,
+    /// For `Extended`: where each of `state_defs` sits in the cell's byte
+    /// string, and how many bytes the whole thing takes. Empty / 0 otherwise.
+    pub ext_fields: Vec<crate::states::ExtField>,
+    pub ext_bytes: usize,
     /// What this fluid becomes when it freezes (`water` -> `ice`). A block
     /// named here is a "layer" every waterloggable block gets a variant for.
     pub freezes_to: Option<String>,
@@ -931,6 +951,9 @@ impl Default for BlockDef {
             states: Vec::new(),
             state_defs: Vec::new(),
             state_fields: Vec::new(),
+            state_storage: StateStorage::Compact,
+            ext_fields: Vec::new(),
+            ext_bytes: 0,
             freezes_to: None,
             layered: None,
         }
@@ -1004,6 +1027,9 @@ pub(crate) struct BlockFile {
     /// States this block declares for itself.
     #[serde(default)]
     state_defs: std::collections::BTreeMap<String, StateValuesFile>,
+    /// `compact` (default) or `extended`.
+    #[serde(default)]
+    state_storage: StateStorage,
     freezes_to: Option<String>,
     tool: Option<ToolKind>,
     #[serde(default)]
@@ -1121,6 +1147,9 @@ impl BlockFile {
                 })
                 .collect(),
             state_fields: Vec::new(),
+            state_storage: self.state_storage,
+            ext_fields: Vec::new(),
+            ext_bytes: 0,
             freezes_to: self.freezes_to,
             layered: None,
         }
@@ -1460,17 +1489,33 @@ impl BlockRegistry {
             // Fit this block's own states into the bits its built-in tags
             // leave free. Each block has its own layout: a cell holds one
             // block, so two blocks never compete for bits.
-            def.state_fields = crate::states::allocate_fields(&def.id, &def.states, &def.state_defs)
-                .unwrap_or_else(|why| panic!("{why}"));
+            match def.state_storage {
+                StateStorage::Compact => {
+                    def.state_fields = crate::states::allocate_fields(&def.id, &def.states, &def.state_defs)
+                        .unwrap_or_else(|why| panic!("{why}"));
+                }
+                StateStorage::Extended => {
+                    let (fields, bytes) = crate::states::allocate_extended(&def.id, &def.state_defs)
+                        .unwrap_or_else(|why| panic!("{why}"));
+                    def.ext_fields = fields;
+                    def.ext_bytes = bytes;
+                }
+            }
         }
         // A derived `block@layer` variant lays its states out exactly like its
         // block, so a cell can swap between the two (water arriving, leaving)
         // without moving any bits.
         for i in 1..self.defs.len() {
             if let Some(l) = self.defs[i].layered {
-                let (defs, fields) = (self.defs[l.block as usize].state_defs.clone(), self.defs[l.block as usize].state_fields.clone());
-                self.defs[i].state_defs = defs;
-                self.defs[i].state_fields = fields;
+                let base = &self.defs[l.block as usize];
+                let (defs, fields, storage, ext, bytes) =
+                    (base.state_defs.clone(), base.state_fields.clone(), base.state_storage, base.ext_fields.clone(), base.ext_bytes);
+                let variant = &mut self.defs[i];
+                variant.state_defs = defs;
+                variant.state_fields = fields;
+                variant.state_storage = storage;
+                variant.ext_fields = ext;
+                variant.ext_bytes = bytes;
             }
         }
     }
