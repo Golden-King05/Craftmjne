@@ -273,7 +273,7 @@ fn summon_handler(registry: &EntityRegistry, args: &[&str], ctx: &mut CommandCon
         return CommandOutcome::Usage(format!("Unknown entity \"{name}\". Try: {}", registry.ids().join(", ")));
     };
     let (pos, yaw) = summon_position(ctx.player_pos, ctx.player_yaw);
-    ctx.requests.spawns.push(SpawnEntity { kind, pos, yaw });
+    ctx.requests.spawns.push(SpawnEntity::at(kind, pos, yaw));
     CommandOutcome::Ok(format!("Summoned {}.", registry.defs[kind].name))
 }
 

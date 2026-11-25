@@ -178,6 +178,24 @@ pub struct SpawnEntity {
     pub kind: usize,
     pub pos: Vec3,
     pub yaw: f32,
+    /// `Some` for the model of a block (see [`BlockModel`]).
+    pub block_cell: Option<IVec3>,
+}
+
+impl SpawnEntity {
+    /// A free-standing entity.
+    pub fn at(kind: usize, pos: Vec3, yaw: f32) -> Self {
+        Self { kind, pos, yaw, block_cell: None }
+    }
+}
+
+/// The visible model of a block whose shape is `Shape::Model` (the training
+/// dummy), standing in the block's cell. It has no collision of its own (the
+/// blocks provide that), isn't saved (the blocks are) and is created and
+/// removed by `block_models.rs` as the blocks come and go.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BlockModel {
+    pub cell: IVec3,
 }
 
 /// Remove every entity (`/clearentities`).
@@ -240,12 +258,15 @@ fn spawn_entities(
             alpha_mode: AlphaMode::Mask(0.5),
             ..default()
         });
-        commands.spawn((
+        let mut entity = commands.spawn((
             WorldEntity { kind: ev.kind, pos: ev.pos, yaw: ev.yaw },
             Mesh3d(mesh),
             MeshMaterial3d(material),
             Transform::from_translation(ev.pos).with_rotation(Quat::from_rotation_y(ev.yaw)),
         ));
+        if let Some(cell) = ev.block_cell {
+            entity.insert(BlockModel { cell });
+        }
     }
 }
 
@@ -286,7 +307,7 @@ fn sync_entity_visuals(
 
 fn refresh_colliders(
     registry: Res<EntityRegistry>,
-    entities: Query<&WorldEntity>,
+    entities: Query<&WorldEntity, Without<BlockModel>>,
     mut colliders: ResMut<EntityColliders>,
 ) {
     colliders.0.clear();
@@ -296,7 +317,7 @@ fn refresh_colliders(
 }
 
 /// Removes every entity - `/clearentities`, and leaving a world.
-pub fn despawn_all(commands: &mut Commands, entities: &Query<Entity, With<WorldEntity>>) {
+pub fn despawn_all<F: bevy::ecs::query::QueryFilter>(commands: &mut Commands, entities: &Query<Entity, F>) {
     for e in entities.iter() {
         commands.entity(e).despawn();
     }
@@ -305,8 +326,9 @@ pub fn despawn_all(commands: &mut Commands, entities: &Query<Entity, With<WorldE
 fn clear_on_request(
     mut commands: Commands,
     mut events: EventReader<ClearEntities>,
-    entities: Query<Entity, With<WorldEntity>>,
+    entities: Query<Entity, (With<WorldEntity>, Without<BlockModel>)>,
 ) {
+    // Block models belong to their blocks, not to `/clearentities`.
     if events.read().count() > 0 {
         despawn_all(&mut commands, &entities);
     }
@@ -315,6 +337,10 @@ fn clear_on_request(
 fn despawn_on_exit(mut commands: Commands, entities: Query<Entity, With<WorldEntity>>) {
     despawn_all(&mut commands, &entities);
 }
+
+/// The entity systems (spawning, colliders, visuals), for others to order against.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntitySet;
 
 pub struct EntitiesPlugin;
 
@@ -330,6 +356,7 @@ impl Plugin for EntitiesPlugin {
                 Update,
                 (clear_on_request, spawn_entities, refresh_colliders, sync_entity_visuals)
                     .chain()
+                    .in_set(EntitySet)
                     .before(crate::player::PlayerSet)
                     .run_if(in_state(AppState::InGame)),
             );
@@ -411,7 +438,7 @@ mod tests {
     fn a_summoned_dummy_appears_collides_and_is_cleared() {
         let mut app = app();
         let kind = app.world().resource::<EntityRegistry>().by_name("training_dummy").unwrap();
-        app.world_mut().send_event(SpawnEntity { kind, pos: Vec3::new(5.5, 10.0, 5.5), yaw: 0.0 });
+        app.world_mut().send_event(SpawnEntity::at(kind, Vec3::new(5.5, 10.0, 5.5), 0.0));
         app.update();
         app.update();
         let count = app.world_mut().query::<&WorldEntity>().iter(app.world()).count();

@@ -706,6 +706,27 @@ pub fn default_painters() -> Painters {
         }
     });
 
+    // The training dummy's inventory icon: a little grey figure on a
+    // transparent background (its world model is drawn by `block_models.rs`).
+    p.register("training_dummy", |t, rng| {
+        let grey = |t: &mut TilePainter, x0: i32, y0: i32, x1: i32, y1: i32, base: f32, rng: &mut dyn FnMut() -> f32| {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    // Darker toward the right and bottom, like the model's face shading.
+                    let shade = 1.0 - 0.12 * (x - x0) as f32 / (x1 - x0 + 1) as f32 - 0.1 * (y - y0) as f32 / (y1 - y0 + 1) as f32;
+                    let v = base * shade + (rng() - 0.5) * 8.0;
+                    t.px(x, y, [v, v, v * 1.03]);
+                }
+            }
+        };
+        grey(t, 6, 1, 9, 4, 214.0, rng); // head
+        grey(t, 5, 5, 10, 9, 200.0, rng); // body
+        grey(t, 3, 5, 4, 9, 190.0, rng); // arms
+        grey(t, 11, 5, 12, 9, 190.0, rng);
+        grey(t, 5, 10, 7, 14, 176.0, rng); // legs
+        grey(t, 8, 10, 10, 14, 176.0, rng);
+    });
+
     // A straight, peeled stick: lighter and cleaner than a twig.
     p.register("stick", |t, rng| {
         for i in 2..15 {
@@ -851,7 +872,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 27 + DESTROY_STAGES);
+        assert_eq!(a.indices.len(), 28 + DESTROY_STAGES);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

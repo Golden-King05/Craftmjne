@@ -476,6 +476,11 @@ pub fn mesh_chunk_styled(
                     }
                 };
 
+                if tables.model[id as usize] {
+                    // Drawn by `block_models.rs`, not here.
+                    continue;
+                }
+
                 if tables.floor[id as usize] {
                     push_floor(&mut solid, padded, tables, [x as f32, y as f32, z as f32], cell, id);
                     continue;
@@ -1517,5 +1522,20 @@ mod tests {
         // all indices in range
         let n = mesh.solid.positions.len() as u32;
         assert!(mesh.solid.indices.iter().all(|&i| i < n));
+    }
+
+    #[test]
+    fn a_model_block_draws_nothing_but_does_not_hide_its_neighbours() {
+        let (reg, tables) = tables();
+        let (dummy, stone) = (reg.id("training_dummy"), reg.id("stone"));
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(4, 10, 4)] = dummy;
+        let alone = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        assert!(alone.solid.positions.is_empty() && alone.water.positions.is_empty(), "the model is drawn elsewhere");
+
+        // A stone block beside it still shows the face that touches the dummy.
+        padded.blocks[padded_index(5, 10, 4)] = stone;
+        let beside = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        assert_eq!(beside.solid.positions.len(), 6 * 4, "all six faces of the stone, including the one against the dummy");
     }
 }

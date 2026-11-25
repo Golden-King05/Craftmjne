@@ -30,7 +30,7 @@ use crate::item_registry::ItemRegistry;
 use crate::interact::Hotbar;
 use crate::crafting::KnownItems;
 use crate::inventory::{inventory_to_save, restore_inventory, HeldStack, Inventory};
-use crate::entities::{EntityRegistry, SpawnEntity, WorldEntity};
+use crate::entities::{BlockModel, EntityRegistry, SpawnEntity, WorldEntity};
 use crate::items::{DroppedItem, LoadedItems};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
@@ -908,7 +908,7 @@ fn enter_world(
         for saved in &data.entities {
             // A kind that no longer exists (a removed mod) is skipped.
             let Some(kind) = entity_registry.by_name(&saved.kind) else { continue };
-            spawn_entities.write(SpawnEntity { kind, pos: Vec3::new(saved.x, saved.y, saved.z), yaw: saved.yaw });
+            spawn_entities.write(SpawnEntity::at(kind, Vec3::new(saved.x, saved.y, saved.z), saved.yaw));
         }
     }
 
@@ -1117,7 +1117,7 @@ pub struct CarriedState<'w, 's> {
     known: Res<'w, KnownItems>,
     registry: Res<'w, ItemRegistry>,
     items: Query<'w, 's, &'static DroppedItem>,
-    entities: Query<'w, 's, &'static WorldEntity>,
+    entities: Query<'w, 's, &'static WorldEntity, Without<BlockModel>>,
     entity_registry: Option<Res<'w, EntityRegistry>>,
 }
 

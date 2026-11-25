@@ -356,6 +356,11 @@ pub enum Shape {
     /// something solid - and it breaks off, dropping itself, if that
     /// support is removed (`interact::pop_unsupported`).
     Floor,
+    /// Occupies its cell (and collides like a block) but the mesher draws
+    /// nothing for it: something else renders it - the training dummy's
+    /// player model (`block_models.rs`). It defaults to see-through, so the
+    /// neighbouring blocks' faces next to it still draw.
+    Model,
 }
 
 /// How much light a block emits, and what color. Blocks that aren't light
@@ -731,6 +736,15 @@ pub struct BlockDef {
     /// (dirt, gravel) takes only part, so even a great shovel needs real
     /// time to move a block of it.
     pub tool_response: f32,
+    /// Only mined while crouching (Shift held): a plain left click does
+    /// nothing to it, so that click stays free for something else (hitting
+    /// a dummy, later). Applies in Creative too.
+    pub requires_crouch: bool,
+    /// A block that stands two cells tall: the name of the block placed in
+    /// the cell above this one. Placing needs both cells free; breaking
+    /// either takes the other with it (and only one drop). See
+    /// `interact::tall_partner`.
+    pub upper: Option<String>,
     /// May hold a fluid (or the ice it freezes into) in the same cell as
     /// itself. See the module docs' `waterloggable` section.
     pub waterloggable: bool,
@@ -794,6 +808,8 @@ impl Default for BlockDef {
             tool: None,
             requires_tool: false,
             tool_response: 1.0,
+            requires_crouch: false,
+            upper: None,
             waterloggable: false,
             freezes_to: None,
             layered: None,
@@ -867,6 +883,9 @@ struct BlockFile {
     #[serde(default)]
     requires_tool: bool,
     tool_response: Option<f32>,
+    #[serde(default)]
+    requires_crouch: bool,
+    upper: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -900,7 +919,11 @@ impl BlockFile {
             id: self.id.clone(),
             name: self.name.unwrap_or_else(|| title_case(&self.id)),
             solid: self.solid.unwrap_or(solid),
-            transparency: self.transparent.unwrap_or(if floor { Transparency::Partial } else { Transparency::No }),
+            transparency: self.transparent.unwrap_or(if floor || self.shape == Shape::Model {
+                Transparency::Partial
+            } else {
+                Transparency::No
+            }),
             fluid: self.fluid,
             flow_distance: self.flow_distance,
             selectable: self.selectable.unwrap_or(selectable),
@@ -924,6 +947,8 @@ impl BlockFile {
             tool: self.tool,
             requires_tool: self.requires_tool,
             tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
+            requires_crouch: self.requires_crouch,
+            upper: self.upper,
             waterloggable: self.waterloggable,
             freezes_to: self.freezes_to,
             layered: None,
@@ -953,6 +978,15 @@ pub struct Tables {
     /// Lies flat on the ground (`Shape::Floor`): the mesher draws only a
     /// low top face.
     pub floor: Vec<bool>,
+    /// Drawn by something other than the mesher (`Shape::Model`).
+    pub model: Vec<bool>,
+    /// Only mined while crouching (`BlockDef::requires_crouch`).
+    pub requires_crouch: Vec<bool>,
+    /// For a two-cell-tall block's lower half, the block that goes above it
+    /// (`AIR` for anything else).
+    pub upper_of: Vec<BlockId>,
+    /// The reverse: for an upper half, the block that goes below it.
+    pub lower_of: Vec<BlockId>,
     /// Per-channel light emission (`BlockDef::light`, resolved by
     /// `LightSpec::emission`), `0..=light::MAX_LIGHT` each. `[0; 3]` for
     /// everything that isn't a light source, which `light.rs` treats as
@@ -1214,6 +1248,17 @@ impl BlockRegistry {
         self.def(id).layered.map_or(AIR, |l| if self.def(l.layer).fluid { l.layer } else { AIR })
     }
 
+    /// For the lower half of a two-cell-tall block, the block that stands on
+    /// top of it.
+    pub fn upper_half(&self, id: BlockId) -> Option<BlockId> {
+        self.def(id).upper.as_ref().and_then(|name| self.by_name(name).ok())
+    }
+
+    /// For the upper half of a two-cell-tall block, the block under it.
+    pub fn lower_half(&self, id: BlockId) -> Option<BlockId> {
+        (1..self.defs.len() as BlockId).find(|&lower| self.upper_half(lower) == Some(id))
+    }
+
     /// The `block@layer` id, if `block` is waterloggable and `layer` is a
     /// fluid or something one freezes into.
     pub fn variant(&self, block: BlockId, layer: BlockId) -> Option<BlockId> {
@@ -1306,6 +1351,10 @@ impl BlockRegistry {
             flow_distance: vec![0; n],
             rotates: vec![false; n],
             floor: vec![false; n],
+            model: vec![false; n],
+            requires_crouch: vec![false; n],
+            upper_of: vec![AIR; n],
+            lower_of: vec![AIR; n],
             light: vec![[0; 3]; n],
             // Air (id 0) is skipped by the loop below and must be clear, not
             // the `Default::default()` zero that would make it block light.
@@ -1334,6 +1383,15 @@ impl BlockRegistry {
             tables.flow_distance[id] = def.flow_distance.min(u8::MAX as u32) as u8;
             tables.rotates[id] = def.rotation != Rotation::None;
             tables.floor[id] = def.shape == Shape::Floor;
+            tables.model[id] = def.shape == Shape::Model;
+            tables.requires_crouch[id] = def.requires_crouch;
+            if let Some(upper) = &def.upper {
+                let up = self
+                    .by_name(upper)
+                    .unwrap_or_else(|_| panic!("block {:?}: its upper half {upper:?} is not a block", def.id));
+                tables.upper_of[id] = up;
+                tables.lower_of[up as usize] = id as BlockId;
+            }
             tables.light[id] = def.light.emission();
             if let Some(l) = def.layered {
                 tables.base_of[id] = l.block;
@@ -1865,5 +1923,37 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("odd.json"), r#"{ "id": "odd", "requires_tool": true }"#).unwrap();
         BlockRegistry::load_from_dir(&dir);
+    }
+
+    #[test]
+    fn the_training_dummy_is_a_two_cell_crouch_to_mine_model_block() {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let (lower, upper) = (reg.id("training_dummy"), reg.id("training_dummy_top"));
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        for id in [lower, upper] {
+            let def = reg.def(id);
+            assert_eq!(def.shape, Shape::Model);
+            assert!(def.solid && def.requires_crouch && def.breakable && def.hardness > 0.0);
+            assert!(tables.model[id as usize] && tables.requires_crouch[id as usize]);
+            assert!(!tables.opaque[id as usize], "its neighbours' faces must still draw");
+        }
+        assert_eq!(reg.upper_half(lower), Some(upper));
+        assert_eq!(reg.lower_half(upper), Some(lower));
+        assert_eq!((tables.upper_of[lower as usize], tables.lower_of[upper as usize]), (upper, lower));
+        // Only the lower half is an item; mining either gives that item.
+        assert!(reg.def(lower).item && !reg.def(upper).item);
+        assert_eq!(reg.def(lower).drops, Drops::Itself);
+        assert!(matches!(&reg.def(upper).drops, Drops::Item { item, count: 1, .. } if item == "training_dummy"));
+        assert_eq!(reg.upper_half(reg.id("stone")), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "upper half")]
+    fn an_upper_half_that_is_not_a_block_fails_at_startup() {
+        let mut reg = BlockRegistry::with_defaults();
+        reg.register(BlockDef { id: "tall".into(), upper: Some("nope".into()), ..BlockDef::default() });
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        reg.compile(&atlas.indices, atlas.tile_size);
     }
 }

@@ -509,13 +509,34 @@ they were, with air above.)
   water under a flowing top cell, the same thing the fluid sim makes under
   a ledge. In freezing biomes it's frozen solid.
 
-## Entities and the player model
+## The training dummy, entities and the player model
 
-`src/entities.rs`, `src/player_model.rs`. The first entity is the **training
-dummy**: the player model with a blank skin, standing where you summon it.
-`/summon training_dummy` puts one two blocks ahead of you, facing you;
-`/clearentities` removes them all. They're saved with the world. No animation,
-gravity, health or combat yet - it just stands there (and is solid).
+`src/block_models.rs`, `src/entities.rs`, `src/player_model.rs`.
+
+**The training dummy is a block** - really two, stacked: `training_dummy` and
+`training_dummy_top` (it stands two cells tall). So it collides, saves,
+relights, drops and breaks through the ordinary block systems, with nothing
+per-frame to simulate. It's an item you place like any block (right click; it
+needs the cell above free). Its look is the player model with a blank skin,
+drawn by a model entity that `block_models.rs` stands in the lower cell
+(recreated from the blocks, never saved, and always facing +Z since a block
+has no yaw).
+
+**Mining it takes Shift + left click.** A plain left click does nothing to it
+(that click is free for hitting it later). Hold Shift and it mines like
+anything else, over time - 10 seconds by hand in Survival (`hardness: 2.0`) -
+and drops the dummy item; Creative breaks it instantly while crouching.
+Breaking either half removes the other, with one drop.
+
+In block files that's `"shape": "model"` (the mesher draws nothing, and its
+neighbours' faces still draw), `"upper": "<block>"` (two cells tall) and
+`"requires_crouch": true`.
+
+**Entities** are the other way to do it, for things that shouldn't be locked
+to the grid: `/summon training_dummy` also stands a free-standing dummy
+entity two blocks ahead of you, facing you, solid, saved with the world;
+`/clearentities` removes those (not the block ones). They have no animation,
+gravity, health or combat yet.
 
 **The model** is the classic blocky layout: head 8x8x8, body 8x12x4, arms and
 legs 4x12x4 (in 1/16-block pixels, so 2 blocks tall and 1 across at scale 1),
@@ -775,6 +796,7 @@ src/
 ├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
 ├── knapping.rs  # knapping rules: stone, strikes, cracks, scoring, quality (pure)
 ├── knap_ui.rs   # the knapping screen
+├── block_models.rs # draws the model of Shape::Model blocks (the dummy) from the blocks
 ├── entities.rs  # entity definitions, summoning, collision boxes (the training dummy)
 ├── player_model.rs # the blocky player model: boxes, skin layout, mesh data
 ├── inventory.rs # InventoryPlugin: hotbar+storage, moving items, crafting panel, Creative's item list

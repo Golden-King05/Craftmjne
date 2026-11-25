@@ -102,7 +102,7 @@ fn reload_app(temp: &TempSaves) -> App {
 /// (chat, the inventory screen, input).
 fn add_gameplay(app: &mut App) {
     app.init_asset::<bevy::pbr::StandardMaterial>();
-    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin, craftmjne::entities::EntitiesPlugin));
+    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin, craftmjne::entities::EntitiesPlugin, craftmjne::block_models::BlockModelsPlugin));
     app.init_resource::<craftmjne::crafting::NearbyStations>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.init_resource::<craftmjne::chat::ChatState>();
@@ -1215,7 +1215,7 @@ fn a_training_dummy_survives_leaving_and_reentering_a_world() {
     let temp = temp_saves();
     let mut app = headless_app(&temp);
     let kind = app.world().resource::<EntityRegistry>().by_name("training_dummy").unwrap();
-    app.world_mut().send_event(SpawnEntity { kind, pos: Vec3::new(20.5, 33.0, -4.5), yaw: 1.25 });
+    app.world_mut().send_event(SpawnEntity::at(kind, Vec3::new(20.5, 33.0, -4.5), 1.25));
     app.update();
     app.update();
     assert_eq!(app.world_mut().query::<&WorldEntity>().iter(app.world()).count(), 1);
@@ -1232,4 +1232,59 @@ fn a_training_dummy_survives_leaving_and_reentering_a_world() {
     assert_eq!(found[0].kind, kind);
     assert_eq!(found[0].pos, Vec3::new(20.5, 33.0, -4.5));
     assert_eq!(found[0].yaw, 1.25);
+}
+
+/// The dummy is a pair of real blocks; its visible model is bookkeeping that
+/// follows them. Placing makes a model, breaking removes it, and after a
+/// leave-and-return the blocks (saved as edits) bring the model back.
+#[test]
+fn the_dummy_block_shows_its_model_and_it_follows_the_block_through_a_reload() {
+    use craftmjne::entities::BlockModel;
+    use craftmjne::world::BlockSetEvent;
+    let models = |app: &mut App| -> Vec<IVec3> { app.world_mut().query::<&BlockModel>().iter(app.world()).map(|m| m.cell).collect() };
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+
+    let (lower, upper, base) = {
+        let reg = app.world().resource::<craftmjne::blocks::BlockRegistry>();
+        let tables = app.world().resource::<craftmjne::blocks::BlockTables>().clone();
+        let y = app.world().resource::<ChunkMap>().surface_y(&tables.0, 8, 8).expect("spawn column");
+        (reg.id("training_dummy"), reg.id("training_dummy_top"), IVec3::new(8, y + 1, 8))
+    };
+    {
+        let mut map = app.world_mut().resource_mut::<ChunkMap>();
+        let prev_low = map.set_block(base, lower).unwrap();
+        let prev_up = map.set_block(base + IVec3::Y, upper).unwrap();
+        let mut events = app.world_mut().resource_mut::<Events<BlockSetEvent>>();
+        events.send(BlockSetEvent { pos: base, id: lower, prev: prev_low, axis: 0 });
+        events.send(BlockSetEvent { pos: base + IVec3::Y, id: upper, prev: prev_up, axis: 0 });
+    }
+    assert!(run_until(&mut app, |app| !models(app).is_empty(), 500), "a model appeared");
+    app.update();
+    app.update();
+    assert_eq!(models(&mut app), vec![base], "one model, in the lower cell, and the upper half has none");
+    let tf = app.world_mut().query::<(&BlockModel, &Transform)>().iter(app.world()).next().unwrap().1.translation;
+    assert_eq!(tf, Vec3::new(8.5, base.y as f32, 8.5));
+
+    // Leave and come back: the blocks are saved, the model is not.
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+    let mut app2 = reload_app(&temp);
+    assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+    assert!(run_until(&mut app2, |app| !models(app).is_empty(), 1000), "the model came back with its block");
+    app2.update();
+    app2.update();
+    assert_eq!(models(&mut app2), vec![base], "exactly one model after the reload");
+
+    // Break the lower half: the model goes.
+    {
+        let mut map = app2.world_mut().resource_mut::<ChunkMap>();
+        let prev = map.set_block(base, 0).unwrap();
+        app2.world_mut().resource_mut::<Events<BlockSetEvent>>().send(BlockSetEvent { pos: base, id: 0, prev, axis: 0 });
+    }
+    app2.update();
+    app2.update();
+    app2.update();
+    assert!(models(&mut app2).is_empty(), "no block, no model");
 }

@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use craftmjne::config::WorldSettings;
 use craftmjne::save::{GameMode, SaveStore};
 use craftmjne::state::{ActiveWorld, AppState};
-use craftmjne::{chat, commands, health, interact, entities, inventory, items, knap_ui, light, menu, player, render, sky, ui, world};
+use craftmjne::{block_models, chat, commands, health, interact, entities, inventory, items, knap_ui, light, menu, player, render, sky, ui, world};
 
 struct Args {
     seed: u32,
@@ -121,14 +121,14 @@ fn main() {
             interact::InteractPlugin,
             inventory::InventoryPlugin,
             knap_ui::KnapUiPlugin,
-            entities::EntitiesPlugin,
             items::ItemsPlugin,
             health::HealthPlugin,
             commands::CommandsPlugin,
             chat::ChatPlugin,
             ui::UiPlugin,
             menu::MenuPlugin,
-        ));
+        ))
+        .add_plugins((entities::EntitiesPlugin, block_models::BlockModelsPlugin));
 
     // CI / smoke mode: skip the menu, drop straight into a throwaway world,
     // let it stream in, save a screenshot, and exit. Run with:

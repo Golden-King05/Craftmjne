@@ -251,6 +251,54 @@ fn select_slot(
     }
 }
 
+/// When half of a two-cell-tall block (the training dummy) is broken, the
+/// other half goes too - without a drop of its own, since the half that was
+/// mined already dropped the item.
+fn break_partner(
+    map: &mut ChunkMap,
+    registry: &BlockRegistry,
+    pos: IVec3,
+    broken: BlockId,
+    events: &mut EventWriter<BlockSetEvent>,
+) {
+    if let Some((partner, _)) = partner_of(map, registry, pos, broken) {
+        if let Some(prev) = map.set_block(partner, AIR) {
+            events.write(BlockSetEvent { pos: partner, id: AIR, prev, axis: AXIS_Y });
+        }
+    }
+}
+
+/// The other half of a two-cell-tall block of which `broken` stood at
+/// `pos`: its cell and block, but only if that cell really still holds it.
+fn partner_of(map: &ChunkMap, registry: &BlockRegistry, pos: IVec3, broken: BlockId) -> Option<(IVec3, BlockId)> {
+    let (cell, block) = if let Some(upper) = registry.upper_half(broken) {
+        (pos + IVec3::Y, upper)
+    } else if let Some(lower) = registry.lower_half(broken) {
+        (pos - IVec3::Y, lower)
+    } else {
+        return None;
+    };
+    (map.get_block(cell) == block).then_some((cell, block))
+}
+
+/// Whether a block can be mined right now: breakable at all, and, for one
+/// that `requires_crouch` (the dummy), only while crouching.
+fn mineable(def: &crate::blocks::BlockDef, crouching: bool) -> bool {
+    def.breakable && (crouching || !def.requires_crouch)
+}
+
+/// Whether a block two cells tall (or an ordinary one, trivially) has room
+/// for its upper half above `place_pos`: free, or replaceable, and in the world.
+fn upper_fits(map: &ChunkMap, registry: &BlockRegistry, id: BlockId, place_pos: IVec3) -> bool {
+    registry.upper_half(id).is_none_or(|_| {
+        let above = place_pos + IVec3::Y;
+        above.y < WORLD_HEIGHT && {
+            let existing = map.get_block(above);
+            existing == AIR || registry.def(existing).replaceable
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn interact(
     time: Res<Time>,
@@ -313,14 +361,18 @@ fn interact(
 
     // Break (left click / hold). Creative is instant and repeats while
     // held; Survival mines for a while and drops what the block drops.
+    // A block that `requires_crouch` (the training dummy) ignores a plain
+    // click: hold Shift to mine it.
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let aimed = map.get_block(hit.pos);
-    let breakable = registry.def(aimed).breakable;
+    let breakable = mineable(registry.def(aimed), shift);
     if *mode == GameMode::Creative {
         if mouse.pressed(MouseButton::Left) && timers.break_t <= 0.0 {
             if breakable {
                 let after = registry.left_behind(aimed);
                 if let Some(prev) = map.set_block(hit.pos, after) {
                     block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
+                    break_partner(&mut map, registry, hit.pos, prev, &mut block_events);
                 }
             }
             timers.break_t = ACTION_REPEAT;
@@ -338,6 +390,7 @@ fn interact(
             let after = registry.left_behind(aimed);
             if let Some(prev) = map.set_block(hit.pos, after) {
                 block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev, axis: AXIS_Y });
+                break_partner(&mut map, registry, hit.pos, prev, &mut block_events);
                 timers.breaks = timers.breaks.wrapping_add(1);
                 if harvests(def, in_hand) {
                     if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
@@ -351,7 +404,6 @@ fn interact(
     // Place (right click / hold).
     // Right-clicking a crafting station opens it instead (`open_station`);
     // hold shift to place a block against one.
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let on_station = content.book.is_station(aimed) && !shift;
     if mouse.pressed(MouseButton::Right) && timers.place_t <= 0.0 && !on_station {
         let place_pos = hit.pos + hit.normal;
@@ -372,8 +424,19 @@ fn interact(
             // Something that lies on the ground needs ground under it.
             let unsupported = registry.def(id).shape == Shape::Floor
                 && !registry.def(map.get_block(place_pos - IVec3::Y)).solid;
-            if replaceable && !blocked && !unsupported {
+            // A block two cells tall needs the cell above free too.
+            let upper = registry.upper_half(id);
+            let upper_pos = place_pos + IVec3::Y;
+            let upper_ok = upper_fits(&map, registry, id, place_pos)
+                && (upper.is_none()
+                    || (!player.intersects_block(upper_pos) && !player.solids.iter().any(|b| b.overlaps_cell(upper_pos))));
+            if replaceable && !blocked && !unsupported && upper_ok {
                 if let Some(prev) = map.set_block(place_pos, id) {
+                    if let Some(upper) = upper {
+                        if let Some(upper_prev) = map.set_block(upper_pos, upper) {
+                            block_events.write(BlockSetEvent { pos: upper_pos, id: upper, prev: upper_prev, axis: AXIS_Y });
+                        }
+                    }
                     if registry.def(id).fluid && waterlogged.is_none() {
                         // A player-placed fluid always starts as a
                         // permanent source, not whatever level that cell's
@@ -717,5 +780,52 @@ mod tests {
         assert!(raycast_voxel(Vec3::splat(0.5), Vec3::X, 3.0, |c| c.x == 5).is_none());
         // starting inside a hit cell yields None (no face to place against)
         assert!(raycast_voxel(Vec3::splat(0.5), Vec3::X, 3.0, |_| true).is_none());
+    }
+
+    fn dummy_world() -> (ChunkMap, BlockRegistry) {
+        let reg = BlockRegistry::with_defaults();
+        let mut map = ChunkMap::default();
+        map.chunks.insert(
+            IVec2::ZERO,
+            crate::world::Chunk { blocks: Some(vec![0; crate::config::CS * crate::config::CS * crate::config::H]), ..Default::default() },
+        );
+        (map, reg)
+    }
+
+    #[test]
+    fn a_crouch_only_block_is_mined_only_while_crouching() {
+        let reg = BlockRegistry::with_defaults();
+        let dummy = reg.def(reg.id("training_dummy"));
+        assert!(!mineable(dummy, false), "a plain left click leaves it alone");
+        assert!(mineable(dummy, true));
+        assert!(mineable(reg.def(reg.id("stone")), false), "ordinary blocks don't care");
+        assert!(!mineable(reg.def(reg.id("bedrock")), true), "unbreakable stays unbreakable");
+    }
+
+    #[test]
+    fn breaking_either_half_of_the_dummy_finds_the_other() {
+        let (mut map, reg) = dummy_world();
+        let (lower, upper) = (reg.id("training_dummy"), reg.id("training_dummy_top"));
+        let base = IVec3::new(4, 10, 4);
+        map.set_block(base, lower);
+        map.set_block(base + IVec3::Y, upper);
+        assert_eq!(partner_of(&map, &reg, base, lower), Some((base + IVec3::Y, upper)));
+        assert_eq!(partner_of(&map, &reg, base + IVec3::Y, upper), Some((base, lower)));
+        // An ordinary block has no partner, and a half whose partner is gone finds nothing.
+        assert_eq!(partner_of(&map, &reg, base, reg.id("stone")), None);
+        map.set_block(base + IVec3::Y, AIR);
+        assert_eq!(partner_of(&map, &reg, base, lower), None);
+    }
+
+    #[test]
+    fn the_dummy_needs_the_cell_above_free() {
+        let (mut map, reg) = dummy_world();
+        let (lower, stone) = (reg.id("training_dummy"), reg.id("stone"));
+        let at = IVec3::new(4, 10, 4);
+        assert!(upper_fits(&map, &reg, lower, at));
+        map.set_block(at + IVec3::Y, stone);
+        assert!(!upper_fits(&map, &reg, lower, at), "a block overhead leaves no room");
+        assert!(upper_fits(&map, &reg, stone, at), "a one-cell block doesn't care");
+        assert!(!upper_fits(&map, &reg, lower, IVec3::new(4, WORLD_HEIGHT - 1, 4)), "nor does the top of the world");
     }
 }

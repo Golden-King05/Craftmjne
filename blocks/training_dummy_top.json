@@ -1,0 +1,11 @@
+{
+  "id": "training_dummy_top",
+  "name": "Training Dummy (upper half)",
+  "shape": "model",
+  "hardness": 2.0,
+  "requires_crouch": true,
+  "transmission": 1.0,
+  "item": false,
+  "drops": "training_dummy",
+  "textures": { "all": "training_dummy" }
+}

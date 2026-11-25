@@ -2720,3 +2720,36 @@ etc.) instead of inventing a new approach:
   - **Not done yet, on purpose:** gravity/physics for entities (a dummy
     summoned in mid-air floats), animation, a skin PNG override, slim arms,
     hit reactions. `/summon` places the dummy at the player's feet level.
+- **The dummy became a block pair, and the entity framework was kept as its
+  renderer.** The user wanted it "a block" you crouch-click to mine, taking
+  time and dropping an item; of the two readings offered (stay an entity but
+  mine like a block, or a real block) they chose the real block. So:
+  `training_dummy` + `training_dummy_top` are ordinary blocks (`Shape::Model`,
+  `upper`, `requires_crouch`), and `block_models.rs` stands the matching
+  `EntityDef` (same id) in the lower cell as a `WorldEntity` + `BlockModel`.
+  - **Two cells tall without special-casing the world:** `BlockDef::upper`
+    names the block above. Placing checks `interact::upper_fits` and writes
+    both cells; breaking either goes through `break_partner`, which removes
+    the other (checking it still holds the right block, `partner_of`) and
+    writes no drop. The upper half has `item: false` and drops the lower's
+    item, so mining either gives one dummy.
+  - **`requires_crouch` gates `interact::mineable`** (Shift, in Creative too),
+    not the block id.
+  - **Model entities are derived state.** `BlockModel` ones are excluded from
+    `EntityColliders`, from the save (`Without<BlockModel>`) and from
+    `/clearentities`; `sync_block_models` creates them from `BlockSetEvent`s and
+    from every `ChunkMeshedEvent` (which is how a chunk loading with a dummy in
+    it gets its model), and a half-second check drops any whose block is gone
+    or chunk unloaded. They can't be wrong for long and nothing needs saving.
+  - **A placeholder in `BlockModels` while the spawn event is in flight**
+    keeps a second look in the same frame from spawning a duplicate;
+    `attach_spawned` swaps in the real entity. The ordering is explicit
+    (`EntitySet`: sync before, attach after) because commands from
+    `spawn_entities` must be applied before `attach_spawned` can see them.
+  - **Not done:** the model always faces +Z (blocks have no yaw), so placing
+    it can't make it face you; `/summon` still makes the free entity version;
+    the upper half still shows the whole 2-cell outline when targeted.
+  - Tests that go red when the thing they guard is removed: the crouch gate,
+    the mesher skipping model blocks, and the reload (chunk-meshed) path.
+  - `Plugins` tuples top out at 15 members, so `main.rs` registers the
+    entity plugins in a second `add_plugins` call.

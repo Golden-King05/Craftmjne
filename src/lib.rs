@@ -4,6 +4,7 @@
 
 pub mod atlas;
 pub mod biome;
+pub mod block_models;
 pub mod blocks;
 pub mod chat;
 pub mod commands;
