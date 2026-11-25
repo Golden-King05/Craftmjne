@@ -1628,3 +1628,62 @@ fn two_mods_declaring_the_same_id_both_load_under_numbered_names_and_the_world_r
     let saved = store.load_meta(&slug).unwrap();
     assert_eq!(saved.mod_ids.get("first").map(String::as_str), Some("granite_pack_1"));
 }
+
+/// Turning a mod off and on again loses nothing: while it's off the blocks and items
+/// made with it are out of the world but still in the save, and they come back
+/// (the block in place, the items in the pack) when the mod does.
+#[test]
+fn turning_a_mod_off_and_on_loses_nothing_it_made() {
+    use craftmjne::mods::{create_world_with_mods, set_world_mods, ModSetup};
+    let temp = temp_saves();
+    let installed = install_test_mod(&temp.0, "gizmo");
+    let mut app = app_without_a_world(&temp, &installed);
+    let store = SaveStore::at(temp.0.clone());
+    let (slug, meta) = create_world_with_mods(&store, "Shelf", 7, GameMode::Survival, &ModSetup::Instance(vec!["gizmo".into()]), &installed).unwrap();
+
+    // With the mod on: build with its block and carry its item.
+    enter(&mut app, slug.clone(), meta);
+    assert!(run_until(&mut app, |a| a.world().resource::<ChunkMap>().stats().0 >= 25, 2000));
+    let pos = open_air_run(&app, 2);
+    let (block, item) = {
+        let blocks = app.world().resource::<BlockRegistry>();
+        let items = app.world().resource::<craftmjne::item_registry::ItemRegistry>();
+        (blocks.id("gizmo:gizmo_block"), items.id("gizmo:gizmo_block"))
+    };
+    app.world_mut().resource_mut::<ChunkMap>().set_block(pos, block);
+    app.world_mut().send_event(BlockSetEvent { pos, id: block, prev: craftmjne::blocks::AIR });
+    app.world_mut().resource_mut::<Hotbar>().slots[0] = ItemStack::new(item, 5);
+    app.update();
+    leave(&mut app);
+    assert!(store.load_data(&slug).edits.iter().any(|e| e.block == "gizmo:gizmo_block"));
+
+    // Turn it off and play: the block and item are gone from the world...
+    set_world_mods(&store, &slug, &installed, &[]).unwrap();
+    let meta = store.load_meta(&slug).unwrap();
+    enter(&mut app, slug.clone(), meta);
+    assert!(in_game(&app));
+    assert!(run_until(&mut app, |a| a.world().resource::<ChunkMap>().is_loaded(pos), 2000));
+    assert_ne!(app.world().resource::<ChunkMap>().get_block(pos), block, "no such block without the mod");
+    assert!(app.world().resource::<Hotbar>().slots[0].is_empty());
+    leave(&mut app);
+    // ...but not from the save.
+    let saved = store.load_data(&slug);
+    assert!(saved.edits.iter().any(|e| e.block == "gizmo:gizmo_block"), "the edit is still in the file");
+    assert!(saved.shelved_items.iter().any(|s| s.block == "gizmo:gizmo_block" && s.count == 5), "and so is the item");
+
+    // Turn it back on: both return.
+    set_world_mods(&store, &slug, &installed, &["gizmo".to_string()]).unwrap();
+    let meta = store.load_meta(&slug).unwrap();
+    enter(&mut app, slug.clone(), meta);
+    assert!(in_game(&app));
+    assert!(run_until(&mut app, |a| a.world().resource::<ChunkMap>().is_loaded(pos), 2000));
+    let block = app.world().resource::<BlockRegistry>().id("gizmo:gizmo_block");
+    assert_eq!(app.world().resource::<ChunkMap>().get_block(pos), block, "the block is back where it was");
+    let items = app.world().resource::<craftmjne::item_registry::ItemRegistry>();
+    let item = items.id("gizmo:gizmo_block");
+    let hotbar = app.world().resource::<Hotbar>();
+    let carried: u32 = hotbar.slots.iter().filter(|s| s.id == item).map(|s| s.count).sum();
+    assert_eq!(carried, 5, "the five items are back in the pack");
+    leave(&mut app);
+    assert!(store.load_data(&slug).shelved_items.is_empty(), "nothing is left on the shelf");
+}

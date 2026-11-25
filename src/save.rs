@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 8;
+pub const SAVE_FORMAT: u32 = 9;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +108,10 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
         // a format-4 build would read a saved tool back as quality 0 and
         // write that over the real value.
+        // Step 8 -> 9 (shelved items and, with them, saves that keep entries for
+        // mods that are off) needs no rewrite: a format-8 world has none. Bumped
+        // because a format-8 build would load a world with shelved entries and write
+        // it back without them, which is exactly the data loss the shelf prevents.
         // Step 7 -> 8 (extended block states) needs no rewrite: an old edit
         // has no `ext`. Bumped because a format-7 build would load a world
         // whose blocks carry extended states and write it back without them.
@@ -363,6 +367,10 @@ pub struct WorldData {
     /// Entities standing in the world (`entities::WorldEntity`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<EntitySave>,
+    /// Inventory stacks of items the game couldn't read when this was saved (a
+    /// mod that was off), kept so they're not lost. See `shelf.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shelved_items: Vec<SlotSave>,
 }
 
 /// An entity in the world, by its definition's id (so a save survives the
@@ -803,6 +811,7 @@ mod tests {
             items: vec![item.clone()],
             known_items: vec!["log".into(), "twig".into()],
             entities: vec![EntitySave { kind: "training_dummy".into(), x: 1.5, y: 2.0, z: 3.5, yaw: 0.25 }],
+            shelved_items: Vec::new(),
         };
         store.save_data(&slug, &data).unwrap();
 

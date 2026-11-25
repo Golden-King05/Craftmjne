@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::config::WorldSettings;
-use crate::mods::{create_world_with_mods, resolve_world_mods, scan_mods, InstalledMods, MenuNotice, ModSetup};
+use crate::mods::{create_world_with_mods, resolve_world_mods, scan_mods, set_world_mods, InstalledMods, MenuNotice, ModSetup};
 use crate::save::{GameMode, GraphicsSettings, ModStorage, SaveStore, WorldMeta};
 use crate::state::{ActiveWorld, AppState, PauseState};
 
@@ -43,6 +43,9 @@ enum MenuButton {
     BranchFrom(String),
     /// Settings: where newly created worlds keep their mods.
     ToggleDefaultModStorage,
+    /// From the worlds list: change which mods an existing world uses.
+    EditMods(String),
+    ApplyEditMods,
     Resume,
     QuitToMenu,
 }
@@ -59,6 +62,8 @@ enum WorldsScreenMode {
     #[default]
     List,
     Create,
+    /// Changing the mods of an existing world (`CreateWorldForm::editing`).
+    EditMods,
 }
 
 #[derive(Resource, Default)]
@@ -72,6 +77,8 @@ struct CreateWorldForm {
     mod_storage: ModStorage,
     /// Share another world's mods instead (its slug).
     branch_of: Option<String>,
+    /// The world whose mods are being edited (`WorldsScreenMode::EditMods`).
+    editing: Option<String>,
 }
 
 #[derive(Component)]
@@ -236,6 +243,39 @@ fn mode_label(mode: GameMode) -> &'static str {
     }
 }
 
+/// The mods to offer when changing a world's mods: (folder, label, ticked). Every
+/// installed mod; for an in-world world also the ones it holds (on or switched off);
+/// and any mod the world names that can't be found, shown as missing so it can be
+/// unticked (which is how a world that won't open for want of a mod is fixed).
+fn edit_candidates(
+    store: &SaveStore,
+    slug: &str,
+    meta: &WorldMeta,
+    installed: &std::path::Path,
+) -> Vec<(String, String, bool)> {
+    let mut found: Vec<crate::mods::ModInfo> = scan_mods(installed);
+    if meta.mod_storage == ModStorage::World {
+        for dir in [store.world_mods_dir(slug), crate::mods::disabled_mods_dir(store, slug)] {
+            for m in scan_mods(&dir) {
+                if !found.iter().any(|f| f.folder == m.folder) {
+                    found.push(m);
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.folder.cmp(&b.folder));
+    let mut out: Vec<(String, String, bool)> = found
+        .iter()
+        .map(|m| (m.folder.clone(), format!("{} {}", m.name, m.version).trim().to_string(), meta.mods.contains(&m.folder)))
+        .collect();
+    for folder in &meta.mods {
+        if !found.iter().any(|m| &m.folder == folder) {
+            out.push((folder.clone(), format!("{folder} (missing)"), true));
+        }
+    }
+    out
+}
+
 /// What a world's mod setup looks like in the list, e.g. "2 mods in this world".
 fn mods_summary(meta: &WorldMeta) -> Option<String> {
     if let Some(host) = &meta.branch_of {
@@ -332,9 +372,14 @@ fn rebuild_worlds_content(
                         resolve_world_mods(&store, slug, meta, &installed.0).err().map(|e| e.message())
                     };
                     let can_branch = meta.mod_storage == ModStorage::World && meta.branch_of.is_none() && blocked.is_none();
+                    // A world with a missing mod can still have its mods changed - that is
+                    // how it's fixed. One from a newer version can't be touched at all.
+                    let too_new = matches!(crate::save::compatibility(meta.format), crate::save::SaveCompatibility::TooNew { .. });
+                    let can_edit = meta.branch_of.is_none() && !too_new;
+                    let side = (can_branch as u32 + can_edit as u32) as f32 * 70.0;
                     p.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|line| {
                         let row_node = Node {
-                            width: Val::Px(if can_branch { 290.0 } else { 360.0 }),
+                            width: Val::Px(360.0 - side),
                             padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
                             flex_direction: FlexDirection::Column,
                             ..default()
@@ -370,10 +415,10 @@ fn rebuild_worlds_content(
                                 Node { width: Val::Px(260.0), ..default() },
                             ));
                         });
-                        if can_branch {
+                        let small = |line: &mut ChildSpawnerCommands, label: &str, action: MenuButton| {
                             line.spawn((
                                 Button,
-                                MenuButton::BranchFrom(slug.clone()),
+                                action,
                                 Node {
                                     width: Val::Px(64.0),
                                     align_items: AlignItems::Center,
@@ -383,13 +428,54 @@ fn rebuild_worlds_content(
                                 BackgroundColor(BUTTON_IDLE),
                             ))
                             .with_children(|b| {
-                                b.spawn((Text::new("Branch"), TextFont { font_size: 13.0, ..default() }, TextColor(Color::WHITE)));
+                                b.spawn((Text::new(label.to_string()), TextFont { font_size: 13.0, ..default() }, TextColor(Color::WHITE)));
                             });
+                        };
+                        if can_edit {
+                            small(line, "Mods", MenuButton::EditMods(slug.clone()));
+                        }
+                        if can_branch {
+                            small(line, "Branch", MenuButton::BranchFrom(slug.clone()));
                         }
                     });
                 }
                 spawn_button(p, "Create World", MenuButton::ShowCreateForm);
                 spawn_button(p, "Back", MenuButton::BackToMainMenu);
+            });
+        }
+        WorldsScreenMode::EditMods => {
+            let editing = form.editing.clone().unwrap_or_default();
+            let meta = store.load_meta(&editing).ok();
+            let candidates = meta.as_ref().map(|m| edit_candidates(&store, &editing, m, &installed.0)).unwrap_or_default();
+            let storage = meta.as_ref().map_or(ModStorage::Instance, |m| m.mod_storage);
+            commands.entity(content).with_children(|p| {
+                p.spawn((
+                    Text::new(format!("Mods for {}", meta.as_ref().map_or("this world", |m| m.name.as_str()))),
+                    TextFont { font_size: 18.0, ..default() },
+                    TextColor(Color::WHITE),
+                ));
+                dim_text(
+                    p,
+                    match storage {
+                        ModStorage::Instance => "These run from the game's mods folder.",
+                        ModStorage::World => "Turning one off puts it aside in this world; nothing is deleted.",
+                    },
+                    12.0,
+                );
+                dim_text(p, "Anything made with a mod you turn off stays in the world's save and comes back when you turn it on again.", 12.0);
+                if candidates.is_empty() {
+                    dim_text(p, format!("No mods installed. Put mod folders in {}", installed.0.display()), 12.0);
+                }
+                p.spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(4.0), margin: UiRect::bottom(Val::Px(8.0)), ..default() })
+                    .with_children(|list| {
+                        for (folder, label, _) in &candidates {
+                            let on = form.chosen_mods.contains(folder);
+                            let text = format!("[{}] {}", if on { "x" } else { " " }, label);
+                            spawn_choice_button(list, &text, MenuButton::ToggleMod(folder.clone()), on, 320.0);
+                        }
+                    });
+                spawn_button(p, "Apply", MenuButton::ApplyEditMods);
+                spawn_button(p, "Cancel", MenuButton::CancelCreate);
             });
         }
         WorldsScreenMode::Create => {
@@ -812,6 +898,22 @@ fn handle_menu_buttons(
                 form.branch_of = Some(host);
                 *mode = WorldsScreenMode::Create;
             }
+            MenuButton::EditMods(slug) => {
+                if let Ok(meta) = store.load_meta(&slug) {
+                    form.chosen_mods = meta.mods.clone();
+                    form.editing = Some(slug);
+                    *mode = WorldsScreenMode::EditMods;
+                }
+            }
+            MenuButton::ApplyEditMods => {
+                if let Some(slug) = form.editing.take() {
+                    notice.0 = Some(match set_world_mods(&store, &slug, &installed.0, &form.chosen_mods) {
+                        Ok(_) => "Mods updated.".to_string(),
+                        Err(err) => format!("Couldn't change the mods: {err}"),
+                    });
+                }
+                *mode = WorldsScreenMode::List;
+            }
             MenuButton::ToggleDefaultModStorage => {
                 let mut saved = store.load_graphics_settings();
                 saved.mod_storage = match saved.mod_storage {
@@ -947,5 +1049,58 @@ mod tests {
     fn the_storage_setting_label_names_the_current_choice() {
         assert!(mod_storage_label(ModStorage::Instance).contains("game folder"));
         assert!(mod_storage_label(ModStorage::World).contains("in the world"));
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "craftmjne-menu-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_mod(dir: &std::path::Path, folder: &str) {
+        std::fs::create_dir_all(dir.join(folder)).unwrap();
+        std::fs::write(dir.join(folder).join(crate::mods::MANIFEST), format!(r#"{{"id": "{folder}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn the_mod_list_for_editing_a_world_shows_installed_ones_and_flags_a_missing_one() {
+        let root = scratch("edit");
+        let installed = root.join("installed");
+        make_mod(&installed, "a");
+        make_mod(&installed, "b");
+        let store = SaveStore::at(root.join("data"));
+        let mut meta = meta(ModStorage::Instance, &["a", "ghost"], None);
+        meta.mods = vec!["a".into(), "ghost".into()];
+        let list = edit_candidates(&store, "w", &meta, &installed);
+        assert_eq!(
+            list,
+            vec![
+                ("a".to_string(), "a".to_string(), true),
+                ("b".to_string(), "b".to_string(), false),
+                ("ghost".to_string(), "ghost (missing)".to_string(), true),
+            ],
+            "a missing mod is listed, ticked, so it can be unticked to fix the world"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_in_world_worlds_list_also_offers_the_mods_it_holds_on_or_off() {
+        let root = scratch("edit-world");
+        let installed = root.join("installed");
+        make_mod(&installed, "a");
+        let store = SaveStore::at(root.join("data"));
+        make_mod(&store.world_mods_dir("w"), "kept");
+        make_mod(&crate::mods::disabled_mods_dir(&store, "w"), "aside");
+        let meta = meta(ModStorage::World, &["kept"], None);
+        let folders: Vec<(String, bool)> =
+            edit_candidates(&store, "w", &meta, &installed).into_iter().map(|(f, _, on)| (f, on)).collect();
+        assert_eq!(folders, vec![("a".to_string(), false), ("aside".to_string(), false), ("kept".to_string(), true)]);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

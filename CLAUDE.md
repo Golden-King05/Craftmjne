@@ -3085,3 +3085,30 @@ etc.) instead of inventing a new approach:
   source for every `find_data_dir("x")` and fails if either workflow doesn't `cp -r x`
   (break-tested by deleting the `tiers` line). Add the folder to the workflows whenever
   you add a new `find_data_dir`.
+- **Turning a mod off must not destroy what it made: the shelf.** The old
+  `enter_world` skipped any block/item name that didn't resolve, so the *next save*
+  no longer contained it - toggling a mod would have silently deleted everything
+  made with it. `shelf.rs`: `split_unknown(&mut WorldData, ...)` removes unresolvable
+  entries (edits, fluid cells, dropped items, known items, inventory/cursor stacks)
+  from the loaded data *before anything reads it* and returns them as a `Shelf`
+  resource; `merge_into` writes them back into every save (called in `write_save`;
+  the shelf rides in `CarriedState` because `autosave`/`exit_world` are at the
+  16-parameter limit). Pure functions, so the rules are unit-tested without an app.
+  Rules: live wins (a shelved edit/fluid at a position the player has since built
+  on is dropped), and inventory stacks can't keep their slot (it may be occupied
+  now) so they go in `WorldData::shelved_items` and, once their item resolves again,
+  `enter_world` hands them over via `give` with the overflow lying by the player.
+  `SAVE_FORMAT` 9 (an older build would write a shelved save back without the
+  shelf). **Namespaces are kept for mods that are off** (`assign_namespaces` no
+  longer forgets an absent folder) or a re-enabled `x_2` mod could come back as
+  `x_1` and its shelved blocks would point at the wrong mod.
+  `mods::set_world_mods` is the change operation: instance worlds just record the
+  list; in-world worlds *move* a turned-off mod to `mods-disabled/` (a hand-dropped
+  copy may be the only one, so nothing is deleted) and bring it back from there or
+  copy it from the game's folder; everything is validated before anything is moved;
+  a branch refuses. The menu's per-world **Mods** button uses `edit_candidates`
+  (installed + the world's own + a ticked "(missing)" entry for a mod that's gone, which
+  is how a world that won't open is fixed). Break-tested end to end:
+  `turning_a_mod_off_and_on_loses_nothing_it_made` goes red with `merge_into` removed.
+  Not covered: entities (mods can't add any) and chunk snapshots (they only ever hold
+  generated terrain, which never contains a mod's blocks).

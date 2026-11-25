@@ -303,6 +303,7 @@ pub fn build_atlas_in(painters: &Painters, dirs: &[crate::overlay::KindDir]) -> 
 /// real `textures/blocks/` (see `atlas_uses_a_larger_custom_texture_as_
 /// the_whole_atlas_resolution` below). `build_atlas` itself, used
 /// everywhere else, is unaffected - it always resolves the real directory.
+#[cfg(test)]
 fn build_atlas_from_dir(painters: &Painters, textures_dir: &Path) -> AtlasData {
     build_atlas_from_dirs(painters, &[crate::overlay::KindDir::core(textures_dir)])
 }

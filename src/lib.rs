@@ -33,6 +33,7 @@ pub mod particles;
 pub mod player;
 pub mod render;
 pub mod save;
+pub mod shelf;
 pub mod sky;
 pub mod snapshot;
 pub mod state;

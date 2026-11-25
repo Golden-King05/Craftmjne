@@ -1318,10 +1318,20 @@ enter it, and the next world gets its own again.
   loses a mod, the branch loses it too. Only an in-world world can be branched from,
   and a branch can't be branched.
 
+**Changing a world's mods later.** Click **Mods** on a world in the list to tick or
+untick them. Nothing made with a mod is lost by turning it off: the blocks you built,
+the fluids, the items in your pack and on the ground stay in the world's save, out of
+sight, and come back exactly where they were when you turn the mod on again (an item
+that comes back with no room in the pack lands on the ground beside you). If you build
+somewhere a hidden block was, the new block wins. In-world worlds don't delete a mod
+you turn off, they put it aside in the world (`mods-disabled/`). A branch's mods are
+changed on its host.
+
 **A world that can't find its mods doesn't open.** It stays in the list, greyed, with
 the reason (which mods are missing, or that its host is gone). Loading it without them
 would drop their blocks from its next save, so it refuses instead, and nothing writes
 to its save. A mod whose files are broken is reported the same way, naming the file.
+Open **Mods** on that world to turn off the mod that's gone; its things wait in the save.
 
 Not moddable yet: entities, tool *kinds* (axe, pickaxe, ...; a mod's tools use the
 existing kinds), world generation, and anything needing code.

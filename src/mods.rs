@@ -183,14 +183,15 @@ pub fn scan_mods(dir: &Path) -> Vec<ModInfo> {
 /// even if the other `x` mod has since been removed. Mods new to the world get
 /// their declared id - unless another mod new to it, or one it already has, uses
 /// that id too, in which case the newcomers sharing it become `id_1`, `id_2`, ...
-/// (in folder order). Mods that aren't in `mods` any more are forgotten.
+/// (in folder order). A mod that isn't in `mods` right now *keeps* its entry: a
+/// mod can be turned off and on again, and what the world saved under its namespace
+/// has to find it under the same one.
 pub fn assign_namespaces(
     mods: &[ModInfo],
     existing: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
     use std::collections::{BTreeMap, HashSet};
-    let mut out: BTreeMap<String, String> =
-        existing.iter().filter(|(folder, _)| mods.iter().any(|m| &m.folder == *folder)).map(|(f, n)| (f.clone(), n.clone())).collect();
+    let mut out: BTreeMap<String, String> = existing.clone();
     let mut used: HashSet<String> = out.values().cloned().collect();
     let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut newcomers: Vec<&ModInfo> = mods.iter().filter(|m| !out.contains_key(&m.folder)).collect();
@@ -335,6 +336,88 @@ pub fn resolve_world_mods(
             Ok(resolved(infos, &meta.mod_ids))
         }
     }
+}
+
+/// Where a world-storage world puts a mod that's turned off (still its own copy).
+pub fn disabled_mods_dir(store: &SaveStore, slug: &str) -> PathBuf {
+    store.world_dir(slug).join("mods-disabled")
+}
+
+/// Changes which mods an existing world uses to exactly `chosen` (folder names).
+/// Nothing a mod made is lost by turning it off: the world's save keeps the
+/// entries it can't read (`shelf.rs`), and they load again when it's back.
+///
+/// - **Game folder** worlds just record the new list (every chosen mod has to be
+///   installed).
+/// - **In-world** worlds move a mod that's turned off into the world's
+///   `mods-disabled/` (a copy that may be the only one is never deleted) and bring
+///   a turned-on one back from there, or copy it in from the game's folder.
+/// - A **branch** has no mods of its own to change (it uses its host's).
+///
+/// The namespace each mod was ever given is kept (`WorldMeta::mod_ids`).
+pub fn set_world_mods(
+    store: &SaveStore,
+    slug: &str,
+    installed: &Path,
+    chosen: &[String],
+) -> std::io::Result<WorldMeta> {
+    let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg);
+    let mut meta = store.load_meta(slug)?;
+    if meta.branch_of.is_some() {
+        return Err(invalid("a branch uses its host world's mods; change them there".into()));
+    }
+    let mut chosen: Vec<String> = chosen.to_vec();
+    chosen.sort();
+    chosen.dedup();
+    match meta.mod_storage {
+        ModStorage::Instance => {
+            let missing: Vec<&String> = chosen.iter().filter(|f| read_mod(&installed.join(f)).is_err()).collect();
+            if !missing.is_empty() {
+                return Err(invalid(format!("not installed: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))));
+            }
+        }
+        ModStorage::World => {
+            let (mods_dir, off_dir) = (store.world_mods_dir(slug), disabled_mods_dir(store, slug));
+            // Check everything can be done before moving anything.
+            for folder in &chosen {
+                let have = mods_dir.join(folder).join(MANIFEST).is_file()
+                    || off_dir.join(folder).join(MANIFEST).is_file()
+                    || read_mod(&installed.join(folder)).is_ok();
+                if !have {
+                    return Err(invalid(format!("{folder}: no such mod")));
+                }
+            }
+            std::fs::create_dir_all(&mods_dir)?;
+            for current in scan_mods(&mods_dir) {
+                if !chosen.contains(&current.folder) {
+                    std::fs::create_dir_all(&off_dir)?;
+                    let target = off_dir.join(&current.folder);
+                    let _ = std::fs::remove_dir_all(&target);
+                    std::fs::rename(&current.path, &target)?;
+                }
+            }
+            for folder in &chosen {
+                let here = mods_dir.join(folder);
+                if here.join(MANIFEST).is_file() {
+                    continue;
+                }
+                let off = off_dir.join(folder);
+                if off.join(MANIFEST).is_file() {
+                    std::fs::rename(&off, &here)?;
+                } else {
+                    copy_dir_all(&installed.join(folder), &here)?;
+                }
+            }
+        }
+    }
+    meta.mods = chosen;
+    let infos: Vec<ModInfo> = match meta.mod_storage {
+        ModStorage::Instance => meta.mods.iter().filter_map(|f| read_mod(&installed.join(f)).ok()).collect(),
+        ModStorage::World => scan_mods(&store.world_mods_dir(slug)),
+    };
+    meta.mod_ids = assign_namespaces(&infos, &meta.mod_ids);
+    store.save_meta(slug, &meta)?;
+    Ok(meta)
 }
 
 /// Copies `chosen` mods from the game's folder into world `slug`, for a world
@@ -565,11 +648,12 @@ mod tests {
         // `b` is removed: `a` keeps `x_1`, because blocks saved as `x_1:thing` need it.
         let after = assign_namespaces(&[info("a", "x")], &first);
         assert_eq!(after["a"], "x_1");
-        assert!(!after.contains_key("b"), "a removed mod is forgotten");
+        assert_eq!(after["b"], "x_2", "a mod that's off keeps its namespace, in case it comes back");
         // A newcomer declaring `x` can't be given a namespace already in use.
         let later = assign_namespaces(&[info("a", "x"), info("c", "x")], &after);
         assert_eq!(later["a"], "x_1");
         assert_ne!(later["c"], "x_1");
+        assert_ne!(later["c"], "x_2", "and nobody else takes it meanwhile");
     }
 
     #[test]
@@ -668,5 +752,64 @@ mod tests {
     fn an_older_world_with_no_mod_fields_is_an_instance_world_with_no_mods() {
         let old: WorldMeta = serde_json::from_str(r#"{"name":"Old","seed":1,"created_at":0,"last_played_at":0}"#).unwrap();
         assert_eq!((old.mod_storage, old.mods.len(), old.branch_of, old.mod_ids.len()), (ModStorage::Instance, 0, None, 0));
+    }
+
+    #[test]
+    fn an_instance_worlds_mods_can_be_changed_and_nothing_on_disk_is_touched() {
+        let env = Env::new();
+        env.install("alpha");
+        env.install("beta");
+        let (slug, _) = env.create("W", &ModSetup::Instance(names(&["alpha"])));
+        let meta = set_world_mods(&env.store, &slug, &env.installed, &names(&["beta", "alpha"])).unwrap();
+        assert_eq!(meta.mods, names(&["alpha", "beta"]));
+        assert_eq!(env.resolve(&slug).unwrap(), names(&["alpha", "beta"]));
+        set_world_mods(&env.store, &slug, &env.installed, &[]).unwrap();
+        assert!(env.resolve(&slug).unwrap().is_empty());
+        assert!(env.installed.join("alpha").is_dir() && env.installed.join("beta").is_dir());
+        let err = set_world_mods(&env.store, &slug, &env.installed, &names(&["ghost"])).unwrap_err();
+        assert!(err.to_string().contains("ghost"));
+        assert!(env.resolve(&slug).unwrap().is_empty(), "a refused change changes nothing");
+    }
+
+    #[test]
+    fn turning_an_in_world_mod_off_keeps_its_copy_and_turning_it_on_brings_it_back() {
+        let env = Env::new();
+        env.install("alpha");
+        let (slug, _) = env.create("W", &ModSetup::World(names(&["alpha"])));
+        // A mod that only this world has (dropped in by hand, never installed).
+        let only = env.store.world_mods_dir(&slug).join("only_here");
+        std::fs::create_dir_all(&only).unwrap();
+        std::fs::write(only.join(MANIFEST), r#"{"id": "only_here"}"#).unwrap();
+        set_world_mods(&env.store, &slug, &env.installed, &[]).unwrap();
+        assert!(env.resolve(&slug).unwrap().is_empty());
+        let off = disabled_mods_dir(&env.store, &slug);
+        assert!(off.join("only_here").join(MANIFEST).is_file(), "the only copy is moved aside, never deleted");
+        assert!(off.join("alpha").is_dir());
+        // Back on: from the world's own shelf (the only-here mod isn't installed anywhere).
+        set_world_mods(&env.store, &slug, &env.installed, &names(&["only_here", "alpha"])).unwrap();
+        assert_eq!(env.resolve(&slug).unwrap(), names(&["alpha", "only_here"]));
+        assert!(!off.join("only_here").exists());
+    }
+
+    #[test]
+    fn a_mods_namespace_survives_it_being_turned_off_and_on() {
+        let env = Env::new();
+        env.install_as("one", "dup");
+        env.install_as("two", "dup");
+        let (slug, _) = env.create("W", &ModSetup::Instance(names(&["one", "two"])));
+        set_world_mods(&env.store, &slug, &env.installed, &names(&["two"])).unwrap();
+        assert_eq!(env.resolve(&slug).unwrap(), names(&["dup_2"]), "two keeps dup_2 although one is off");
+        let meta = set_world_mods(&env.store, &slug, &env.installed, &names(&["one", "two"])).unwrap();
+        assert_eq!(meta.mod_ids["one"], "dup_1", "and one is dup_1 again, so what it saved still finds it");
+    }
+
+    #[test]
+    fn a_branchs_mods_are_changed_on_its_host_not_on_it() {
+        let env = Env::new();
+        env.install("alpha");
+        let (host, _) = env.create("Host", &ModSetup::World(names(&["alpha"])));
+        let (branch, _) = env.create("Branch", &ModSetup::Branch(host));
+        let err = set_world_mods(&env.store, &branch, &env.installed, &[]).unwrap_err();
+        assert!(err.to_string().contains("host"));
     }
 }

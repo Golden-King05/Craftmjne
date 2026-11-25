@@ -33,7 +33,8 @@ use crate::interact::Hotbar;
 use crate::crafting::KnownItems;
 use crate::inventory::{inventory_to_save, restore_inventory, HeldStack, Inventory};
 use crate::entities::{BlockModel, EntityRegistry, SpawnEntity, WorldEntity};
-use crate::items::{DroppedItem, LoadedItems};
+use crate::item_registry::ItemStack;
+use crate::items::{give, DroppedItem, LoadedItems};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
 use crate::save::{BlockEdit, DroppedItemSave, EntitySave, FluidCell, GameMode, InventorySave, PlayerSave, SaveStore, WorldData};
@@ -1073,6 +1074,10 @@ fn enter_world(
     // since both currently reach the same fallback value otherwise.
     let is_new_world = !store.world_data_exists(&active.slug);
     let mut data = store.load_data(&active.slug);
+    // Entries naming things this world's mods don't define right now are set aside
+    // (and written back on every save) rather than dropped - see `shelf.rs`.
+    let (shelf, returned_items) = crate::shelf::split_unknown(&mut data, &registry, &items);
+    commands.insert_resource(shelf);
     if is_new_world {
         data.time_of_day = NEW_WORLD_START_TIME;
     }
@@ -1117,7 +1122,19 @@ fn enter_world(
     commands.insert_resource(DayNightClock { elapsed: data.time_of_day, day_count: data.day_count });
 
     restore_inventory(data.inventory.as_ref(), &mut hotbar, &mut inventory, &mut held, &items);
+    // Stacks that were shelved while their mod was off and whose mod is back.
+    let mut leftover_stacks: Vec<ItemStack> = Vec::new();
+    for saved in &returned_items {
+        if let Some(id) = items.by_name(&saved.block) {
+            let stack = items.restore(id, saved.count, saved.quality);
+            let left = give(&mut hotbar.slots, &mut inventory.slots, stack, items.max_stack(id));
+            if left > 0 {
+                leftover_stacks.push(ItemStack { count: left, ..stack });
+            }
+        }
+    }
     known.0 = data.known_items.iter().filter_map(|name| items.by_name(name)).collect();
+    let player_at = data.player.map_or(Vec3::ZERO, |p| Vec3::new(p.x, p.y, p.z));
     let dropped = data
         .items
         .iter()
@@ -1126,6 +1143,8 @@ fn enter_world(
             let stack = items.restore(id, item.count, item.quality);
             Some((stack, Vec3::new(item.x, item.y, item.z), item.age))
         })
+        // No room in the pack: what came back lies on the ground by the player.
+        .chain(leftover_stacks.into_iter().map(|stack| (stack, player_at, 0.0)))
         .collect();
     commands.insert_resource(LoadedItems(dropped));
     if let Some(entity_registry) = entity_registry {
@@ -1329,7 +1348,12 @@ fn write_save(
         items,
         known_items,
         entities,
+        shelved_items: Vec::new(),
     };
+    // What the game couldn't read when the world loaded (a mod that's off) goes
+    // back into the file untouched.
+    let mut data = data;
+    crate::shelf::merge_into(&mut data, &carried.shelf);
     persist(store.clone(), active.slug.clone(), data, background);
 }
 
@@ -1348,6 +1372,7 @@ pub struct CarriedState<'w, 's> {
     items: Query<'w, 's, &'static DroppedItem>,
     entities: Query<'w, 's, &'static WorldEntity, Without<BlockModel>>,
     entity_registry: Option<Res<'w, EntityRegistry>>,
+    shelf: Res<'w, crate::shelf::Shelf>,
 }
 
 impl CarriedState<'_, '_> {
@@ -1907,6 +1932,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<LightQueue>()
             .init_resource::<DayNightClock>()
             .init_resource::<TextureReport>()
+            .init_resource::<crate::shelf::Shelf>()
             .init_resource::<InstalledMods>()
             .init_resource::<LoadedContent>()
             .init_resource::<ContentOk>()
