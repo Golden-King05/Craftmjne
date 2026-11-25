@@ -48,6 +48,24 @@ claude/minecraft-clone-framework-2vjlng origin/claude/minecraft-clone-framework-
 to make sure local state matches the real remote branch (see "local disk can
 silently reset" below — the same staleness risk applies here).
 
+## Two working branches: minor updates and major updates
+
+As of 2.0.0 the user wants two Claude branches so a minor release and the
+next major one can be developed at the same time (they merge each to `main`
+and tag by hand when ready):
+
+- **`claude/minor-updates`** - the sub-releases of the current major version
+  (2.0.x: texturing, then modeling/sticks/pebbles). Small, shippable changes.
+- **`claude/major-updates`** - the update *after* those sub-releases. Nothing
+  here ships until the minor line is out.
+
+**Ask which branch a task belongs to if it isn't obvious**, and push only to
+that one. `claude/minecraft-clone-framework-2vjlng` is the old shared branch
+(2.0.0 lives there); don't push new work to it unless told. When a minor
+release lands on `main`, merge `main` into `claude/major-updates` so the
+major line stays current. Each session start: `git fetch origin <branch> &&
+git checkout -B <branch> origin/<branch>` for the branch being used.
+
 ## Quick orientation
 
 **This is a two-crate Cargo workspace.** The game is the root package; the
