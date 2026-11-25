@@ -1177,6 +1177,17 @@ given block, how to read it, how to write it. `states::read_states` and
 future interaction use them, and a tag only exists on blocks it applies to
 (`level` isn't a thing on stone). To add one, add a row.
 
+**Which blocks have which state tags is itself a definition tag**: `"states":
+["waterlogged"]` in a block file. Nothing is a state of a block unless it's
+enabled, so stone has none, a log has `axis`, a pebble has `waterlogged`. The
+behaviour tags imply their state (`rotation: log` -> `axis`, `waterloggable` ->
+`waterlogged`, a fluid or what one freezes into -> `level`), so a block that
+already says so needn't repeat it, and declaring the state turns the behaviour on.
+Each state tag also says what it *can't* go on, and the game refuses to start
+with a block that breaks that rule: a full cube can't be `waterlogged` ("nowhere
+for water to go"), only a full block can have an `axis`, and only a fluid (or
+what freezes from one) has a `level`. A misspelled state name is refused too.
+
 What isn't unified yet is *storage*: `axis` and `level` are still parallel
 per-chunk arrays and `waterlogged` is still a variant block id (`pebble@water`),
 each saved by its own path (edit log, fluid scan, the block id). The interface

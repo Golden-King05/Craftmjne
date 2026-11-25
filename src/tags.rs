@@ -80,6 +80,7 @@ pub const DEFINITION_TAGS: &[DefinitionTag] = &[
     tag("flow_distance", Block, World, "How far a fluid flows from a source."),
     tag("rotation", Block, World, "none | log: whether a placed one can face different ways (state tag: axis)."),
     tag("waterloggable", Block, World, "May share its cell with a fluid (state tag: waterlogged)."),
+    tag("states", Block, World, "Which state tags a placed one has (axis, waterlogged, level). Behaviour tags imply theirs: rotation, waterloggable, fluid."),
     tag("freezes_to", Block, World, "What this fluid becomes when it freezes."),
     tag("upper", Block, World, "A two-cell-tall block: the block placed above it."),
     tag("max_stack", Both, Mining, "How many fit in one slot."),

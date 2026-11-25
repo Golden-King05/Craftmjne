@@ -2904,3 +2904,21 @@ etc.) instead of inventing a new approach:
   adding the field. Also now a tag: `attack_cooldown` (was the global
   `ATTACK_COOLDOWN`), per item/block, default 0.45; no existing item sets it
   yet (daggers fast / greatswords slow is the obvious use).
+- **Every state tag is enabled per block through one definition tag,
+  `states`.** `BlockDef::states` is the list; `STATE_TAGS` rows gained
+  `enabled_by` (the behaviour tag that also implies it: `rotation`,
+  `waterloggable`, `fluid`), `implied(def, is_freeze_target)` and
+  `compatible(def, is_freeze_target) -> Result<(), why>`. `BlockRegistry::
+  finalize_states` (runs at the end of `add_layered_variants`, so at load and
+  compile) adds implied states, panics on an incompatible or unknown one with
+  the block's id, and skips derived `block@layer` variants (their `states` is
+  set when they're built: the base's plus `waterlogged` and `level`). The
+  `states.rs` `values` fns now gate on `BlockDef::states`, no longer on
+  `Tables::rotates/fluid/level_shaped`, so the list is the single source for
+  "can this cell be edited". Declaring `axis`/`waterlogged` in a file turns on
+  `rotation: log`/`waterloggable` in `into_def`, since the state is useless
+  without the behaviour. Trap hit while writing it: variants are built
+  *before* `finalize_states` runs, so a variant copying `base.states` got an
+  empty list (the base's `waterlogged` was still only implied) - the variant
+  adds `waterlogged`/`level` itself. Break-tested: with the full-cube rule
+  removed the "can't waterlog a cube" tests go red.

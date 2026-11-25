@@ -25,7 +25,7 @@
 
 use bevy::prelude::*;
 
-use crate::blocks::{BlockId, BlockRegistry, BlockTables, Tables, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_FALLING, FLUID_SOURCE};
+use crate::blocks::{BlockDef, BlockId, BlockRegistry, BlockTables, Rotation, Shape, Tables, AIR, AXIS_X, AXIS_Y, AXIS_Z, FLUID_FALLING, FLUID_SOURCE};
 use crate::chat::ChatLog;
 use crate::world::{BlockSetEvent, ChunkMap};
 
@@ -33,6 +33,17 @@ use crate::world::{BlockSetEvent, ChunkMap};
 pub struct StateTagDef {
     pub name: &'static str,
     pub description: &'static str,
+    /// The definition tag that enables this state tag. Every state tag is
+    /// switched on per block through the `states` definition tag; this names
+    /// the behaviour tag that also implies it, so a block that already says
+    /// `rotation: log` doesn't have to say `states: ["axis"]` as well.
+    pub enabled_by: &'static str,
+    /// Whether a block's own behaviour tags imply this state tag
+    /// (second argument: the block is what some fluid freezes into).
+    pub implied: fn(&BlockDef, bool) -> bool,
+    /// Whether a block can have this state tag at all - `Err` says why not.
+    /// A full cube has nowhere for water to go, so it can't be waterlogged.
+    pub compatible: fn(&BlockDef, bool) -> Result<(), &'static str>,
     /// The values this tag can take on block `id`; empty means the tag
     /// doesn't apply to that block at all.
     pub values: fn(&BlockRegistry, &Tables, BlockId) -> Vec<String>,
@@ -48,6 +59,11 @@ pub const STATE_TAGS: &[StateTagDef] = &[
     StateTagDef {
         name: "axis",
         description: "Which way a rotating block (a log) lies.",
+        enabled_by: "rotation",
+        implied: |def, _| def.rotation != Rotation::None,
+        compatible: |def, _| {
+            if def.shape == Shape::Cube { Ok(()) } else { Err("only a full block can lie on a different axis") }
+        },
         values: axis_values,
         get: axis_get,
         set: axis_set,
@@ -55,6 +71,11 @@ pub const STATE_TAGS: &[StateTagDef] = &[
     StateTagDef {
         name: "waterlogged",
         description: "The fluid or ice sharing this block's cell: none, water, ice.",
+        enabled_by: "waterloggable",
+        implied: |def, _| def.waterloggable,
+        compatible: |def, _| {
+            if def.shape == Shape::Cube { Err("a full block has nowhere for water to go") } else { Ok(()) }
+        },
         values: layer_values,
         get: layer_get,
         set: layer_set,
@@ -62,6 +83,11 @@ pub const STATE_TAGS: &[StateTagDef] = &[
     StateTagDef {
         name: "level",
         description: "How far a fluid has flowed: source, 1 (next to a source) upward, or falling.",
+        enabled_by: "fluid",
+        implied: |def, freezes_into| def.fluid || freezes_into,
+        compatible: |def, freezes_into| {
+            if def.fluid || freezes_into { Ok(()) } else { Err("only a fluid, or what one freezes into, has a flow level") }
+        },
         values: level_values,
         get: level_get,
         set: level_set,
@@ -91,7 +117,9 @@ impl StateError {
                 let names: Vec<_> = STATE_TAGS.iter().map(|t| t.name).collect();
                 format!("Unknown state tag \"{tag}\". Tags: {}", names.join(", "))
             }
-            Self::NotApplicable { block, tag } => format!("{block} has no \"{tag}\" state."),
+            Self::NotApplicable { block, tag } => {
+                format!("{block} has no \"{tag}\" state (a block enables states with its \"states\" tag).")
+            }
             Self::BadValue { tag, value, allowed } => {
                 format!("\"{value}\" isn't a value of {tag}. Try: {}", allowed.join(", "))
             }
@@ -149,8 +177,13 @@ pub fn set_state(
 
 // ---- axis ------------------------------------------------------------
 
-fn axis_values(_: &BlockRegistry, tables: &Tables, id: BlockId) -> Vec<String> {
-    if id != AIR && tables.rotates[id as usize] {
+/// Whether block `id` has state tag `name` enabled (`BlockDef::states`).
+fn enabled(registry: &BlockRegistry, id: BlockId, name: &str) -> bool {
+    id != AIR && registry.def(id).states.iter().any(|s| s == name)
+}
+
+fn axis_values(registry: &BlockRegistry, _: &Tables, id: BlockId) -> Vec<String> {
+    if enabled(registry, id, "axis") {
         vec!["x".into(), "y".into(), "z".into()]
     } else {
         Vec::new()
@@ -192,7 +225,7 @@ fn layers_of(registry: &BlockRegistry, base: BlockId) -> Vec<BlockId> {
 }
 
 fn layer_values(registry: &BlockRegistry, _: &Tables, id: BlockId) -> Vec<String> {
-    if id == AIR {
+    if !enabled(registry, id, "waterlogged") {
         return Vec::new();
     }
     let layers = layers_of(registry, base_of(registry, id));
@@ -231,9 +264,9 @@ fn layer_set(map: &mut ChunkMap, registry: &BlockRegistry, _: &Tables, pos: IVec
 
 // ---- level -----------------------------------------------------------
 
-fn level_values(_: &BlockRegistry, tables: &Tables, id: BlockId) -> Vec<String> {
+fn level_values(registry: &BlockRegistry, tables: &Tables, id: BlockId) -> Vec<String> {
     let i = id as usize;
-    if id == AIR || !(tables.fluid[i] || tables.level_shaped[i]) {
+    if !enabled(registry, id, "level") {
         return Vec::new();
     }
     let mut values = vec!["source".to_string()];
@@ -333,7 +366,7 @@ mod tests {
     use crate::light::LightCell;
     use std::sync::Arc;
 
-    fn setup() -> (BlockRegistry, Arc<Tables>, ChunkMap) {
+    pub(super) fn setup() -> (BlockRegistry, Arc<Tables>, ChunkMap) {
         let mut reg = BlockRegistry::with_defaults();
         let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
         let tables = reg.compile(&atlas.indices, atlas.tile_size);
@@ -350,7 +383,7 @@ mod tests {
         (reg, tables, map)
     }
 
-    const P: IVec3 = IVec3::new(4, 10, 4);
+    pub(super) const P: IVec3 = IVec3::new(4, 10, 4);
 
     fn tags(map: &ChunkMap, reg: &BlockRegistry, tables: &Tables) -> Vec<&'static str> {
         read_states(map, reg, tables, P).iter().map(|s| s.name).collect()
@@ -434,5 +467,96 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), STATE_TAGS.len());
+    }
+}
+
+#[cfg(test)]
+mod enabling_tests {
+    use super::*;
+    use crate::blocks::{BlockFile, BlockRegistry};
+
+    fn registry_with(files: &[&str]) -> BlockRegistry {
+        let mut reg = BlockRegistry::with_defaults();
+        for f in files {
+            let def = serde_json::from_str::<BlockFile>(f).unwrap().into_def();
+            reg.register(def);
+        }
+        reg.add_layered_variants();
+        reg
+    }
+
+    fn states_of(reg: &BlockRegistry, name: &str) -> Vec<String> {
+        reg.def(reg.id(name)).states.clone()
+    }
+
+    #[test]
+    fn every_state_tag_is_enabled_through_a_real_definition_tag() {
+        for tag in STATE_TAGS {
+            assert!(
+                crate::tags::definition_tag(tag.enabled_by).is_some(),
+                "state tag {:?} names enabled_by {:?}, which isn't a definition tag",
+                tag.name,
+                tag.enabled_by
+            );
+        }
+        // And the shared one: `states` itself is a definition tag.
+        assert!(crate::tags::definition_tag("states").is_some());
+    }
+
+    #[test]
+    fn a_block_only_has_the_states_it_enables_or_implies() {
+        let reg = BlockRegistry::with_defaults();
+        assert!(states_of(&reg, "stone").is_empty());
+        assert_eq!(states_of(&reg, "log"), vec!["axis"]);
+        assert_eq!(states_of(&reg, "pebble"), vec!["waterlogged"]);
+        assert_eq!(states_of(&reg, "water"), vec!["level"]);
+        assert_eq!(states_of(&reg, "ice"), vec!["level"], "what water freezes into holds the water's level");
+    }
+
+    #[test]
+    fn declaring_a_state_turns_on_the_behaviour_it_needs() {
+        let reg = registry_with(&[
+            r#"{"id": "spar", "states": ["axis"]}"#,
+            r#"{"id": "shell", "shape": "floor", "states": ["Waterlogged"]}"#,
+        ]);
+        assert_eq!(states_of(&reg, "spar"), vec!["axis"]);
+        assert!(reg.def(reg.id("spar")).rotation != crate::blocks::Rotation::None);
+        assert!(reg.def(reg.id("shell")).waterloggable);
+        assert!(reg.variant(reg.id("shell"), reg.id("water")).is_some(), "it gets its waterlogged variants");
+    }
+
+    #[test]
+    #[should_panic(expected = "nowhere for water to go")]
+    fn a_full_block_cannot_be_waterlogged() {
+        registry_with(&[r#"{"id": "slab", "states": ["waterlogged"]}"#]);
+    }
+
+    #[test]
+    #[should_panic(expected = "nowhere for water to go")]
+    fn the_same_goes_for_waterloggable_set_the_old_way() {
+        registry_with(&[r#"{"id": "slab", "waterloggable": true}"#]);
+    }
+
+    #[test]
+    #[should_panic(expected = "flow level")]
+    fn a_block_that_isnt_a_fluid_has_no_level() {
+        registry_with(&[r#"{"id": "dust", "states": ["level"]}"#]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown state")]
+    fn an_unknown_state_name_is_refused() {
+        registry_with(&[r#"{"id": "dust", "states": ["glowing"]}"#]);
+    }
+
+    #[test]
+    fn a_state_that_isnt_enabled_cant_be_read_or_set() {
+        let (reg, tables, mut map) = tests::setup();
+        map.set_block(tests::P, reg.id("stone"));
+        assert!(read_states(&map, &reg, &tables, tests::P).is_empty());
+        assert!(matches!(
+            set_state(&mut map, &reg, &tables, tests::P, "waterlogged", "water"),
+            Err(StateError::NotApplicable { .. })
+        ));
     }
 }

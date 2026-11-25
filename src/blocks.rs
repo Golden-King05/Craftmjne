@@ -828,6 +828,12 @@ pub struct BlockDef {
     /// May hold a fluid (or the ice it freezes into) in the same cell as
     /// itself. See the module docs' `waterloggable` section.
     pub waterloggable: bool,
+    /// The state tags (`states.rs`) a placed one of these has, so can be
+    /// read and edited per cell. Declared with the `states` definition tag,
+    /// plus whatever its behaviour tags imply (`rotation: log` -> `axis`,
+    /// `waterloggable` -> `waterlogged`, a fluid or what one freezes into ->
+    /// `level`). Nothing outside this list is ever a state of this block.
+    pub states: Vec<String>,
     /// What this fluid becomes when it freezes (`water` -> `ice`). A block
     /// named here is a "layer" every waterloggable block gets a variant for.
     pub freezes_to: Option<String>,
@@ -898,6 +904,7 @@ impl Default for BlockDef {
             throw: ThrowSpec::DEFAULT,
             upper: None,
             waterloggable: false,
+            states: Vec::new(),
             freezes_to: None,
             layered: None,
         }
@@ -923,7 +930,7 @@ pub(crate) fn title_case(id: &str) -> String {
 /// optional; `into_def` applies defaults (including the `fluid`-implies
 /// pattern described in the module docs).
 #[derive(Deserialize)]
-struct BlockFile {
+pub(crate) struct BlockFile {
     id: String,
     name: Option<String>,
     transparent: Option<Transparency>,
@@ -965,6 +972,9 @@ struct BlockFile {
     overlay: FaceTextures,
     #[serde(default)]
     waterloggable: bool,
+    /// Which state tags a placed one has (`states.rs`).
+    #[serde(default)]
+    states: Vec<String>,
     freezes_to: Option<String>,
     tool: Option<ToolKind>,
     #[serde(default)]
@@ -998,7 +1008,7 @@ fn default_max_stack() -> u32 {
 }
 
 impl BlockFile {
-    fn into_def(self) -> BlockDef {
+    pub(crate) fn into_def(self) -> BlockDef {
         // A fluid defaults to water-like physics (not solid, can't be
         // targeted, placing into it just replaces it) unless the file
         // explicitly overrides one of those fields.
@@ -1012,6 +1022,21 @@ impl BlockFile {
             (true, true, false)
         };
         let floor = self.shape == Shape::Floor;
+        // Declaring a state tag turns on the behaviour it needs.
+        let mut rotation = self.rotation;
+        let mut waterloggable = self.waterloggable;
+        let mut states: Vec<String> = Vec::new();
+        for s in &self.states {
+            let s = s.to_lowercase();
+            match s.as_str() {
+                "axis" if rotation == Rotation::None => rotation = Rotation::Log,
+                "waterlogged" => waterloggable = true,
+                _ => {}
+            }
+            if !states.contains(&s) {
+                states.push(s);
+            }
+        }
         BlockDef {
             id: self.id.clone(),
             name: self.name.unwrap_or_else(|| title_case(&self.id)),
@@ -1033,7 +1058,7 @@ impl BlockFile {
             item_model: self.item_model.unwrap_or(if floor { ItemModel::Face } else { ItemModel::Default }),
             custom_item_model: self.custom_item_model,
             block_model: self.block_model,
-            rotation: self.rotation,
+            rotation,
             shape: self.shape,
             light: self.light,
             transmission: self.transmission,
@@ -1053,7 +1078,8 @@ impl BlockFile {
             throwable: self.throwable,
             throw: self.throw.spec(),
             upper: self.upper,
-            waterloggable: self.waterloggable,
+            waterloggable,
+            states,
             freezes_to: self.freezes_to,
             layered: None,
         }
@@ -1334,6 +1360,16 @@ impl BlockRegistry {
                     item: false,
                     layered: Some(Layered { block, layer }),
                     waterloggable: false,
+                    // Holds whatever its block does, plus the layer's flow.
+                    states: {
+                        let mut states = base.states.clone();
+                        for s in ["waterlogged", "level"] {
+                            if !states.iter().any(|x| x == s) {
+                                states.push(s.to_string());
+                            }
+                        }
+                        states
+                    },
                     freezes_to: None,
                     solid: base.solid || over.solid,
                     transparency: if rank(over.transparency) > rank(base.transparency) { over.transparency } else { base.transparency },
@@ -1345,6 +1381,40 @@ impl BlockRegistry {
                 };
                 let id = self.register(variant);
                 self.variants.insert((block, layer), id);
+            }
+        }
+        self.finalize_states();
+    }
+
+    /// Adds the state tags each block's behaviour tags imply (see
+    /// [`BlockDef::states`]) and refuses a block that has a state tag it
+    /// can't support - a full cube can't be waterlogged. Idempotent; runs
+    /// with `add_layered_variants`. Panics, naming the block, like any other
+    /// bad content file.
+    pub fn finalize_states(&mut self) {
+        let freeze_targets: std::collections::HashSet<String> =
+            self.defs.iter().filter_map(|d| d.freezes_to.clone()).collect();
+        for def in self.defs.iter_mut().skip(1) {
+            if def.layered.is_some() {
+                continue; // derived: holds exactly what its block and layer do
+            }
+            let target = freeze_targets.contains(&def.id);
+            for tag in crate::states::STATE_TAGS {
+                let declared = def.states.iter().any(|s| s == tag.name);
+                let wanted = declared || (tag.implied)(def, target);
+                if !wanted {
+                    continue;
+                }
+                if let Err(why) = (tag.compatible)(def, target) {
+                    panic!("block {:?}: can't have the {:?} state: {why}", def.id, tag.name);
+                }
+                if !declared {
+                    def.states.push(tag.name.to_string());
+                }
+            }
+            if let Some(unknown) = def.states.iter().find(|s| crate::states::state_tag(s).is_none()) {
+                let names: Vec<_> = crate::states::STATE_TAGS.iter().map(|t| t.name).collect();
+                panic!("block {:?}: unknown state {:?} in \"states\" (known: {})", def.id, unknown, names.join(", "));
             }
         }
     }
