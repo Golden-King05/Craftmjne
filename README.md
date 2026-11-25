@@ -211,6 +211,14 @@ about 1.5, deliberately little (ranged weapons come later). Hit the training
 dummy and the damage number pops up as usual. A long lob that falls a long
 way hits a bit harder, since it's gained speed.
 
+**Glass shatters.** A block with `"shatters_at"` (minimum impact speed in m/s)
+breaks when a thrown thing at least that fast hits it, and `"shatter_keep"`
+(default 1.0) is the fraction of its speed the projectile keeps afterwards.
+Glass is `5.0` and `0.5`: a pebble (~18 m/s) goes through one pane at about 9
+and a second at about 4.5, then is too slow for a third, so a line of three
+panes takes two pebbles. A shatter drops nothing, makes no damage number, and
+is an ordinary block edit, so it's saved like mining it.
+
 ### Tools, tiers and quality
 
 Tools are items with a `"tool"` entry, and they come in **tiers** (`tiers/*.json`,
@@ -571,7 +579,7 @@ In block files that's `"shape": "model"` (the mesher draws nothing, and its
 neighbours' faces still draw), `"upper": "<block>"` (two cells tall) and
 `"requires_crouch": true` and `"hittable": true` (a plain click hits it).
 For items and blocks, `"mass"` (kg) and `"throwable": true` - see
-[Throwing](#throwing).
+[Throwing](#throwing). Blocks can also set `"shatters_at"` and `"shatter_keep"`.
 
 **Entities** are the other way to do it, for things that shouldn't be locked
 to the grid: `/summon training_dummy` also stands a free-standing dummy

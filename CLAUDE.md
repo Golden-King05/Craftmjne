@@ -2836,3 +2836,19 @@ etc.) instead of inventing a new approach:
   - **Test hazard:** reading `Events::iter_current_update_events()` after an
     `app.update()` returned each event twice (two buffers), so the damage tests
     collect through a system into a resource instead.
+- **Glass shattering is two numbers on the block, and the speed budget is the
+  whole design.** `BlockDef::shatters_at` (min impact speed) and
+  `shatter_keep` (fraction of speed kept) compile into `Tables::shatter_speed`
+  (`INFINITY` = never) / `shatter_keep`; `items::shatter_outcome` is the pure
+  rule. `simulate_items` now takes `ResMut<ChunkMap>` and a `BlockSetEvent`
+  writer: a projectile hitting a shatterable block fast enough sets it to
+  air (through the *player-edit* path, so it saves like mining), writes no
+  `ProjectileHit` (no damage) and keeps flying at `speed * keep`; otherwise
+  it lands as before. Pebble ~17.9 m/s, glass 5 / 0.5 gives 17.9 -> 8.9 ->
+  4.5, so exactly two panes and a stall on the third; a second pebble
+  finishes it. Break-tested both ways (keep = 1.0 lets one pebble through
+  all three; threshold 500 breaks nothing). Because the borrow of the map
+  for `is_solid` has to end before `set_block`, the step calls pass a
+  closure over `&*map` scoped to each call, not one closure held across the
+  loop. The headless test waits with `run_until` for the pebble to come to
+  rest: a fixed number of `update`s wasn't enough (frame time is tiny).

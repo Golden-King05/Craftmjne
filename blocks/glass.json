@@ -4,5 +4,7 @@
   "transparent": "partial",
   "transmission": 0.98,
   "hardness": 0.3,
-  "drops": false
+  "drops": false,
+  "shatters_at": 5.0,
+  "shatter_keep": 0.5
 }

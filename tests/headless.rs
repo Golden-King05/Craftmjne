@@ -1325,3 +1325,50 @@ fn a_thrown_pebble_hits_the_ground_and_lands_as_an_item() {
     let items: Vec<_> = app.world_mut().query::<&DroppedItem>().iter(app.world()).map(|i| (i.stack.id, i.thrown_mass)).collect();
     assert_eq!(items, vec![(pebble, None)]);
 }
+
+/// A pebble shatters glass and loses most of its speed doing it: one throw
+/// gets through two panes and stalls on the third, and a second finishes it.
+#[test]
+fn a_thrown_pebble_shatters_up_to_two_panes_and_a_second_one_the_third() {
+    use craftmjne::items::{throw_speed, DroppedItem, SpawnProjectile};
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 25, 2000));
+    let start = open_air_run(&app, 8);
+    let (pebble, glass) = {
+        let items = app.world().resource::<craftmjne::item_registry::ItemRegistry>();
+        let blocks = app.world().resource::<craftmjne::blocks::BlockRegistry>();
+        (items.id("pebble"), blocks.id("glass"))
+    };
+    let panes: Vec<IVec3> = (2..5).map(|dx| start + IVec3::X * dx).collect();
+    for &p in &panes {
+        app.world_mut().resource_mut::<ChunkMap>().set_block(p, glass);
+    }
+    let throw = |app: &mut App| {
+        app.world_mut().send_event(SpawnProjectile {
+            pos: start.as_vec3() + Vec3::new(0.5, 0.8, 0.5),
+            stack: craftmjne::item_registry::ItemStack::new(pebble, 1),
+            vel: Vec3::X * throw_speed(0.05),
+            mass: 0.05,
+        });
+    };
+    let in_flight = |app: &mut App| {
+        app.world_mut().query::<&DroppedItem>().iter(app.world()).filter(|i| i.thrown_mass.is_some()).count()
+    };
+    let pane_states = |app: &App| -> Vec<bool> {
+        let map = app.world().resource::<ChunkMap>();
+        panes.iter().map(|&p| map.get_block(p) == glass).collect()
+    };
+
+    throw(&mut app);
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().get_block(panes[0]) != glass, 500), "first pane breaks");
+    let landed = run_until(&mut app, |app| {
+        app.world_mut().query::<&DroppedItem>().iter(app.world()).all(|i| i.thrown_mass.is_none())
+    }, 1500);
+    assert!(landed, "the pebble comes to rest; panes {:?}", pane_states(&app));
+    assert_eq!(in_flight(&mut app), 0);
+    assert_eq!(pane_states(&app), vec![false, false, true], "two panes broke, the third held");
+
+    throw(&mut app);
+    assert!(run_until(&mut app, |app| pane_states(app)[2] == false, 500), "a second pebble breaks the last pane");
+}

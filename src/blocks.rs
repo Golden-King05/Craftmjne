@@ -745,6 +745,11 @@ pub struct BlockDef {
     /// A plain left click hits it instead of mining it: it takes damage from
     /// what's in hand and shows the number (the training dummy).
     pub hittable: bool,
+    /// A thrown object at least this fast (m/s) shatters it (glass); `None`
+    /// means it never breaks that way.
+    pub shatters_at: Option<f32>,
+    /// Fraction of its speed a projectile keeps after shattering this block.
+    pub shatter_keep: f32,
     /// Mass in kilograms, for what it does when thrown (a pebble is 0.05).
     /// Lighter things are thrown faster for the same effort, and slowed more
     /// by the air. See `items::throw_speed`.
@@ -821,6 +826,8 @@ impl Default for BlockDef {
             tool_response: 1.0,
             requires_crouch: false,
             hittable: false,
+            shatters_at: None,
+            shatter_keep: 1.0,
             mass: DEFAULT_MASS,
             throwable: false,
             upper: None,
@@ -901,6 +908,8 @@ struct BlockFile {
     requires_crouch: bool,
     #[serde(default)]
     hittable: bool,
+    shatters_at: Option<f32>,
+    shatter_keep: Option<f32>,
     mass: Option<f32>,
     #[serde(default)]
     throwable: bool,
@@ -968,6 +977,8 @@ impl BlockFile {
             tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
             requires_crouch: self.requires_crouch,
             hittable: self.hittable,
+            shatters_at: self.shatters_at,
+            shatter_keep: self.shatter_keep.unwrap_or(1.0).clamp(0.0, 1.0),
             mass: self.mass.filter(|m| *m > 0.0).unwrap_or(DEFAULT_MASS),
             throwable: self.throwable,
             upper: self.upper,
@@ -1004,6 +1015,10 @@ pub struct Tables {
     pub model: Vec<bool>,
     /// Only mined while crouching (`BlockDef::requires_crouch`).
     pub requires_crouch: Vec<bool>,
+    /// Minimum projectile speed that shatters the block (`INFINITY` = never).
+    pub shatter_speed: Vec<f32>,
+    /// Fraction of speed a projectile keeps after shattering it.
+    pub shatter_keep: Vec<f32>,
     /// For a two-cell-tall block's lower half, the block that goes above it
     /// (`AIR` for anything else).
     pub upper_of: Vec<BlockId>,
@@ -1375,6 +1390,8 @@ impl BlockRegistry {
             floor: vec![false; n],
             model: vec![false; n],
             requires_crouch: vec![false; n],
+            shatter_speed: vec![f32::INFINITY; n],
+            shatter_keep: vec![1.0; n],
             upper_of: vec![AIR; n],
             lower_of: vec![AIR; n],
             light: vec![[0; 3]; n],
@@ -1407,6 +1424,8 @@ impl BlockRegistry {
             tables.floor[id] = def.shape == Shape::Floor;
             tables.model[id] = def.shape == Shape::Model;
             tables.requires_crouch[id] = def.requires_crouch;
+            tables.shatter_speed[id] = def.shatters_at.unwrap_or(f32::INFINITY);
+            tables.shatter_keep[id] = def.shatter_keep;
             if let Some(upper) = &def.upper {
                 let up = self
                     .by_name(upper)

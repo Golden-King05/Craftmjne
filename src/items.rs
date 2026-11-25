@@ -25,7 +25,7 @@ use crate::light::LightCell;
 use crate::player::{cursor_grabbed, Player, HALF_W, HEIGHT};
 use crate::render::{bucket_to_mesh, ChunkMaterials};
 use crate::state::{AppState, DeathState, PauseState};
-use crate::world::ChunkMap;
+use crate::world::{BlockSetEvent, ChunkMap};
 
 /// Side length of the drawn cube, in blocks.
 pub const ITEM_SIZE: f32 = 0.25;
@@ -318,10 +318,11 @@ fn item_bundle(item: DroppedItem) -> impl Bundle {
 fn simulate_items(
     mut commands: Commands,
     time: Res<Time>,
-    map: Res<ChunkMap>,
+    mut map: ResMut<ChunkMap>,
     tables: Option<Res<BlockTables>>,
     paused: Res<PauseState>,
     mut hits: EventWriter<ProjectileHit>,
+    mut block_events: EventWriter<BlockSetEvent>,
     mut items: Query<(Entity, &mut DroppedItem)>,
 ) {
     if paused.open {
@@ -342,27 +343,55 @@ fn simulate_items(
         if !map.is_loaded(item.pos.floor().as_ivec3()) {
             continue;
         }
-        let solid = |c: IVec3| map.is_solid(tables, c);
-        let wet = |c: IVec3| map.is_wet(tables, c);
         let item = &mut *item;
         let mut left = dt;
         while left > 0.0 {
             let step = left.min(MAX_STEP);
             if let Some(mass) = item.thrown_mass {
-                if let Some(cell) = step_projectile(&mut item.pos, &mut item.vel, mass, step, solid) {
-                    hits.write(ProjectileHit { cell, speed: item.vel.length(), mass });
-                    // Lands where it hit, as an ordinary item that can be picked up again.
-                    item.thrown_mass = None;
-                    item.vel *= 0.1;
-                    item.pickup_delay = item.pickup_delay.max(0.5);
+                let hit = {
+                    let m = &*map;
+                    step_projectile(&mut item.pos, &mut item.vel, mass, step, |c| m.is_solid(tables, c))
+                };
+                if let Some(cell) = hit {
+                    let id = map.get_block(cell);
+                    let speed = item.vel.length();
+                    if let Some(kept) = shatter_outcome(
+                        speed,
+                        tables.shatter_speed[id as usize],
+                        tables.shatter_keep[id as usize],
+                    ) {
+                        // Breaks the pane and carries on, much slower.
+                        map.set_block(cell, crate::blocks::AIR);
+                        block_events.write(BlockSetEvent {
+                            pos: cell,
+                            id: crate::blocks::AIR,
+                            prev: id,
+                            axis: crate::blocks::AXIS_Y,
+                        });
+                        item.vel *= kept / speed;
+                    } else {
+                        hits.write(ProjectileHit { cell, speed, mass });
+                        // Lands where it hit, as an ordinary item that can be picked up again.
+                        item.thrown_mass = None;
+                        item.vel *= 0.1;
+                        item.pickup_delay = item.pickup_delay.max(0.5);
+                    }
                 }
                 left -= step;
                 continue;
             }
-            step_item(&mut item.pos, &mut item.vel, step, solid, wet);
+            let m = &*map;
+            step_item(&mut item.pos, &mut item.vel, step, |c| m.is_solid(tables, c), |c| m.is_wet(tables, c));
             left -= step;
         }
     }
+}
+
+/// Speed a projectile has left after hitting a block that shatters at
+/// `threshold` m/s and lets `keep` of the speed through, or `None` if it's
+/// too slow to break it (or the block doesn't shatter).
+pub fn shatter_outcome(speed: f32, threshold: f32, keep: f32) -> Option<f32> {
+    (speed >= threshold).then_some(speed * keep)
 }
 
 /// Merges stacks of the same block lying close together, so mining a pile
@@ -571,6 +600,29 @@ impl Plugin for ItemsPlugin {
 mod tests {
     use super::*;
     use crate::blocks::AIR;
+
+    #[test]
+    fn shattering_needs_enough_speed_and_costs_most_of_it() {
+        assert_eq!(shatter_outcome(10.0, 5.0, 0.5), Some(5.0));
+        assert_eq!(shatter_outcome(5.0, 5.0, 0.5), Some(2.5));
+        assert_eq!(shatter_outcome(4.9, 5.0, 0.5), None);
+        // A block that doesn't shatter never does.
+        assert_eq!(shatter_outcome(1e6, f32::INFINITY, 1.0), None);
+    }
+
+    #[test]
+    fn a_pebble_breaks_two_panes_of_glass_but_not_a_third() {
+        let registry = crate::blocks::BlockRegistry::with_defaults();
+        let def = registry.def(registry.id("glass"));
+        let (at, keep) = (def.shatters_at.expect("glass shatters"), def.shatter_keep);
+        let mut speed = throw_speed(0.05);
+        let mut broken = 0;
+        while let Some(left) = shatter_outcome(speed, at, keep) {
+            speed = left;
+            broken += 1;
+        }
+        assert_eq!(broken, 2, "a throw gets through two panes and stalls on the third");
+    }
 
     fn stack(id: u16, count: u32) -> ItemStack {
         ItemStack::new(id, count)
