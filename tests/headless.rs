@@ -743,7 +743,17 @@ fn fluid_saved_over_since_regenerated_terrain_is_not_put_back() {
     // Turn it into a pre-snapshot world: no chunks saved, and fluid saved
     // where only the old terrain had water - here, high in the air.
     let store = app.world().resource::<SaveStore>();
-    std::fs::remove_dir_all(store.chunks_dir(&slug)).unwrap();
+    // Leaving the world queues chunk-snapshot writes on background threads, which
+    // can still be creating files as this deletes the folder ("directory not
+    // empty"), so retry until it's really gone.
+    let chunks = store.chunks_dir(&slug);
+    for attempt in 0..50 {
+        match std::fs::remove_dir_all(&chunks) {
+            Ok(()) => break,
+            Err(_) if attempt < 49 => std::thread::sleep(Duration::from_millis(20)),
+            Err(err) => panic!("could not clear {chunks:?}: {err}"),
+        }
+    }
     let mut data = store.load_data(&slug);
     let floating = IVec3::new(4, 60, 4);
     data.fluids.push(FluidCell { x: floating.x, y: floating.y, z: floating.z, block: "water".into(), level: 3 });

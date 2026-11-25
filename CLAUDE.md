@@ -2965,3 +2965,12 @@ etc.) instead of inventing a new approach:
   extended storage (a sparse per-chunk table for blocks needing > 16 bits; it
   would be a new janitor), and a mod loader that registers blocks before
   `finalize_states`.
+- **A headless test that deletes a world's folder right after leaving it races
+  the background snapshot writes.** `fluid_saved_over_since_regenerated_terrain_
+  is_not_put_back` failed ~1 run in 8 with `remove_dir_all` -> "Directory not
+  empty": leaving a world queues chunk-file writes on the IoTaskPool, and they
+  were still creating files as the test deleted the folder. Not a state-word
+  bug (diagnosed from the error text and by measuring: 2 of 15 runs failed
+  before, 0 of 20 after). The test now retries the delete. I did not run the
+  old commit to prove the race pre-dated the state-word change; the cause is
+  in the test's own cleanup either way.
