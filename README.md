@@ -1435,7 +1435,10 @@ an array) per control in `keybinds/`:
 `weather:noon`, so it can't collide with the game's own controls or another mod's.
 `name` is what the screen shows, `category` the heading (default: the mod's name).
 `default` is the key combination it starts on - leave it out (or `"none"`) to start
-unbound, so a mod never takes a key from the player unasked. `command` is a chat
+unbound, so a mod never takes a key from the player unasked. `default_pad` is the same
+for a controller (`"south"`, `"a"`, `"right bumper"`, `"dpad up"`, `"none"`, as the
+Controller tab names them); a control's keyboard and controller bindings are separate, the
+player can change either, and a `command` runs from whichever is pressed. `command` is a chat
 command (slash optional) that runs when the control is pressed in a world that uses
 the mod; without one the control is only for code to read (below). The player can
 rebind, unbind and search it like any other, and the game flags it in red if it

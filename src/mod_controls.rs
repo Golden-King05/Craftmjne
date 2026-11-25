@@ -313,6 +313,7 @@ mod tests {
         assert!(notes.is_empty(), "{notes:?}");
         let find = defs.iter().find(|d| d.id == "example_mod:find_snow").expect("the example's control");
         assert_eq!(find.default, Chord::parse("Ctrl+F7"));
+        assert_eq!(find.default_pad, Some(crate::gamepad::PadButton::LeftBumper), "the example shows a controller default too");
         let command = find.command.as_deref().unwrap();
         // It names a command that really exists, so the example isn't a dead key.
         let registry = crate::commands::CommandRegistry::with_defaults();
@@ -328,5 +329,36 @@ mod tests {
         let (defs, notes) = load_mod_controls(&dir);
         assert!(defs.is_empty() && notes.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mod_can_give_a_control_a_controller_default() {
+        use crate::gamepad::PadButton;
+        let i = install(
+            "m",
+            &[
+                ("a.json", r#"{"id": "a", "default": "F7", "default_pad": "right bumper"}"#),
+                ("b.json", r#"{"id": "b", "default_pad": "none"}"#),
+                ("c.json", r#"{"id": "c"}"#),
+                ("d.json", r#"{"id": "d", "default_pad": "turbo"}"#),
+            ],
+        );
+        let (defs, notes) = load_mod_controls(&i.0);
+        let pad = |id: &str| defs.iter().find(|d| d.id == id).unwrap().default_pad;
+        assert_eq!(pad("m:a"), Some(PadButton::RightBumper), "any spelling the screen uses");
+        assert_eq!(pad("m:b"), None);
+        assert_eq!(pad("m:c"), None, "nothing is bound on a controller unasked either");
+        assert_eq!(pad("m:d"), None);
+        assert!(notes.iter().any(|n| n.contains("turbo") && n.contains("controller")), "a bad button is reported, and the control still loads: {notes:?}");
+        assert_eq!(defs.len(), 4);
+        // It goes through to the bindings, where the Controller tab can rebind it.
+        let mut b = Bindings::default();
+        for d in defs {
+            b.register(d);
+        }
+        assert_eq!(b.pad_get("m:a"), Some(PadButton::RightBumper));
+        b.pad_set("m:a", Some(PadButton::East));
+        assert_eq!(b.overrides().get("@pad:m:a").map(String::as_str), Some("east"));
+        assert_eq!(b.get("m:a"), Chord::parse("F7"), "the keyboard side is unaffected");
     }
 }

@@ -289,10 +289,32 @@ impl CommandEnv<'_, '_> {
 /// when nothing else owns the keyboard, and only in a world that uses the mod that
 /// defined it (a control from an uninstalled or unused mod does nothing).
 #[allow(clippy::too_many_arguments)]
+/// The commands of every control pressed this frame - by its key *or* its controller button.
+/// A mod's control only counts in a world that uses that mod (`mod_loaded`).
+pub(crate) fn fired_commands(
+    bindings: &Bindings,
+    keys: &ButtonInput<KeyCode>,
+    mouse: &ButtonInput<MouseButton>,
+    pad: &crate::gamepad::PadState,
+    mod_loaded: impl Fn(&std::path::Path) -> bool,
+) -> Vec<String> {
+    bindings
+        .defs()
+        .iter()
+        .filter(|d| {
+            d.command.is_some()
+                && d.source.as_ref().is_none_or(|s| mod_loaded(&s.path))
+                && (bindings.just_pressed(d.id.as_str(), keys, mouse) || bindings.pad_just_pressed(d.id.as_str(), pad))
+        })
+        .filter_map(|d| d.command.clone())
+        .collect()
+}
+
 fn run_bound_commands(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     bindings: Res<Bindings>,
+    pad: Option<Res<crate::gamepad::PadState>>,
     loaded: Option<Res<LoadedContent>>,
     chat: Res<ChatState>,
     paused: Res<PauseState>,
@@ -304,16 +326,8 @@ fn run_bound_commands(
     if chat.open || paused.open || inventory.open || death.open || !crate::player::cursor_grabbed(windows) {
         return;
     }
-    let lines: Vec<String> = bindings
-        .defs()
-        .iter()
-        .filter(|d| {
-            d.command.is_some()
-                && d.source.as_ref().is_none_or(|s| loaded.as_ref().is_some_and(|l| l.mods.iter().any(|m| m.path == s.path)))
-                && bindings.just_pressed(d.id.as_str(), &keys, &mouse)
-        })
-        .filter_map(|d| d.command.clone())
-        .collect();
+    let pad_state = pad.as_deref().cloned().unwrap_or_default();
+    let lines = fired_commands(&bindings, &keys, &mouse, &pad_state, |path| loaded.as_ref().is_some_and(|l| l.mods.iter().any(|m| m.path == path)));
     for line in lines {
         env.run(line.trim_start_matches('/'));
     }
@@ -958,5 +972,33 @@ mod tests {
         }
         tap(&mut app, KeyCode::F7);
         assert_eq!(mode(&app), GameMode::Survival, "nor does a free cursor (a menu is up)");
+    }
+
+    #[test]
+    fn a_mod_controls_command_runs_from_its_controller_button_too() {
+        use crate::gamepad::{PadButton, PadState};
+        use crate::keybinds::{ControlDef, ControlSource};
+        let mut b = Bindings::default();
+        let mut def = ControlDef::new("weather:noon", "Skip to noon", "Weather").with_default(crate::keybinds::Chord::parse("F7").unwrap()).with_default_pad(PadButton::North).with_command("/time set noon");
+        def.source = Some(ControlSource { mod_id: "weather".into(), mod_name: "Weather".into(), path: "mods/weather".into() });
+        assert!(b.register(def));
+        let (keys, mouse) = (ButtonInput::<KeyCode>::default(), ButtonInput::<MouseButton>::default());
+        let mut pad = PadState::default();
+        assert!(fired_commands(&b, &keys, &mouse, &pad, |_| true).is_empty(), "nothing pressed");
+        pad.just_pressed.insert(PadButton::North);
+        pad.pressed.insert(PadButton::North);
+        // Y is also the inventory's button, but that control has no command, so only the mod's runs.
+        assert_eq!(fired_commands(&b, &keys, &mouse, &pad, |_| true), vec!["/time set noon".to_string()]);
+        assert!(fired_commands(&b, &keys, &mouse, &pad, |_| false).is_empty(), "a world that doesn't use the mod ignores it");
+        // The player moves it to another button: the old one stops, the new one fires.
+        b.pad_set("weather:noon", Some(PadButton::West));
+        assert!(fired_commands(&b, &keys, &mouse, &pad, |_| true).is_empty());
+        let mut west = PadState::default();
+        west.just_pressed.insert(PadButton::West);
+        assert_eq!(fired_commands(&b, &keys, &mouse, &west, |_| true).len(), 1);
+        // And the keyboard still works on its own.
+        let mut k = ButtonInput::<KeyCode>::default();
+        k.press(KeyCode::F7);
+        assert_eq!(fired_commands(&b, &k, &mouse, &PadState::default(), |_| true).len(), 1);
     }
 }

@@ -2,5 +2,6 @@
   "id": "find_snow",
   "name": "Find the nearest snow",
   "default": "Ctrl+F7",
+  "default_pad": "left bumper",
   "command": "/locate biome snow"
 }

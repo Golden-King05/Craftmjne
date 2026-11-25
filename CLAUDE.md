@@ -3379,3 +3379,18 @@ etc.) instead of inventing a new approach:
     inventory / abandons knapping (`inventory_escape`/`knap_input` check `PadButton::East`).
   `menu_nav_for_tests` exists because the real system is gated on app state; the inventory test drives
   it directly alongside the real `click_slots` (break-tested: removing the secondary flag turns it red).
+
+- **Mods and controller bindings: adding was already one process; running was not.** A mod control's
+  `default_pad` (in `keybinds/*.json`, parsed by `PadButton::parse`, a bad name is a note and the
+  control still loads unbound on a controller) rides on `ControlDef::default_pad`, and the player's
+  change is the same `@pad:<id>` override as for the built-ins. The gap that needed fixing: a
+  control's `command` ran from `run_bound_commands`, which called `Bindings::just_pressed` directly
+  (keys/mouse only) instead of going through `Actions`, so a mod control could be *bound* to a button
+  and never fire. It is now `chat::fired_commands`, a pure function over keys, mouse and `PadState`
+  (break-tested: dropping the `pad_just_pressed` half turns the test red). General rule: anything that
+  asks "was this control pressed" must use `Actions` or ask both halves of `Bindings`; a direct
+  `bindings.just_pressed` is a keyboard-only bug waiting for a controller user.
+  **Not supported, deliberately:** a mod *changing the default* of an existing control (the game's or
+  another mod's) - for the keyboard either; mods only add controls. It would need a priority rule
+  between mods and a decision about players who never customised that control (they'd silently get the
+  new key), so it was left as a question rather than guessed at.
