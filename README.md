@@ -1249,7 +1249,7 @@ something a block or item file already says (see
 
 ```text
 mods/any_folder_name/
-  mod.json            { "id": "granite_pack", "name": "Granite Pack", "version": "1.0", "target_ver": ["1.3"] }
+  mod.json            { "id": "granite_pack", "name": "Granite Pack", "version": "1.0", "target_ver": ["2.0"] }
   blocks/*.json       same format as the game's own blocks/
   items/*.json
   recipes/*.json

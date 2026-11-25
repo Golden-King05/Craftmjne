@@ -2,6 +2,6 @@
   "id": "example_mod",
   "name": "Example mod",
   "version": "1.0",
-  "target_ver": ["1.3"],
+  "target_ver": ["2.0"],
   "description": "Makes dirt slow to dig, and adds an amber block you can craft from dirt."
 }
