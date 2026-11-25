@@ -23,6 +23,7 @@ use bevy::prelude::{Resource, Vec3};
 
 use crate::biome::Biome;
 use crate::config::SEA_LEVEL;
+use crate::entities::{EntityRegistry, SpawnEntity};
 use crate::save::{GameMode, SaveStore};
 use crate::state::ActiveWorld;
 use crate::terrain::{Feature, TerrainGenerator};
@@ -241,6 +242,39 @@ pub struct CommandContext<'a> {
     pub world_gen: &'a TerrainGenerator,
     /// Where to search outward from - the player's current position.
     pub player_pos: Vec3,
+    /// Which way the player faces (for `/summon`'s placement).
+    pub player_yaw: f32,
+    /// What a command wants done to the world that it can't do itself: the
+    /// chat system carries these out after the command returns.
+    pub requests: &'a mut WorldRequests,
+}
+
+/// Changes a command asks for, collected for `chat.rs` to apply.
+#[derive(Default)]
+pub struct WorldRequests {
+    pub spawns: Vec<SpawnEntity>,
+    pub clear_entities: bool,
+}
+
+/// Where `/summon` puts something: two and a half blocks ahead of a player
+/// standing at `player_pos` facing `yaw`, centred in its block column, at
+/// their feet's level, turned to face them.
+pub fn summon_position(player_pos: Vec3, yaw: f32) -> (Vec3, f32) {
+    let ahead = Vec3::new(-yaw.sin(), 0.0, -yaw.cos()) * 2.5;
+    let target = player_pos + ahead;
+    let feet = (player_pos.y + 0.01).floor();
+    (Vec3::new(target.x.floor() + 0.5, feet, target.z.floor() + 0.5), yaw + std::f32::consts::PI)
+}
+
+fn summon_handler(registry: &EntityRegistry, args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
+    let usage = || CommandOutcome::Usage(format!("Usage: /summon <{}>", registry.ids().join("|")));
+    let Some(name) = args.first() else { return usage() };
+    let Some(kind) = registry.by_name(&name.to_lowercase()) else {
+        return CommandOutcome::Usage(format!("Unknown entity \"{name}\". Try: {}", registry.ids().join(", ")));
+    };
+    let (pos, yaw) = summon_position(ctx.player_pos, ctx.player_yaw);
+    ctx.requests.spawns.push(SpawnEntity { kind, pos, yaw });
+    CommandOutcome::Ok(format!("Summoned {}.", registry.defs[kind].name))
 }
 
 /// One registered command: the metadata that drives both dispatch and the
@@ -386,6 +420,29 @@ impl CommandRegistry {
             )
             .alias("texturereport"),
         );
+        let entities = EntityRegistry::with_defaults();
+        let for_candidates = entities.ids();
+        reg.register(
+            CommandSpec::new(
+                "summon",
+                "/summon <entity>",
+                "Summon an entity (like the training dummy) in front of you.",
+                move |args, ctx| summon_handler(&entities, args, ctx),
+            )
+            .with_arg_candidates(move |prior| match prior {
+                [] => for_candidates.iter().map(|id| ArgCandidate::new(id.clone(), "An entity")).collect(),
+                _ => Vec::new(),
+            }),
+        );
+        reg.register(CommandSpec::new(
+            "clearentities",
+            "/clearentities",
+            "Remove every entity from the world.",
+            |_args, ctx| {
+                ctx.requests.clear_entities = true;
+                CommandOutcome::Ok("Removed all entities.".to_string())
+            },
+        ));
         reg.register(
             CommandSpec::new(
                 "locate",
@@ -557,8 +614,16 @@ mod tests {
         player_pos: Vec3,
     ) -> CommandOutcome {
         let registry = CommandRegistry::with_defaults();
-        let mut ctx =
-            CommandContext { mode, active, store, texture_report: report, world_gen, player_pos };
+        let mut ctx = CommandContext {
+            mode,
+            active,
+            store,
+            texture_report: report,
+            world_gen,
+            player_pos,
+            player_yaw: 0.0,
+            requests: &mut WorldRequests::default(),
+        };
         registry.execute(line, &mut ctx)
     }
 
@@ -692,7 +757,10 @@ mod tests {
     fn suggestions_lists_every_name_alphabetically_for_an_empty_prefix() {
         let registry = CommandRegistry::with_defaults();
         let names: Vec<String> = registry.suggestions("").into_iter().map(|s| s.text).collect();
-        assert_eq!(names, vec!["gamemode", "locate", "mode", "texture-report", "texturereport"]);
+        assert_eq!(
+            names,
+            vec!["clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
+        );
     }
 
     #[test]
@@ -723,6 +791,8 @@ mod tests {
                 texture_report: &no_report(),
                 world_gen: &world_gen,
                 player_pos: Vec3::ZERO,
+                player_yaw: 0.0,
+                requests: &mut WorldRequests::default(),
             };
             let outcome = registry.execute(&suggestion.text, &mut ctx);
             assert!(
@@ -759,6 +829,8 @@ mod tests {
             texture_report: &no_report(),
             world_gen: &world_gen,
             player_pos: Vec3::ZERO,
+            player_yaw: 0.0,
+            requests: &mut WorldRequests::default(),
         };
         let outcome = registry.execute("heal", &mut ctx);
         assert!(matches!(outcome, CommandOutcome::Ok(ref m) if m == "Healed."));
@@ -886,5 +958,51 @@ mod tests {
         let world_gen = test_world_gen();
         run("locate biome desert", &mut mode, &mut active, &store, &no_report(), &world_gen, Vec3::ZERO);
         assert!(active.meta.cheats);
+    }
+
+    #[test]
+    fn summon_places_it_ahead_of_the_player_centred_in_a_block_and_facing_them() {
+        // Yaw 0 looks toward -z.
+        let (pos, yaw) = summon_position(Vec3::new(8.5, 11.001, 8.5), 0.0);
+        assert_eq!(pos, Vec3::new(8.5, 11.0, 6.5), "two blocks ahead of the player's own block");
+        assert!((yaw - std::f32::consts::PI).abs() < 1e-6);
+        // Quarter turn to the left looks toward -x.
+        let (pos, _) = summon_position(Vec3::new(8.5, 11.001, 8.5), std::f32::consts::FRAC_PI_2);
+        assert_eq!((pos.x, pos.z), (6.5, 8.5));
+    }
+
+    #[test]
+    fn summon_requests_a_known_entity_and_refuses_an_unknown_one() {
+        let store = temp_store();
+        let mut active = active_world(&store);
+        let mut mode = GameMode::Survival;
+        let world_gen = test_world_gen();
+        let registry = CommandRegistry::with_defaults();
+        let mut requests = WorldRequests::default();
+        let mut ctx = CommandContext {
+            mode: &mut mode,
+            active: &mut active,
+            store: &store,
+            texture_report: &no_report(),
+            world_gen: &world_gen,
+            player_pos: Vec3::new(8.5, 11.0, 8.5),
+            player_yaw: 0.0,
+            requests: &mut requests,
+        };
+        assert!(matches!(registry.execute("summon Training_Dummy", &mut ctx), CommandOutcome::Ok(_)));
+        assert!(matches!(registry.execute("summon zombie", &mut ctx), CommandOutcome::Usage(_)));
+        assert!(matches!(registry.execute("summon", &mut ctx), CommandOutcome::Usage(_)));
+        assert!(matches!(registry.execute("clearentities", &mut ctx), CommandOutcome::Ok(_)));
+        assert_eq!(requests.spawns.len(), 1, "only the valid summon asked for anything");
+        assert!(requests.clear_entities);
+        let dummy = EntityRegistry::with_defaults().by_name("training_dummy").unwrap();
+        assert_eq!(requests.spawns[0].kind, dummy);
+    }
+
+    #[test]
+    fn summon_completes_entity_names() {
+        let registry = CommandRegistry::with_defaults();
+        let found = registry.arg_suggestions("summon", &[], "tra");
+        assert!(found.iter().any(|s| s.text == "summon training_dummy"), "{:?}", found.iter().map(|s| &s.text).collect::<Vec<_>>());
     }
 }

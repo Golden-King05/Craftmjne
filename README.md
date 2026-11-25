@@ -509,6 +509,44 @@ they were, with air above.)
   water under a flowing top cell, the same thing the fluid sim makes under
   a ledge. In freezing biomes it's frozen solid.
 
+## Entities and the player model
+
+`src/entities.rs`, `src/player_model.rs`. The first entity is the **training
+dummy**: the player model with a blank skin, standing where you summon it.
+`/summon training_dummy` puts one two blocks ahead of you, facing you;
+`/clearentities` removes them all. They're saved with the world. No animation,
+gravity, health or combat yet - it just stands there (and is solid).
+
+**The model** is the classic blocky layout: head 8x8x8, body 8x12x4, arms and
+legs 4x12x4 (in 1/16-block pixels, so 2 blocks tall and 1 across at scale 1),
+textured from a standard 64x64 skin. Wide arms; a slim variant can be added
+later as another layout. It faces -Z at yaw 0, like the player. Faces are
+shaded by direction in the vertex colors (so a flat skin still reads as a
+solid shape under this unlit renderer), and the whole figure is tinted by the
+light at its position, block and sky, so it darkens in caves and at night.
+The skin is generated procedurally; there's no PNG override yet.
+
+**Entity files** (`entities/*.json`):
+
+```json
+{
+  "id": "training_dummy", "name": "Training Dummy",
+  "model": "player", "skin": "blank", "height": 2.0,
+  "collisionbox_binding": true,
+  "collision_size": { "width": 1.0, "depth": 1.0, "height": 2.0 }
+}
+```
+
+`collisionbox_binding` decides what you bump into:
+
+- `true` - the entity's own box (`collision_size`, centred on its feet), so
+  you walk right up to it. The dummy is 1 wide, 1 deep, 2 tall.
+- `false` - it behaves like a block: the box is rounded out to every whole
+  block cell it touches.
+
+You can stand on it, walk around it, and can't place a block inside it. If
+one is summoned on top of you, you aren't pushed out; you can walk out.
+
 ## Chat and commands
 
 Press `T` to open a one-line chat box, or `/` to open it with `/` already
@@ -533,6 +571,9 @@ mainly as a place to type `/`-prefixed commands.
   hardcoded zero; see `texture_report::TextureReport`'s doc comment for
   why it should always read `0`). Below the counts it lists which specific
   names are yellow/red, in matching colors.
+- `/summon <entity>` — summon an entity (see
+  [Entities](#entities-and-the-player-model)) in front of you; Tab completes
+  names. `/clearentities` removes them all.
 - `/locate <biome|feature|structure> <name>` — reports the nearest match
   (coordinates + distance) to wherever you're standing. `biome` searches
   for `plains`/`forest`/`alpha_plains`/`snow`/`mountain` (the last being a
@@ -734,6 +775,8 @@ src/
 ├── health.rs    # HealthPlugin: health, breath, fall damage, regen, death screen + respawn, hearts HUD
 ├── knapping.rs  # knapping rules: stone, strikes, cracks, scoring, quality (pure)
 ├── knap_ui.rs   # the knapping screen
+├── entities.rs  # entity definitions, summoning, collision boxes (the training dummy)
+├── player_model.rs # the blocky player model: boxes, skin layout, mesh data
 ├── inventory.rs # InventoryPlugin: hotbar+storage, moving items, crafting panel, Creative's item list
 ├── item_registry.rs # every holdable item: one per block, plus plain items from items/
 ├── crafting.rs  # recipes from recipes/, stations, discovery, the craft rule

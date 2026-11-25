@@ -30,10 +30,11 @@ use crate::item_registry::ItemRegistry;
 use crate::interact::Hotbar;
 use crate::crafting::KnownItems;
 use crate::inventory::{inventory_to_save, restore_inventory, HeldStack, Inventory};
+use crate::entities::{EntityRegistry, SpawnEntity, WorldEntity};
 use crate::items::{DroppedItem, LoadedItems};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
-use crate::save::{BlockEdit, DroppedItemSave, FluidCell, GameMode, InventorySave, PlayerSave, SaveStore, WorldData};
+use crate::save::{BlockEdit, DroppedItemSave, EntitySave, FluidCell, GameMode, InventorySave, PlayerSave, SaveStore, WorldData};
 use crate::sky::{DayNightClock, NEW_WORLD_START_TIME};
 use crate::state::{ActiveWorld, AppState};
 use crate::snapshot::ChunkStore;
@@ -820,6 +821,8 @@ fn enter_world(
     mut held: ResMut<HeldStack>,
     mut known: ResMut<KnownItems>,
     items: Res<ItemRegistry>,
+    entity_registry: Option<Res<EntityRegistry>>,
+    mut spawn_entities: EventWriter<SpawnEntity>,
 ) {
     let generator = TerrainGenerator::new(active.meta.seed, &registry);
     commands.insert_resource(WorldGen(Arc::new(generator)));
@@ -901,6 +904,13 @@ fn enter_world(
         })
         .collect();
     commands.insert_resource(LoadedItems(dropped));
+    if let Some(entity_registry) = entity_registry {
+        for saved in &data.entities {
+            // A kind that no longer exists (a removed mod) is skipped.
+            let Some(kind) = entity_registry.by_name(&saved.kind) else { continue };
+            spawn_entities.write(SpawnEntity { kind, pos: Vec3::new(saved.x, saved.y, saved.z), yaw: saved.yaw });
+        }
+    }
 
     if let Ok(mut player) = players.single_mut() {
         *player = Player::default();
@@ -1079,7 +1089,7 @@ fn write_save(
         health: p.vitals.health,
         air: p.vitals.air,
     });
-    let (inventory, items, known_items) = carried.snapshot();
+    let (inventory, items, known_items, entities) = carried.snapshot();
     let data = WorldData {
         player,
         edits,
@@ -1089,6 +1099,7 @@ fn write_save(
         inventory: Some(inventory),
         items,
         known_items,
+        entities,
     };
     persist(store.clone(), active.slug.clone(), data, background);
 }
@@ -1106,10 +1117,12 @@ pub struct CarriedState<'w, 's> {
     known: Res<'w, KnownItems>,
     registry: Res<'w, ItemRegistry>,
     items: Query<'w, 's, &'static DroppedItem>,
+    entities: Query<'w, 's, &'static WorldEntity>,
+    entity_registry: Option<Res<'w, EntityRegistry>>,
 }
 
 impl CarriedState<'_, '_> {
-    fn snapshot(&self) -> (InventorySave, Vec<DroppedItemSave>, Vec<String>) {
+    fn snapshot(&self) -> (InventorySave, Vec<DroppedItemSave>, Vec<String>, Vec<EntitySave>) {
         let registry = &*self.registry;
         let inventory = inventory_to_save(&self.hotbar, &self.inventory, &self.held, registry);
         let mut known: Vec<String> = self.known.0.iter().map(|&id| registry.def(id).id.clone()).collect();
@@ -1128,7 +1141,20 @@ impl CarriedState<'_, '_> {
                 age: item.age,
             })
             .collect();
-        (inventory, items, known)
+        let entities = self
+            .entity_registry
+            .as_ref()
+            .map(|reg| {
+                self.entities
+                    .iter()
+                    .filter_map(|e| {
+                        let def = reg.defs.get(e.kind)?;
+                        Some(EntitySave { kind: def.id.clone(), x: e.pos.x, y: e.pos.y, z: e.pos.z, yaw: e.yaw })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (inventory, items, known, entities)
     }
 }
 
@@ -1651,6 +1677,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<LightQueue>()
             .init_resource::<DayNightClock>()
             .init_resource::<TextureReport>()
+            .add_event::<SpawnEntity>()
             .add_event::<BlockSetEvent>()
             .add_event::<ChunkMeshedEvent>()
             .add_systems(Startup, compile_content)

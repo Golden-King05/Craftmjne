@@ -10,6 +10,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::blocks::{BlockTables, Tables};
 use crate::chat::ChatState;
+use crate::entities::{Aabb, EntityColliders};
 use crate::config::{WorldSettings, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT};
 use crate::inventory::InventoryState;
 use crate::health::Vitals;
@@ -57,6 +58,10 @@ pub struct Player {
     /// `health::tick_vitals` to turn it into damage (and reset it).
     pub landed_fall: f32,
     accumulator: f32,
+    /// Other solid bodies the player collides with (the boxes of entities
+    /// such as the training dummy), refreshed every frame by
+    /// `player_update` from `entities::EntityColliders`.
+    pub solids: Vec<Aabb>,
 }
 
 impl Default for Player {
@@ -75,6 +80,7 @@ impl Default for Player {
             fall_peak: f32::NEG_INFINITY,
             landed_fall: 0.0,
             accumulator: 0.0,
+            solids: Vec::new(),
         }
     }
 }
@@ -99,11 +105,13 @@ impl Player {
             && bz < self.pos.z + HALF_W
     }
 
-    /// Axis-separated AABB sweep: move, then clamp against overlapping voxels.
+    /// Axis-separated AABB sweep: move, then clamp against overlapping voxels
+    /// and entity boxes.
     fn move_axis(&mut self, map: &ChunkMap, tables: &Tables, axis: usize, delta: f32) {
         if delta == 0.0 {
             return;
         }
+        let before = self.pos;
         self.pos[axis] += delta;
 
         let min = IVec3::new(
@@ -117,7 +125,14 @@ impl Player {
             (self.pos.z + HALF_W).floor() as i32,
         );
 
-        let mut bound: Option<i32> = None;
+        let mut bound: Option<f32> = None;
+        let mut tighten = |candidate: f32| {
+            bound = Some(match bound {
+                Some(b) if delta > 0.0 => b.min(candidate),
+                Some(b) => b.max(candidate),
+                None => candidate,
+            });
+        };
         for y in min.y..=max.y {
             for z in min.z..=max.z {
                 for x in min.x..=max.x {
@@ -125,28 +140,38 @@ impl Player {
                         continue;
                     }
                     let v = [x, y, z][axis];
-                    bound = Some(match bound {
-                        Some(b) if delta > 0.0 => b.min(v),
-                        Some(b) => b.max(v + 1),
-                        None if delta > 0.0 => v,
-                        None => v + 1,
-                    });
+                    tighten(if delta > 0.0 { v as f32 } else { (v + 1) as f32 });
                 }
+            }
+        }
+        // Entity boxes. One the player was already inside on this axis (a
+        // dummy summoned on top of them) is ignored rather than ejecting
+        // them: only a box they were clear of before the move can stop them.
+        let (lo_off, hi_off) = if axis == 1 { (0.0, HEIGHT) } else { (HALF_W, HALF_W) };
+        let body = |p: Vec3| Aabb {
+            min: Vec3::new(p.x - HALF_W, p.y, p.z - HALF_W),
+            max: Vec3::new(p.x + HALF_W, p.y + HEIGHT, p.z + HALF_W),
+        };
+        let (now, was) = (body(self.pos), body(before));
+        for solid in &self.solids {
+            if !now.overlaps(solid) {
+                continue;
+            }
+            if delta > 0.0 && was.max[axis] <= solid.min[axis] + EPS {
+                tighten(solid.min[axis]);
+            } else if delta < 0.0 && was.min[axis] >= solid.max[axis] - EPS {
+                tighten(solid.max[axis]);
             }
         }
         let Some(bound) = bound else { return };
 
-        if axis == 1 {
-            if delta > 0.0 {
-                self.pos.y = bound as f32 - HEIGHT - EPS;
-            } else {
-                self.pos.y = bound as f32 + EPS;
+        if delta > 0.0 {
+            self.pos[axis] = bound - hi_off - EPS;
+        } else {
+            self.pos[axis] = bound + lo_off + EPS;
+            if axis == 1 {
                 self.on_ground = true;
             }
-        } else if delta > 0.0 {
-            self.pos[axis] = bound as f32 - HALF_W - EPS;
-        } else {
-            self.pos[axis] = bound as f32 + HALF_W + EPS;
         }
         self.vel[axis] = 0.0;
     }
@@ -428,10 +453,12 @@ fn player_update(
     paused: Res<PauseState>,
     inventory: Res<InventoryState>,
     death: Res<DeathState>,
+    colliders: Res<EntityColliders>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
     let Some(tables) = tables else { return };
     let Ok((mut player, mut transform)) = players.single_mut() else { return };
+    player.solids.clone_from(&colliders.0);
 
     // Only the pause menu actually freezes the world. Chat and the
     // inventory screen just take over WASD/Space/mouse-look - gravity,
@@ -625,6 +652,73 @@ mod tests {
         assert!(player.pos.x > 11.0 && player.pos.x <= 12.0 - HALF_W + 0.01,
             "x = {}", player.pos.x);
         assert!((player.pos.y - 11.0).abs() < 0.01, "sank: y = {}", player.pos.y);
+    }
+
+    /// A dummy-sized box (1x1x2) standing on the flat world's floor.
+    fn dummy_box(x: f32, z: f32) -> Aabb {
+        Aabb { min: Vec3::new(x - 0.5, 11.0, z - 0.5), max: Vec3::new(x + 0.5, 13.0, z + 0.5) }
+    }
+
+    #[test]
+    fn an_entity_box_stops_the_player_like_a_wall_and_can_be_walked_around() {
+        let (map, tables) = flat_world();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyD); // +x
+        let mut player = Player {
+            pos: Vec3::new(8.5, 11.001, 8.5),
+            yaw: 0.0,
+            spawned: true,
+            solids: vec![dummy_box(11.5, 8.5)],
+            ..Player::default()
+        };
+        for _ in 0..600 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        // The box's near face is x = 11.
+        assert!(player.pos.x <= 11.0 - HALF_W + 0.01 && player.pos.x > 10.5, "x = {}", player.pos.x);
+
+        // Beside it, the way is clear.
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyW); // -z at yaw 0
+        for _ in 0..600 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!(player.pos.z < 8.5 - 2.0, "walked past it: z = {}", player.pos.z);
+    }
+
+    #[test]
+    fn the_player_can_stand_on_an_entity_box() {
+        let (map, tables) = flat_world();
+        let keys = ButtonInput::<KeyCode>::default();
+        let mut player = Player {
+            pos: Vec3::new(11.5, 16.0, 8.5),
+            spawned: true,
+            solids: vec![dummy_box(11.5, 8.5)],
+            ..Player::default()
+        };
+        for _ in 0..600 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!(player.on_ground);
+        assert!((player.pos.y - 13.0).abs() < 0.01, "y = {}", player.pos.y);
+    }
+
+    #[test]
+    fn a_player_already_inside_a_box_is_not_thrown_out_of_it() {
+        let (map, tables) = flat_world();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyD);
+        let mut player = Player {
+            pos: Vec3::new(11.5, 11.001, 8.5),
+            yaw: 0.0,
+            spawned: true,
+            solids: vec![dummy_box(11.5, 8.5)],
+            ..Player::default()
+        };
+        for _ in 0..240 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!(player.pos.x > 12.0, "walked out through the far side: x = {}", player.pos.x);
     }
 
     #[test]

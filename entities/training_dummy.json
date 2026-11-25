@@ -1,0 +1,9 @@
+{
+  "id": "training_dummy",
+  "name": "Training Dummy",
+  "model": "player",
+  "skin": "blank",
+  "height": 2.0,
+  "collisionbox_binding": true,
+  "collision_size": { "width": 1.0, "depth": 1.0, "height": 2.0 }
+}

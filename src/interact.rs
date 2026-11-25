@@ -367,7 +367,8 @@ fn interact(
             let held_fluid = registry.def(existing).fluid.then(|| registry.def(existing).layered.map_or(existing, |l| l.layer));
             let waterlogged = held_fluid.and_then(|fluid| registry.variant(id, fluid));
             let id = waterlogged.unwrap_or(id);
-            let blocked = registry.def(id).solid && player.intersects_block(place_pos);
+            let blocked = registry.def(id).solid
+                && (player.intersects_block(place_pos) || player.solids.iter().any(|b| b.overlaps_cell(place_pos)));
             // Something that lies on the ground needs ground under it.
             let unsupported = registry.def(id).shape == Shape::Floor
                 && !registry.def(map.get_block(place_pos - IVec3::Y)).solid;

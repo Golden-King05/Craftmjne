@@ -32,7 +32,8 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 use std::collections::VecDeque;
 
-use crate::commands::{CommandContext, CommandRegistry, CommandSuggestion};
+use crate::commands::{CommandContext, CommandRegistry, CommandSuggestion, WorldRequests};
+use crate::entities::{ClearEntities, SpawnEntity};
 use crate::inventory::InventoryState;
 use crate::save::{GameMode, SaveStore};
 use crate::state::{ActiveWorld, AppState, DeathState, PauseState};
@@ -249,6 +250,8 @@ fn chat_text_input(
     world_gen: Res<crate::world::WorldGen>,
     players: Query<&crate::player::Player>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut spawn_events: EventWriter<SpawnEntity>,
+    mut clear_events: EventWriter<ClearEntities>,
 ) {
     if !chat.open {
         events.clear();
@@ -279,6 +282,8 @@ fn chat_text_input(
                 if !text.is_empty() {
                     if let Some(rest) = text.strip_prefix('/') {
                         let player_pos = players.single().map(|p| p.pos).unwrap_or(Vec3::ZERO);
+                        let player_yaw = players.single().map(|p| p.yaw).unwrap_or(0.0);
+                        let mut requests = WorldRequests::default();
                         let mut ctx = CommandContext {
                             mode: &mut mode,
                             active: &mut active,
@@ -286,9 +291,17 @@ fn chat_text_input(
                             texture_report: &texture_report,
                             world_gen: &world_gen.0,
                             player_pos,
+                            player_yaw,
+                            requests: &mut requests,
                         };
                         let outcome = registry.execute(rest, &mut ctx);
                         log.push(outcome.message());
+                        for spawn in requests.spawns.drain(..) {
+                            spawn_events.write(spawn);
+                        }
+                        if requests.clear_entities {
+                            clear_events.write(ClearEntities);
+                        }
                     } else {
                         log.push(text);
                     }
@@ -588,7 +601,10 @@ mod tests {
     fn a_bare_slash_lists_every_command_alphabetically() {
         let registry = CommandRegistry::with_defaults();
         let names: Vec<String> = command_suggestions("/", &registry).into_iter().map(|s| s.text).collect();
-        assert_eq!(names, vec!["gamemode", "locate", "mode", "texture-report", "texturereport"]);
+        assert_eq!(
+            names,
+            vec!["clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
+        );
     }
 
     #[test]

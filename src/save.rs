@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 5;
+pub const SAVE_FORMAT: u32 = 6;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +108,9 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
         // a format-4 build would read a saved tool back as quality 0 and
         // write that over the real value.
+        // Step 5 -> 6 (entities such as the training dummy) is defaults only
+        // too: a format-5 build would load the world without them and save
+        // it back, deleting every one.
         // Step 3 -> 4 (waterlogged blocks, saved by the name of their
         // `pebble@water` variant) is defaults only too: a format-3 build
         // doesn't know those names and would read them as missing blocks.
@@ -304,6 +307,20 @@ pub struct WorldData {
     /// discovered (`crafting::KnownItems`).
     #[serde(default)]
     pub known_items: Vec<String>,
+    /// Entities standing in the world (`entities::WorldEntity`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<EntitySave>,
+}
+
+/// An entity in the world, by its definition's id (so a save survives the
+/// entity list changing order).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct EntitySave {
+    pub kind: String,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub yaw: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -714,6 +731,7 @@ mod tests {
             inventory: Some(inventory.clone()),
             items: vec![item.clone()],
             known_items: vec!["log".into(), "twig".into()],
+            entities: vec![EntitySave { kind: "training_dummy".into(), x: 1.5, y: 2.0, z: 3.5, yaw: 0.25 }],
         };
         store.save_data(&slug, &data).unwrap();
 
@@ -730,6 +748,7 @@ mod tests {
         assert_eq!(loaded.inventory, Some(inventory));
         assert_eq!(loaded.items, vec![item]);
         assert_eq!(loaded.known_items, vec!["log".to_string(), "twig".to_string()]);
+        assert_eq!(loaded.entities, data.entities);
     }
 
     #[test]

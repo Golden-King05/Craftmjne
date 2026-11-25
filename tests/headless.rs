@@ -101,7 +101,8 @@ fn reload_app(temp: &TempSaves) -> App {
 /// systems read that would otherwise come from plugins this app leaves out
 /// (chat, the inventory screen, input).
 fn add_gameplay(app: &mut App) {
-    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin));
+    app.init_asset::<bevy::pbr::StandardMaterial>();
+    app.add_plugins((WorldPlugin, LightPlugin, ItemsPlugin, craftmjne::entities::EntitiesPlugin));
     app.init_resource::<craftmjne::crafting::NearbyStations>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.init_resource::<craftmjne::chat::ChatState>();
@@ -1204,4 +1205,31 @@ fn a_new_world_does_not_inherit_the_last_worlds_inventory() {
     app.update();
     assert!(app.world().resource::<Hotbar>().slots.iter().all(|s| s.is_empty()));
     assert!(app.world().resource::<Inventory>().slots.iter().all(|s| s.is_empty()));
+}
+
+/// A summoned dummy is part of the world's save: leave, come back, and it's
+/// where it was, facing the same way - and a world with none has none.
+#[test]
+fn a_training_dummy_survives_leaving_and_reentering_a_world() {
+    use craftmjne::entities::{EntityRegistry, SpawnEntity, WorldEntity};
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let kind = app.world().resource::<EntityRegistry>().by_name("training_dummy").unwrap();
+    app.world_mut().send_event(SpawnEntity { kind, pos: Vec3::new(20.5, 33.0, -4.5), yaw: 1.25 });
+    app.update();
+    app.update();
+    assert_eq!(app.world_mut().query::<&WorldEntity>().iter(app.world()).count(), 1);
+
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update(); // saves, and the entity is despawned with the world
+    assert_eq!(app.world_mut().query::<&WorldEntity>().iter(app.world()).count(), 0);
+
+    let mut app2 = reload_app(&temp);
+    app2.update();
+    app2.update();
+    let found: Vec<_> = app2.world_mut().query::<&WorldEntity>().iter(app2.world()).cloned().collect();
+    assert_eq!(found.len(), 1, "the dummy came back exactly once");
+    assert_eq!(found[0].kind, kind);
+    assert_eq!(found[0].pos, Vec3::new(20.5, 33.0, -4.5));
+    assert_eq!(found[0].yaw, 1.25);
 }

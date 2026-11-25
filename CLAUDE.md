@@ -2679,3 +2679,44 @@ etc.) instead of inventing a new approach:
   difficulty test covers all shipped outlines together, so it needs no edit
   when shapes are added. Swords have no combat effect yet (damage is on the
   tier, unused until a combat step).
+- **The training dummy needed an entity framework, and collision into the
+  player was the part with a trap.** `entities.rs` is data (`entities/*.json`,
+  `EntityRegistry`), a `WorldEntity` component, `SpawnEntity`/`ClearEntities`
+  events, and `EntityColliders` (every box this frame). `player_model.rs` is
+  pure geometry (six boxes, the 64x64 skin layout, mesh data), tested for
+  the things that are easy to get silently wrong: no two boxes claim the same
+  skin pixel, every face winds outward, the head's front is -Z.
+  - **`collisionbox_binding`**: `true` = the entity's own `collision_size`
+    box; `false` = that box rounded out to whole block cells ("like a
+    block"). The user's wording was ambiguous about which value meant which;
+    I read it so the dummy (bound to its model, 1x1x2) is `true`. Say so if it
+    should be the other way round.
+  - **Collision runs through `Player::solids`**, a `Vec<Aabb>` copied from
+    `EntityColliders` each frame in `player_update`, rather than a new
+    parameter on `Player::step` (nine existing tests call it, and the same
+    field lets `interact.rs` refuse block placement inside an entity without
+    another system param). `move_axis` merges entity bounds into the same
+    "tightest bound" as the voxels.
+  - **A box the player was already inside on that axis must be ignored.**
+    Only a box they were clear of *before* the move can stop them
+    (`was.max <= solid.min` going up the axis, and the mirror). Without it,
+    summoning a dummy on someone ejects them or traps them. The break-test
+    that removes that check turns `a_player_already_inside_a_box_is_not_thrown_
+    out_of_it` red, and ignoring `solids` entirely turns the other two red.
+  - **Lighting** can't use the chunk material (it only samples the block
+    atlas), so entities use an unlit `StandardMaterial` whose `base_color` is
+    `max(block, sky * current_sky_color)` at the entity's cell, the same
+    formula as `chunk.wgsl`, recomputed per frame.
+  - **Saved with the world** (`WorldData::entities`, by definition id so
+    reordering the list can't scramble a save; `SAVE_FORMAT` 5 -> 6, defaults
+    only). `enter_world` fires `SpawnEntity` events rather than spawning
+    itself, and `CarriedState` reads `Option<Res<EntityRegistry>>` because
+    the headless harness's apps may not have the plugin. The headless
+    reload test goes red with the load loop disabled.
+  - **A bare `App` can run the plugin's systems** (`MinimalPlugins`,
+    `AssetPlugin`, `StatesPlugin`, `init_asset` for Mesh/Image/
+    StandardMaterial/ChunkMaterial), which is what proves the schedule
+    builds - a pure unit test of `collision_box` says nothing about that.
+  - **Not done yet, on purpose:** gravity/physics for entities (a dummy
+    summoned in mid-air floats), animation, a skin PNG override, slim arms,
+    hit reactions. `/summon` places the dummy at the player's feet level.
