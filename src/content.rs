@@ -278,4 +278,16 @@ mod tests {
         m2.file("recipes/bad.json", r#"{"inputs": [{"item": "nope", "count": 1}], "output": {"item": "stick", "count": 1}}"#);
         assert!(try_build_content(&with(&[&m2])).err().expect("refused").contains("nope"));
     }
+
+    /// The example mod in `docs/` is what the docs tell people to copy, so it has
+    /// to keep working: it loads, does what its description says, and is a mod.
+    #[test]
+    fn the_example_mod_in_the_docs_works() {
+        let path = PathBuf::from("docs").join("example-mod");
+        assert_eq!(crate::mods::read_mod(&path).unwrap().name, "Example mod", "it is a valid mod");
+        let c = build_content(&ContentPaths::vanilla().with_mods(&[path]));
+        assert_eq!(c.registry.def(c.registry.id("dirt")).hardness, 8.0, "dirt is slow to dig");
+        assert!(c.registry.by_name("amber").is_ok(), "amber was added");
+        assert!(c.recipes.recipes.iter().any(|r| r.id == "amber"), "and a recipe for it");
+    }
 }

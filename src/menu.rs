@@ -1,4 +1,5 @@
-//! Main menu, Worlds (list + create), Settings, and Mods (placeholder)
+//! Main menu, Worlds (list + create, with a mod picker and branching), Settings
+//! (including where new worlds keep their mods), and Mods (the installed list)
 //! screens. Each screen is a Bevy UI tree spawned `OnEnter` its `AppState`
 //! and despawned `OnExit`; buttons carry a [`MenuButton`] action component
 //! and one handler system matches on it.
@@ -9,7 +10,8 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::config::WorldSettings;
-use crate::save::{GameMode, GraphicsSettings, SaveStore};
+use crate::mods::{create_world_with_mods, resolve_world_mods, scan_mods, InstalledMods, MenuNotice, ModSetup};
+use crate::save::{GameMode, GraphicsSettings, ModStorage, SaveStore, WorldMeta};
 use crate::state::{ActiveWorld, AppState, PauseState};
 
 const PANEL_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.82);
@@ -32,6 +34,15 @@ enum MenuButton {
     FocusField(TextField),
     RenderDistanceDelta(i32),
     SetGameMode(GameMode),
+    /// Tick or untick an installed mod for the world being created.
+    ToggleMod(String),
+    SetModStorage(ModStorage),
+    /// Share this other world's mods instead of choosing any (`None`: don't).
+    SetBranch(Option<String>),
+    /// From the worlds list: start a new world that branches this one.
+    BranchFrom(String),
+    /// Settings: where newly created worlds keep their mods.
+    ToggleDefaultModStorage,
     Resume,
     QuitToMenu,
 }
@@ -56,6 +67,11 @@ struct CreateWorldForm {
     seed_text: String,
     focus: TextField,
     mode: GameMode,
+    /// Installed mods ticked for this world.
+    chosen_mods: Vec<String>,
+    mod_storage: ModStorage,
+    /// Share another world's mods instead (its slug).
+    branch_of: Option<String>,
 }
 
 #[derive(Component)]
@@ -76,6 +92,8 @@ struct SettingsRoot;
 struct ModsRoot;
 #[derive(Component)]
 struct RenderDistanceLabel;
+#[derive(Component)]
+struct ModStorageLabel;
 #[derive(Component)]
 struct PauseRoot;
 
@@ -195,9 +213,14 @@ fn setup_main_menu(mut commands: Commands) {
 // Worlds screen (list + create form)
 // ---------------------------------------------------------------------------
 
-fn setup_worlds(mut commands: Commands, mut mode: ResMut<WorldsScreenMode>, mut form: ResMut<CreateWorldForm>) {
+fn setup_worlds(
+    mut commands: Commands,
+    mut mode: ResMut<WorldsScreenMode>,
+    mut form: ResMut<CreateWorldForm>,
+    store: Res<SaveStore>,
+) {
     *mode = WorldsScreenMode::List;
-    *form = CreateWorldForm::default();
+    *form = CreateWorldForm { mod_storage: store.load_graphics_settings().mod_storage, ..CreateWorldForm::default() };
     commands.spawn((WorldsRoot, full_screen_root())).with_children(|root| {
         root.spawn(panel()).with_children(|p| {
             p.spawn(title("Select World"));
@@ -213,10 +236,57 @@ fn mode_label(mode: GameMode) -> &'static str {
     }
 }
 
+/// What a world's mod setup looks like in the list, e.g. "2 mods in this world".
+fn mods_summary(meta: &WorldMeta) -> Option<String> {
+    if let Some(host) = &meta.branch_of {
+        return Some(format!("mods shared from {host}"));
+    }
+    if meta.mods.is_empty() {
+        return None;
+    }
+    let n = meta.mods.len();
+    let plural = if n == 1 { "mod" } else { "mods" };
+    Some(match meta.mod_storage {
+        ModStorage::Instance => format!("{n} {plural} (from the game folder)"),
+        ModStorage::World => format!("{n} {plural} (kept in the world)"),
+    })
+}
+
+/// A small two-state button whose border shows whether it's selected. Used for
+/// the mod tick-boxes and the storage choice.
+fn spawn_choice_button(parent: &mut ChildSpawnerCommands, label: &str, action: MenuButton, selected: bool, width: f32) {
+    parent
+        .spawn((
+            Button,
+            action,
+            Node {
+                width: Val::Px(width),
+                height: Val::Px(32.0),
+                border: UiRect::all(Val::Px(2.0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BorderColor(if selected { Color::srgba(0.95, 0.85, 0.3, 0.95) } else { Color::srgba(1.0, 1.0, 1.0, 0.25) }),
+            BackgroundColor(BUTTON_IDLE),
+        ))
+        .with_children(|p| {
+            p.spawn((Text::new(label), TextFont { font_size: 14.0, ..default() }, TextColor(Color::WHITE)));
+        });
+}
+
+fn dim_text(parent: &mut ChildSpawnerCommands, text: impl Into<String>, size: f32) {
+    parent.spawn((Text::new(text.into()), TextFont { font_size: size, ..default() }, TextColor(TEXT_DIM)));
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rebuild_worlds_content(
     mut commands: Commands,
     mode: Res<WorldsScreenMode>,
     store: Res<SaveStore>,
+    installed: Res<InstalledMods>,
+    form: Res<CreateWorldForm>,
+    mut notice: ResMut<MenuNotice>,
     content: Query<Entity, With<WorldsContent>>,
 ) {
     if !mode.is_changed() {
@@ -228,7 +298,17 @@ fn rebuild_worlds_content(
     match *mode {
         WorldsScreenMode::List => {
             let worlds = store.list_worlds();
+            // Why a world wouldn't open last time (a mod went missing), once.
+            let message = notice.0.take();
             commands.entity(content).with_children(|p| {
+                if let Some(message) = message {
+                    p.spawn((
+                        Text::new(message),
+                        TextFont { font_size: 14.0, ..default() },
+                        TextColor(Color::srgb(0.95, 0.6, 0.4)),
+                        Node { width: Val::Px(400.0), ..default() },
+                    ));
+                }
                 if worlds.is_empty() {
                     p.spawn((
                         Text::new("No worlds yet - create one below."),
@@ -237,52 +317,75 @@ fn rebuild_worlds_content(
                     ));
                 }
                 for (slug, meta) in &worlds {
-                    // A world saved by a newer build is shown, but not as a
-                    // button: entering it would rewrite it in this build's
-                    // older format and drop whatever the newer one stored.
-                    // Leaving it out of the list entirely would be worse -
-                    // it'd just look like the world had vanished.
-                    let too_new = matches!(
+                    // A world that can't be opened is shown, but not as a
+                    // button, and says why: a newer build wrote it (entering
+                    // would rewrite it in this older format), or a mod it
+                    // needs is missing (entering would drop that mod's blocks
+                    // from the next save). Leaving it out of the list would
+                    // be worse - it would just look like the world had vanished.
+                    let blocked: Option<String> = if matches!(
                         crate::save::compatibility(meta.format),
                         crate::save::SaveCompatibility::TooNew { .. }
-                    );
-                    let row_node = Node {
-                        width: Val::Px(360.0),
-                        padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
-                        flex_direction: FlexDirection::Column,
-                        ..default()
-                    };
-                    let mut row = if too_new {
-                        p.spawn((row_node, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25))))
+                    ) {
+                        Some("made by a newer version - update Craftmjne to open it".to_string())
                     } else {
-                        p.spawn((
-                            Button,
-                            MenuButton::LoadWorld(slug.clone()),
-                            row_node,
-                            BackgroundColor(BUTTON_IDLE),
-                        ))
+                        resolve_world_mods(&store, slug, meta, &installed.0).err().map(|e| e.message())
                     };
-                    row.with_children(|row| {
-                        row.spawn((
-                            Text::new(meta.name.clone()),
-                            TextFont { font_size: 17.0, ..default() },
-                            TextColor(if too_new { TEXT_DIM } else { Color::WHITE }),
-                        ));
-                        let subtitle = if too_new {
-                            "made by a newer version - update Craftmjne to open it".to_string()
-                        } else {
-                            format!(
-                                "seed {}  -  {}  -  {}",
-                                meta.seed,
-                                mode_label(meta.mode),
-                                relative_time(meta.last_played_at)
-                            )
+                    let can_branch = meta.mod_storage == ModStorage::World && meta.branch_of.is_none() && blocked.is_none();
+                    p.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|line| {
+                        let row_node = Node {
+                            width: Val::Px(if can_branch { 290.0 } else { 360.0 }),
+                            padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
+                            flex_direction: FlexDirection::Column,
+                            ..default()
                         };
-                        row.spawn((
-                            Text::new(subtitle),
-                            TextFont { font_size: 12.0, ..default() },
-                            TextColor(TEXT_DIM),
-                        ));
+                        let mut row = if blocked.is_some() {
+                            line.spawn((row_node, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25))))
+                        } else {
+                            line.spawn((Button, MenuButton::LoadWorld(slug.clone()), row_node, BackgroundColor(BUTTON_IDLE)))
+                        };
+                        row.with_children(|row| {
+                            row.spawn((
+                                Text::new(meta.name.clone()),
+                                TextFont { font_size: 17.0, ..default() },
+                                TextColor(if blocked.is_some() { TEXT_DIM } else { Color::WHITE }),
+                            ));
+                            let subtitle = blocked.clone().unwrap_or_else(|| {
+                                let mut s = format!(
+                                    "seed {}  -  {}  -  {}",
+                                    meta.seed,
+                                    mode_label(meta.mode),
+                                    relative_time(meta.last_played_at)
+                                );
+                                if let Some(m) = mods_summary(meta) {
+                                    s.push_str("  -  ");
+                                    s.push_str(&m);
+                                }
+                                s
+                            });
+                            row.spawn((
+                                Text::new(subtitle),
+                                TextFont { font_size: 12.0, ..default() },
+                                TextColor(TEXT_DIM),
+                                Node { width: Val::Px(260.0), ..default() },
+                            ));
+                        });
+                        if can_branch {
+                            line.spawn((
+                                Button,
+                                MenuButton::BranchFrom(slug.clone()),
+                                Node {
+                                    width: Val::Px(64.0),
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    ..default()
+                                },
+                                BackgroundColor(BUTTON_IDLE),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((Text::new("Branch"), TextFont { font_size: 13.0, ..default() }, TextColor(Color::WHITE)));
+                            });
+                        }
                     });
                 }
                 spawn_button(p, "Create World", MenuButton::ShowCreateForm);
@@ -290,14 +393,16 @@ fn rebuild_worlds_content(
             });
         }
         WorldsScreenMode::Create => {
+            let mods = scan_mods(&installed.0);
+            let hosts: Vec<(String, WorldMeta)> = store
+                .list_worlds()
+                .into_iter()
+                .filter(|(_, m)| m.mod_storage == ModStorage::World && m.branch_of.is_none())
+                .collect();
             commands.entity(content).with_children(|p| {
                 spawn_text_field(p, "World name", TextField::Name);
                 spawn_text_field(p, "Seed (blank = random)", TextField::Seed);
-                p.spawn((
-                    Text::new("Game mode"),
-                    TextFont { font_size: 13.0, ..default() },
-                    TextColor(TEXT_DIM),
-                ));
+                dim_text(p, "Game mode", 13.0);
                 p.spawn(Node {
                     column_gap: Val::Px(8.0),
                     margin: UiRect::bottom(Val::Px(8.0)),
@@ -307,6 +412,40 @@ fn rebuild_worlds_content(
                     spawn_mode_button(row, "Survival", GameMode::Survival);
                     spawn_mode_button(row, "Creative", GameMode::Creative);
                 });
+
+                // Mods: share another world's, or pick from the installed ones.
+                if !hosts.is_empty() {
+                    dim_text(p, "Share the mods of another world (a branch)", 13.0);
+                    p.spawn(Node { column_gap: Val::Px(6.0), flex_wrap: FlexWrap::Wrap, margin: UiRect::bottom(Val::Px(8.0)), ..default() })
+                        .with_children(|row| {
+                            spawn_choice_button(row, "No", MenuButton::SetBranch(None), form.branch_of.is_none(), 50.0);
+                            for (slug, meta) in &hosts {
+                                let name: String = meta.name.chars().take(14).collect();
+                                spawn_choice_button(row, &name, MenuButton::SetBranch(Some(slug.clone())), form.branch_of.as_deref() == Some(slug), 120.0);
+                            }
+                        });
+                }
+                if form.branch_of.is_some() {
+                    dim_text(p, "This world will use that world's mods and keep none of its own.", 12.0);
+                } else if mods.is_empty() {
+                    dim_text(p, format!("No mods installed. Put mod folders in {}", installed.0.display()), 12.0);
+                } else {
+                    dim_text(p, "Where this world keeps its mods", 13.0);
+                    p.spawn(Node { column_gap: Val::Px(8.0), margin: UiRect::bottom(Val::Px(6.0)), ..default() })
+                        .with_children(|row| {
+                            spawn_choice_button(row, "Game folder", MenuButton::SetModStorage(ModStorage::Instance), form.mod_storage == ModStorage::Instance, 134.0);
+                            spawn_choice_button(row, "This world", MenuButton::SetModStorage(ModStorage::World), form.mod_storage == ModStorage::World, 134.0);
+                        });
+                    dim_text(p, "Mods to use", 13.0);
+                    p.spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(4.0), margin: UiRect::bottom(Val::Px(8.0)), ..default() })
+                        .with_children(|list| {
+                            for m in &mods {
+                                let on = form.chosen_mods.contains(&m.id);
+                                let label = format!("[{}] {} {}", if on { "x" } else { " " }, m.name, m.version);
+                                spawn_choice_button(list, label.trim_end(), MenuButton::ToggleMod(m.id.clone()), on, 280.0);
+                            }
+                        });
+                }
                 spawn_button(p, "Create", MenuButton::SubmitCreate);
                 spawn_button(p, "Cancel", MenuButton::CancelCreate);
             });
@@ -448,7 +587,15 @@ fn random_seed() -> u32 {
 // Settings screen
 // ---------------------------------------------------------------------------
 
-fn setup_settings(mut commands: Commands, settings: Res<WorldSettings>) {
+fn mod_storage_label(storage: ModStorage) -> String {
+    match storage {
+        ModStorage::Instance => "New worlds keep mods: in the game folder".to_string(),
+        ModStorage::World => "New worlds keep mods: in the world".to_string(),
+    }
+}
+
+fn setup_settings(mut commands: Commands, settings: Res<WorldSettings>, store: Res<SaveStore>) {
+    let mod_storage = store.load_graphics_settings().mod_storage;
     commands.spawn((SettingsRoot, full_screen_root())).with_children(|root| {
         root.spawn(panel()).with_children(|p| {
             p.spawn(title("Settings"));
@@ -467,6 +614,33 @@ fn setup_settings(mut commands: Commands, settings: Res<WorldSettings>) {
                 Text::new("Takes effect after restart"),
                 TextFont { font_size: 12.0, ..default() },
                 TextColor(TEXT_DIM),
+            ));
+            // Where a newly created world keeps its mods.
+            p.spawn((
+                Button,
+                MenuButton::ToggleDefaultModStorage,
+                Node {
+                    width: Val::Px(360.0),
+                    height: Val::Px(40.0),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BackgroundColor(BUTTON_IDLE),
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    ModStorageLabel,
+                    Text::new(mod_storage_label(mod_storage)),
+                    TextFont { font_size: 15.0, ..default() },
+                    TextColor(Color::WHITE),
+                ));
+            });
+            p.spawn((
+                Text::new("Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't."),
+                TextFont { font_size: 12.0, ..default() },
+                TextColor(TEXT_DIM),
+                Node { width: Val::Px(360.0), ..default() },
             ));
             spawn_button(p, "Back", MenuButton::BackToMainMenu);
         });
@@ -505,15 +679,28 @@ fn sync_render_distance_label(settings: Res<WorldSettings>, mut labels: Query<&m
 // Mods screen (placeholder)
 // ---------------------------------------------------------------------------
 
-fn setup_mods(mut commands: Commands) {
+fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
+    let mods = scan_mods(&installed.0);
     commands.spawn((ModsRoot, full_screen_root())).with_children(|root| {
         root.spawn(panel()).with_children(|p| {
             p.spawn(title("Mods"));
-            p.spawn((
-                Text::new("Mod support is coming soon."),
-                TextFont { font_size: 16.0, ..default() },
-                TextColor(TEXT_DIM),
-            ));
+            if mods.is_empty() {
+                dim_text(p, format!("No mods installed. Put mod folders in:\n{}", installed.0.display()), 14.0);
+            } else {
+                for m in &mods {
+                    p.spawn(Node { flex_direction: FlexDirection::Column, width: Val::Px(380.0), ..default() }).with_children(|row| {
+                        row.spawn((
+                            Text::new(format!("{} {}", m.name, m.version).trim().to_string()),
+                            TextFont { font_size: 16.0, ..default() },
+                            TextColor(Color::WHITE),
+                        ));
+                        if !m.description.is_empty() {
+                            dim_text(row, m.description.clone(), 12.0);
+                        }
+                    });
+                }
+            }
+            dim_text(p, "Pick which mods a world uses when you create it. Mods sit on top of the game and never change its files.", 12.0);
             spawn_button(p, "Back", MenuButton::BackToMainMenu);
         });
     });
@@ -575,6 +762,9 @@ fn handle_menu_buttons(
     mut paused: ResMut<PauseState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     store: Res<SaveStore>,
+    installed: Res<InstalledMods>,
+    mut notice: ResMut<MenuNotice>,
+    mut storage_labels: Query<&mut Text, With<ModStorageLabel>>,
     mut exit: EventWriter<AppExit>,
 ) {
     for (interaction, action) in &mut interactions {
@@ -593,12 +783,55 @@ fn handle_menu_buttons(
             MenuButton::CancelCreate => *mode = WorldsScreenMode::List,
             MenuButton::FocusField(field) => form.focus = field,
             MenuButton::SetGameMode(game_mode) => form.mode = game_mode,
+            MenuButton::ToggleMod(id) => {
+                match form.chosen_mods.iter().position(|m| *m == id) {
+                    Some(i) => {
+                        form.chosen_mods.remove(i);
+                    }
+                    None => form.chosen_mods.push(id),
+                }
+                mode.set_changed(); // redraw the ticks
+            }
+            MenuButton::SetModStorage(storage) => {
+                form.mod_storage = storage;
+                mode.set_changed();
+            }
+            MenuButton::SetBranch(host) => {
+                form.branch_of = host;
+                mode.set_changed();
+            }
+            MenuButton::BranchFrom(host) => {
+                form.branch_of = Some(host);
+                *mode = WorldsScreenMode::Create;
+            }
+            MenuButton::ToggleDefaultModStorage => {
+                let mut saved = store.load_graphics_settings();
+                saved.mod_storage = match saved.mod_storage {
+                    ModStorage::Instance => ModStorage::World,
+                    ModStorage::World => ModStorage::Instance,
+                };
+                let _ = store.save_graphics_settings(&saved);
+                for mut text in &mut storage_labels {
+                    text.0 = mod_storage_label(saved.mod_storage);
+                }
+            }
             MenuButton::SubmitCreate => {
                 let seed = form.seed_text.trim().parse().unwrap_or_else(|_| random_seed());
-                if let Ok((slug, meta)) = store.create_world(&form.name, seed, form.mode) {
-                    store.touch_last_played(&slug);
-                    commands.insert_resource(ActiveWorld { slug, meta });
-                    next_state.set(AppState::InGame);
+                let setup = match &form.branch_of {
+                    Some(host) => ModSetup::Branch(host.clone()),
+                    None if form.mod_storage == ModStorage::World => ModSetup::World(form.chosen_mods.clone()),
+                    None => ModSetup::Instance(form.chosen_mods.clone()),
+                };
+                match create_world_with_mods(&store, &form.name, seed, form.mode, &setup, &installed.0) {
+                    Ok((slug, meta)) => {
+                        store.touch_last_played(&slug);
+                        commands.insert_resource(ActiveWorld { slug, meta });
+                        next_state.set(AppState::InGame);
+                    }
+                    Err(err) => {
+                        notice.0 = Some(format!("Couldn't create the world: {err}"));
+                        *mode = WorldsScreenMode::List;
+                    }
                 }
             }
             MenuButton::LoadWorld(slug) => {
@@ -608,8 +841,20 @@ fn handle_menu_buttons(
                 // too-new world as unclickable, so reaching the `Err` arm
                 // here means the save changed underneath us.
                 if let Ok(meta) = store.open_world(&slug) {
-                    commands.insert_resource(ActiveWorld { slug, meta });
-                    next_state.set(AppState::InGame);
+                    // A world whose mods are missing must not open (loading it
+                    // without them would drop their blocks from its next save);
+                    // say why and stay here. The list already shows such a world
+                    // as unclickable, so this is for the folder changing since.
+                    match resolve_world_mods(&store, &slug, &meta, &installed.0) {
+                        Ok(_) => {
+                            commands.insert_resource(ActiveWorld { slug, meta });
+                            next_state.set(AppState::InGame);
+                        }
+                        Err(err) => {
+                            notice.0 = Some(err.message());
+                            mode.set_changed();
+                        }
+                    }
                 }
             }
             MenuButton::RenderDistanceDelta(d) => {
@@ -659,5 +904,39 @@ impl Plugin for MenuPlugin {
                     sync_pause_screen.run_if(in_state(AppState::InGame)),
                 ),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(storage: ModStorage, mods: &[&str], branch: Option<&str>) -> WorldMeta {
+        WorldMeta {
+            name: "W".into(),
+            seed: 1,
+            format: 0,
+            mode: GameMode::Survival,
+            cheats: false,
+            mods: mods.iter().map(|s| s.to_string()).collect(),
+            mod_storage: storage,
+            branch_of: branch.map(str::to_string),
+            created_at: 0,
+            last_played_at: 0,
+        }
+    }
+
+    #[test]
+    fn the_worlds_list_says_where_a_worlds_mods_come_from() {
+        assert_eq!(mods_summary(&meta(ModStorage::Instance, &[], None)), None);
+        assert_eq!(mods_summary(&meta(ModStorage::Instance, &["a"], None)).unwrap(), "1 mod (from the game folder)");
+        assert_eq!(mods_summary(&meta(ModStorage::World, &["a", "b"], None)).unwrap(), "2 mods (kept in the world)");
+        assert_eq!(mods_summary(&meta(ModStorage::World, &["a"], Some("host"))).unwrap(), "mods shared from host");
+    }
+
+    #[test]
+    fn the_storage_setting_label_names_the_current_choice() {
+        assert!(mod_storage_label(ModStorage::Instance).contains("game folder"));
+        assert!(mod_storage_label(ModStorage::World).contains("in the world"));
     }
 }

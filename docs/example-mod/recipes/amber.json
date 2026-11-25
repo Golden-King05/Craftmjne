@@ -1,0 +1,5 @@
+{
+  "station": "hand",
+  "inputs": [ { "item": "dirt", "count": 4 } ],
+  "output": { "item": "amber", "count": 1 }
+}

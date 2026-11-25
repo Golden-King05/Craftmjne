@@ -943,6 +943,12 @@ pub fn install_content(commands: &mut Commands, content: Content, texture_report
     commands.insert_resource(BlockTables(content.tables));
 }
 
+/// Whether the world being entered has its content in place - false after
+/// `apply_world_mods` refused it. Gates everything that would write that world's save.
+fn world_content_ok(ok: Res<ContentOk>) -> bool {
+    ok.0
+}
+
 /// The system that gives the entering world its mods' content.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorldContentSet;
@@ -959,7 +965,10 @@ pub struct EnterWorldSet;
 ///
 /// If the mods can't be put together (one is missing, or its files are broken)
 /// the world does *not* open: it goes back to the menu with a message, because
-/// loading it without them would drop their blocks from its next save.
+/// loading it without them would drop their blocks from its next save. (The menu
+/// checks first, so this is the safety net for something changing in between.)
+/// `enter_world` still runs for that one frame so every system that expects a
+/// world has one, but with `ContentOk` false nothing writes its save.
 #[allow(clippy::too_many_arguments)]
 fn apply_world_mods(
     mut commands: Commands,
@@ -982,7 +991,10 @@ fn apply_world_mods(
         Ok(mods) => mods,
         Err(err) => return refuse(err.message(), &mut ok, &mut notice, &mut next_state),
     };
-    if mods == loaded.mods {
+    // No mods now and none before: the content is already right. Anything else
+    // is rebuilt - including the same mods again, so editing a mod's files and
+    // re-entering the world shows the change.
+    if mods.is_empty() && loaded.mods.is_empty() {
         ok.0 = true;
         return;
     }
@@ -1900,11 +1912,14 @@ impl Plugin for WorldPlugin {
                 OnEnter(AppState::InGame),
                 (
                     apply_world_mods.in_set(WorldContentSet),
-                    enter_world.in_set(EnterWorldSet).run_if(|ok: Res<ContentOk>| ok.0),
+                    enter_world.in_set(EnterWorldSet),
                 )
                     .chain(),
             )
-            .add_systems(OnExit(AppState::InGame), exit_world.in_set(WorldSaveSet))
+            // Never save a world that didn't open (`apply_world_mods` refused it): its
+            // chunks aren't loaded, and writing the stale map over its save would
+            // destroy it.
+            .add_systems(OnExit(AppState::InGame), exit_world.in_set(WorldSaveSet).run_if(world_content_ok))
             .add_systems(
                 Update,
                 (collect_gen_tasks, collect_mesh_tasks)
@@ -1929,7 +1944,7 @@ impl Plugin for WorldPlugin {
             .add_systems(
                 Update,
                 (record_edits, autosave, freeze_exposed_water)
-                    .run_if(in_state(AppState::InGame)),
+                    .run_if(in_state(AppState::InGame).and(world_content_ok).and(resource_exists::<WorldGen>)),
             )
             .add_systems(
                 Update,

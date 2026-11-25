@@ -1240,6 +1240,67 @@ On disk, an edit now saves the cell's whole state word (`SAVE_FORMAT` 7); an old
 world's edits, which only had an axis, still load. Fluid levels are still saved by
 the fluid scan.
 
+## Mods
+
+A mod is a folder of data in the game's `mods/` folder (next to the executable;
+the Mods screen shows the exact path). No code: everything a mod can do is
+something a block or item file already says (see
+[the two kinds of tags](#the-two-kinds-of-tags)).
+
+```text
+mods/my_mod/
+  mod.json            { "name": "My Mod", "version": "1.0", "description": "..." }
+  blocks/*.json       same format as the game's own blocks/
+  items/*.json
+  recipes/*.json
+  textures/blocks/*.png
+```
+
+[`docs/example-mod/`](docs/example-mod) is a complete working one (a test keeps it
+working): copy it into `mods/` to try it. The folder name is the mod's id (letters,
+digits, `_` and `-`).
+
+**Mods sit on top of the game; they never change it.** The game's own files are
+only ever read. A mod is an overlay laid over them, so taking it off puts everything
+back exactly as it was:
+
+- **Add** a block or item with a new `id`.
+- **Change** a core block or item with a file of the same `id` containing only the
+  keys to change: `{"id": "dirt", "hardness": 20}` makes dirt take 20 times as long
+  to dig and leaves everything else about dirt alone. Objects merge key by key, and a
+  key set to `null` goes back to its default.
+- **Replace** a core recipe by naming a file the same as the core one (`planks.json`);
+  a new file name adds a recipe.
+- **Re-skin** by shipping a texture with a core block's name.
+
+With several mods, later ones (by id) are laid over earlier ones.
+
+**Mods are chosen per world.** Not every installed mod is used in every world: when
+you create one, tick the mods it should use. Each world gets its own content when you
+enter it, and the next world gets its own again.
+
+**Where a world keeps its mods** (a setting for new worlds, and per world):
+
+- **Game folder** (the default): the world records which mods it uses and runs the
+  copies in `mods/`. One copy of each mod on disk. The catch: if you remove a mod from
+  `mods/`, every world that uses it can't open.
+- **In the world**: the chosen mods are copied into the world's own `mods/` folder when
+  it's created. It no longer depends on the game's folder, and you can drop a mod
+  folder straight into one world's `mods/` without ever installing it in the game. The
+  catch is one copy per world...
+- **Branch**: ...which a branch avoids. On a world kept in-world, click **Branch** (or
+  choose it when creating a world) to make a new world that uses *that* world's mods
+  and stores none of its own. It shares the host's fate: if the host is deleted or
+  loses a mod, the branch loses it too. Only an in-world world can be branched from,
+  and a branch can't be branched.
+
+**A world that can't find its mods doesn't open.** It stays in the list, greyed, with
+the reason (which mods are missing, or that its host is gone). Loading it without them
+would drop their blocks from its next save, so it refuses instead, and nothing writes
+to its save. A mod whose files are broken is reported the same way, naming the file.
+
+Not moddable yet: entities, tool tiers, world generation, and anything needing code.
+
 ## Extending the framework
 
 Write a Bevy plugin and add it in `main.rs`. Content registration happens in

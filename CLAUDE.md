@@ -2994,3 +2994,57 @@ etc.) instead of inventing a new approach:
   `docs/STATE_ACCESS.md`. Nothing *reads* a state yet; a texture or light per
   state value is the obvious next consumer. Not measured: the table's real memory
   or lookup cost at scale (the claim is structural: no entry, no cost).
+- **Mods are an overlay, and "the core files are never written" is a tested
+  invariant, not a hope.** `mods.rs` (format, discovery, `ModStorage`,
+  `resolve_world_mods`, `create_world_with_mods`) + `content.rs`
+  (`ContentPaths`, `build_content`/`try_build_content`) +
+  `world::apply_world_mods`. Design decisions worth keeping:
+  - **Overlay by merge, not replacement.** Blocks/items load through
+    `blocks::overlay_by_id`: files sharing an `id` are combined by `merge_json`
+    (objects merge recursively, `null` deletes the key so serde's default
+    applies), later directories patching earlier ones. That is what lets a mod be
+    `{"id": "dirt", "hardness": 20}` and nothing else. Recipes have no id, so a
+    same-named file replaces (a new name adds). Textures search mod dirs first
+    (`ContentPaths::textures` is highest-priority-first, the reverse of the
+    block/item/recipe dirs), so a mod can re-skin. `building_with_mods_never_
+    changes_the_core_files` byte-compares every core file before and after.
+  - **`catch_unwind` is the validation for mod content.** `try_build_content`
+    turns a loader panic (which names the file) into an `Err`; the loaders keep
+    panicking for the core game's own files, where a mistake should fail loudly.
+  - **A claim I got wrong and the test caught:** "core block ids never move". The
+    derived `block@layer` variants are registered after every file's block, so a
+    mod block shifts them. Harmless (nothing stores a numeric id - saves,
+    snapshots and edits all use names) but the test and docs now say only that
+    the blocks *core files define* keep their ids.
+  - **Content is per world, rebuilt on entry.** `compile_content` (Startup) builds
+    the core game; `apply_world_mods` (`OnEnter(InGame)`, `WorldContentSet`,
+    before `EnterWorldSet`) resolves the world's mod folders and, unless both
+    they and the loaded set are empty, rebuilds and `install_content`s (registry,
+    items, recipes, atlas, icons, tables) and bumps `LoadedContent::generation`.
+    `render::setup_render` runs again (`content_replaced`) to re-upload the atlas
+    and materials. A modded world is rebuilt on *every* entry so editing a mod and
+    re-entering shows the change. Unverified from here: the GPU re-upload and the
+    hotbar refresh (`hotbar.set_changed()`), which need a display.
+  - **Refusing a world must not let anything save it.** Setting
+    `NextState(MainMenu)` from `OnEnter(InGame)` still runs one `Update` frame in
+    `InGame` plus `OnExit`. First attempt skipped `enter_world` on refusal, which
+    made `stream_chunks`/`freeze_exposed_water` panic on a missing `WorldGen`
+    (Bevy 0.16 panics on a failed `Res` validation); chasing those one by one was
+    the wrong fix. Instead `enter_world` always runs, and the *writers* -
+    `exit_world`, `autosave` - are gated on `ContentOk` (`world_content_ok`).
+    Break-tested: ungating `exit_world` overwrites the refused world's save
+    (`a_world_with_a_missing_mod_goes_back_to_the_menu_with_a_message` goes red).
+    The menu also checks first (`resolve_world_mods` before `NextState`), so this
+    is the safety net, and the worlds list greys an unopenable world with the reason.
+  - **Storage modes are data on `WorldMeta`** (`mod_storage`, `mods`, `branch_of`;
+    all serde defaults, so old worlds are instance worlds with no mods - no
+    `SAVE_FORMAT` bump). Instance: `meta.mods` ids from the game folder. World:
+    *every* mod folder in `saves/<slug>/mods/` is used (so a hand-dropped folder
+    works), and `meta.mods` is what was copied at creation (a missing one refuses).
+    Branch: the host's folder, no copy; host must be World-storage and not a branch
+    (`create_world_with_mods` checks before creating anything).
+  - **Known gaps, on purpose:** no way to change an existing world's mods (turning
+    one off would orphan its blocks/items in the save - needs the unknown-block
+    data preserved rather than dropped, which `enter_world` currently skips);
+    no entities/tiers/worldgen in mods; the texture report is replaced per world
+    (`TextureReport::remove`), not merged.

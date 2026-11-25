@@ -1474,3 +1474,130 @@ fn a_cells_extended_state_survives_a_reload_and_is_cleared_when_replaced() {
     assert_eq!(map.get_block(replaced), dirt);
     assert!(map.extended_state(replaced).is_none(), "replaced, so nothing carried over");
 }
+
+// ---- mods ------------------------------------------------------------
+
+/// A scratch "installed mods" folder with one mod in it: `<id>` adds a block
+/// `<id>_block` and makes dirt slow to mine.
+fn install_test_mod(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let installed = root.join("installed-mods");
+    let dir = installed.join(id);
+    std::fs::create_dir_all(dir.join("blocks")).unwrap();
+    std::fs::write(dir.join("mod.json"), format!(r#"{{"name": "{id}"}}"#)).unwrap();
+    std::fs::write(dir.join("blocks").join(format!("{id}_block.json")), format!(r#"{{"id": "{id}_block", "hardness": 3.0}}"#)).unwrap();
+    std::fs::write(dir.join("blocks").join("dirt.json"), r#"{"id": "dirt", "hardness": 20.0}"#).unwrap();
+    installed
+}
+
+/// The headless app with no world entered yet, pointing at `installed` for mods.
+fn app_without_a_world(temp: &TempSaves, installed: &std::path::Path) -> App {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, AssetPlugin::default(), StatesPlugin));
+    app.init_asset::<Mesh>();
+    app.init_asset::<Image>();
+    app.init_asset::<ChunkMaterial>();
+    app.insert_resource(WorldSettings { seed: 7, render_distance: 2 });
+    app.insert_resource(SaveStore::at(temp.0.clone()));
+    app.insert_resource(ChunkMaterials { solid: Handle::default(), water: Handle::default() });
+    app.insert_resource(craftmjne::mods::InstalledMods(installed.to_path_buf()));
+    app.init_state::<AppState>();
+    add_gameplay(&mut app);
+    app.world_mut().spawn(Player::default());
+    app.update(); // startup: builds the core content
+    app
+}
+
+fn enter(app: &mut App, slug: String, meta: craftmjne::save::WorldMeta) {
+    app.world_mut().insert_resource(ActiveWorld { slug, meta });
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InGame);
+    app.update();
+    app.update();
+}
+
+fn leave(app: &mut App) {
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+    app.update();
+}
+
+fn in_game(app: &App) -> bool {
+    *app.world().resource::<State<AppState>>().get() == AppState::InGame
+}
+
+/// A world made with a mod gets the mod's blocks and changes, plays normally,
+/// and the next world - made without it - gets the plain game back.
+#[test]
+fn a_world_gets_its_own_mods_content_and_the_next_world_gets_it_back_without_them() {
+    use craftmjne::mods::{create_world_with_mods, ModSetup};
+    let temp = temp_saves();
+    let installed = install_test_mod(&temp.0, "gizmo");
+    let mut app = app_without_a_world(&temp, &installed);
+    let dirt = |app: &App| {
+        let r = app.world().resource::<BlockRegistry>();
+        r.def(r.id("dirt")).hardness
+    };
+    assert_eq!(dirt(&app), 0.5, "the core game is loaded before any world");
+    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo_block").is_err());
+
+    let store = SaveStore::at(temp.0.clone());
+    let (slug, meta) = create_world_with_mods(&store, "Modded", 7, GameMode::Survival, &ModSetup::Instance(vec!["gizmo".into()]), &installed).unwrap();
+    enter(&mut app, slug, meta);
+    assert!(in_game(&app));
+    assert_eq!(dirt(&app), 20.0, "the mod changed dirt in this world");
+    let gizmo = app.world().resource::<BlockRegistry>().id("gizmo_block");
+    assert!(app.world().resource::<craftmjne::blocks::BlockTables>().0.solid.len() > gizmo as usize, "tables were rebuilt for it");
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 9, 2000), "the modded world streams terrain");
+
+    // Back out, into a world with no mods: everything is as the core game has it.
+    leave(&mut app);
+    let (slug2, meta2) = store.create_world("Plain", 8, GameMode::Survival).unwrap();
+    enter(&mut app, slug2, meta2);
+    assert!(in_game(&app));
+    assert_eq!(dirt(&app), 0.5, "taking the mod off puts dirt back");
+    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo_block").is_err());
+}
+
+/// A world whose mod has gone missing doesn't open, says why, and the rest of the
+/// game keeps working.
+#[test]
+fn a_world_with_a_missing_mod_goes_back_to_the_menu_with_a_message() {
+    use craftmjne::mods::{create_world_with_mods, MenuNotice, ModSetup};
+    let temp = temp_saves();
+    let installed = install_test_mod(&temp.0, "gizmo");
+    let mut app = app_without_a_world(&temp, &installed);
+    let store = SaveStore::at(temp.0.clone());
+    let (slug, meta) = create_world_with_mods(&store, "Needs", 7, GameMode::Survival, &ModSetup::Instance(vec!["gizmo".into()]), &installed).unwrap();
+    // The world already holds a block only the mod knows about.
+    let mut data = store.load_data(&slug);
+    data.edits.push(craftmjne::save::BlockEdit { x: 1, y: 40, z: 1, block: "gizmo_block".into(), axis: 0, state: Some(0), ext: None });
+    store.save_data(&slug, &data).unwrap();
+    std::fs::remove_dir_all(installed.join("gizmo")).unwrap();
+    enter(&mut app, slug.clone(), meta);
+    assert!(!in_game(&app), "refused to open");
+    let after = store.load_data(&slug);
+    assert!(after.edits.iter().any(|e| e.block == "gizmo_block"), "the refused world's save was not overwritten");
+    let notice = app.world().resource::<MenuNotice>().0.clone().expect("a message");
+    assert!(notice.contains("gizmo"), "{notice}");
+    // And a normal world still opens afterwards.
+    let (slug2, meta2) = store.create_world("Fine", 9, GameMode::Survival).unwrap();
+    enter(&mut app, slug2, meta2);
+    assert!(in_game(&app));
+}
+
+/// A branch plays with its host's mods and keeps none of its own.
+#[test]
+fn a_branch_world_plays_with_its_hosts_mods() {
+    use craftmjne::mods::{create_world_with_mods, ModSetup};
+    let temp = temp_saves();
+    let installed = install_test_mod(&temp.0, "gizmo");
+    let mut app = app_without_a_world(&temp, &installed);
+    let store = SaveStore::at(temp.0.clone());
+    let (host, _) = create_world_with_mods(&store, "Host", 7, GameMode::Survival, &ModSetup::World(vec!["gizmo".into()]), &installed).unwrap();
+    // The host's copy is what counts: the game's own folder can lose the mod.
+    std::fs::remove_dir_all(installed.join("gizmo")).unwrap();
+    let (slug, meta) = create_world_with_mods(&store, "Branch", 8, GameMode::Survival, &ModSetup::Branch(host), &installed).unwrap();
+    assert!(!store.world_mods_dir(&slug).exists());
+    enter(&mut app, slug, meta);
+    assert!(in_game(&app));
+    assert!(app.world().resource::<BlockRegistry>().by_name("gizmo_block").is_ok());
+}

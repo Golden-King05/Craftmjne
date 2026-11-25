@@ -1,0 +1,7 @@
+{
+  "id": "amber",
+  "name": "Amber",
+  "hardness": 1.0,
+  "transparent": "partial",
+  "light": { "level": 6, "color": [255, 170, 40] }
+}
