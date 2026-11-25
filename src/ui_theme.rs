@@ -95,12 +95,16 @@ pub struct ThemedButton {
 /// Gives every [`ThemedButton`] the texture for its current state.
 pub fn themed_button_visuals(
     skin: Option<Res<GuiSkin>>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
     mut buttons: Query<(Entity, &Interaction, &ThemedButton, Option<&mut ImageNode>)>,
     mut commands: Commands,
 ) {
     let Some(skin) = skin else { return };
     for (entity, interaction, themed, existing) in &mut buttons {
-        let element = button_element(themed.style, *interaction, themed.selected);
+        // A button the keyboard has highlighted looks hovered.
+        let keyed = focus.as_ref().is_some_and(|f| f.entity == Some(entity)) && *interaction == Interaction::None;
+        let shown = if keyed { Interaction::Hovered } else { *interaction };
+        let element = button_element(themed.style, shown, themed.selected);
         let tint = button_tint(themed.accent);
         let Some(handle) = skin.handle(element) else { continue };
         match existing {
@@ -126,6 +130,9 @@ impl Plugin for ThemePlugin {
     fn build(&self, app: &mut App) {
         if !app.is_plugin_added::<GuiSkinPlugin>() {
             app.add_plugins(GuiSkinPlugin);
+        }
+        if !app.is_plugin_added::<crate::menu_nav::MenuNavPlugin>() {
+            app.add_plugins(crate::menu_nav::MenuNavPlugin);
         }
         app.add_systems(Update, themed_button_visuals.after(apply_skin));
     }

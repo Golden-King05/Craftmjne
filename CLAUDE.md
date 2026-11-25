@@ -3287,3 +3287,18 @@ etc.) instead of inventing a new approach:
   - World Options is a third `WorldsScreenMode` (`Options`) reached from the create form; the
     mod/branch/storage controls moved there unchanged, and `options_summary` shows the
     choice back on the create form. Game rules get their own section there when they exist.
+
+- **Keyboard navigation is a highlight plus a one-frame fake click, so no screen had to change.**
+  `menu_nav.rs`: `MenuFocus` (a resource, not a component on the button) names the highlighted
+  `ThemedButton`; `themed_button_visuals` shows it with the hover texture; Enter sets that
+  button's `Interaction` to `Pressed` for exactly one frame (released at the start of the next),
+  which is what every screen's existing click handler already reacts to. `navigate` is a pure
+  function over button centres/sizes (arrows pick the nearest button in that direction, with a
+  half-button-height tolerance for "same row"; Tab is reading order; everything wraps), tested
+  without an app. Gotchas: the system runs in `PreUpdate` after `UiSystem::Focus` so handlers in
+  `Update` see the press; a system can't hold `&mut Interaction` and `Changed<Interaction>` as two
+  queries (B0001), so fresh mouse hover is detected with `Mut::is_changed` on the one query; it is
+  gated by `nav_active` (main menu, mods, worlds list/options, pause) because the create form and
+  Settings type into text boxes, where Space/arrows/Enter mean something else - extend there only
+  with that in mind. Keys are fixed, not `Action`s: menus must work before the controls screen
+  is ever opened. Not done: scrolling a long list to keep the highlighted button in view.

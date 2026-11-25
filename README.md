@@ -103,6 +103,14 @@ of which Rendering (render distance, applied on next launch), Keybinds and
 Mods (where new worlds keep their mods) do something today and Player and
 Sound are placeholders. **Mods** lists the installed mods.
 
+### Keyboard navigation
+
+Menus work without a mouse: **arrow keys** move the highlight (Up/Down between rows,
+Left/Right along a row), **Tab / Shift+Tab** step through in reading order, **Enter**
+presses the highlighted button. It applies on the main menu, worlds list, world options,
+mods and the pause menu. Moving the mouse onto a button hands the highlight back to the
+mouse. (Typing screens - the create-world form and Settings - are left alone for now.)
+
 ### How the menus look, and retexturing them
 
 Every screen (main menu, worlds, create, mods, settings, pause, death, and the
