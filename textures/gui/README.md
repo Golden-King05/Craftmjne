@@ -24,3 +24,13 @@ the wrong shape or that won't decode is ignored and the built-in texture stays.
 
 *border* is how many pixels at each edge keep their size when the element is stretched;
 the middle tiles.
+
+## Controller button pictures (`textures/gui/glyphs/`)
+
+The Keybinds screen shows each controller button as a little picture. Replace one with
+`textures/gui/glyphs/<id>.png`: square, and a whole multiple of 12 pixels (24x24 is the
+built-in size; 48x48 is fine). Wrong shapes and unreadable files are ignored. The ids:
+
+`south` (A / Cross), `east` (B / Circle), `west` (X / Square), `north` (Y / Triangle),
+`left_bumper`, `right_bumper`, `left_trigger`, `right_trigger`, `select`, `start`,
+`left_stick`, `right_stick`, `dpad_up`, `dpad_down`, `dpad_left`, `dpad_right`.

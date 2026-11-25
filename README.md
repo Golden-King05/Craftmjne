@@ -160,15 +160,28 @@ edit either. Both work at the same time, so you can switch between them mid-game
   break, **Left Trigger** place / use, **Y** inventory, **X** pick block, **D-pad Down**
   drop, **Bumpers** previous / next hotbar slot, **Back** toggle flying, **Start** pause.
 - Menus: **D-pad** or a flick of the **left stick** moves the highlight, **A** presses.
+  (Keyboard: arrows/Tab/Enter, as above.)
 - Rebinding works like the keyboard: click **Rebind**, then press the button. Conflicts
   show in red (per device, and the Controls tab is red if either has one). Search takes
   `btn:a`, `btn:dpad`, `is:conflict`, `is:unbound`, `is:changed`.
 - Mods can give a control a controller default with `"default_pad": "south"` in their
   `keybinds/*.json` (button names as shown on the screen, any case: `south`, `a`,
   `right bumper`, `dpad up`, `none`).
-- Not done yet: the inventory and crafting screens are still mouse-driven (Y opens
-  them, but you can't move items with a controller), and stick sensitivity/dead zone
-  aren't adjustable.
+- **Inventory, crafting, knapping and the death screen work on a controller.** Open the
+  inventory with **Y**; the **D-pad** or left stick moves a highlight over the slots and
+  recipes (the list scrolls to follow it). **A** picks a stack up / puts it down / crafts
+  once, **X** is a shift-click (quick-move a stack, craft as many as possible), **B** (or
+  **Y**) closes it. While knapping, **A** strikes the highlighted cell, **X** taps, and
+  **B** abandons the stone. The held stack and the item tooltip follow the highlight, and
+  moving the mouse hands control back to it.
+- **Stick tuning** (Settings > Controls > Options): look speed (25%-300%), dead zone
+  (5%-50%, raise it if the view drifts) and invert look. Saved per launcher instance.
+- **Button pictures:** the Controller tab shows each button as a small picture (a green A,
+  a red B, bumpers, a D-pad with the pressed arm lit) next to its name. Texture packs and
+  mods can replace them with `textures/gui/glyphs/<button>.png`; see
+  `textures/gui/README.md`.
+- Not done yet: sticks move at full speed (no analog walking), and there's no choice of
+  which controller when several are plugged in (they act as one).
 
 Building on Linux needs `libudev-dev` (the controller backend); the release and dev-build
 workflows install it.

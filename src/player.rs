@@ -429,6 +429,7 @@ fn mouse_look(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut players: Query<&mut Player>,
     pad: Option<Res<crate::gamepad::PadState>>,
+    options: Option<Res<crate::keybinds::ControlOptions>>,
     time: Res<Time>,
 ) {
     let grabbed = windows
@@ -440,7 +441,8 @@ fn mouse_look(
     // so it doesn't spin the camera behind the pause menu or the inventory).
     if grabbed {
         if let Some(pad) = pad {
-            let (dyaw, dpitch) = crate::gamepad::look_delta(pad.right, time.delta_secs());
+            let options = options.as_deref().copied().unwrap_or_default();
+            let (dyaw, dpitch) = crate::gamepad::look_delta(pad.right, time.delta_secs(), options.look_speed(), options.invert_look_y);
             player.yaw += dyaw;
             player.pitch = (player.pitch + dpitch).clamp(-1.553, 1.553);
         }
@@ -795,7 +797,7 @@ mod tests {
         app.insert_resource(GameMode::Creative);
         app.init_resource::<ChatState>().init_resource::<PauseState>().init_resource::<InventoryState>().init_resource::<DeathState>();
         app.init_resource::<EntityColliders>();
-        app.insert_resource(ControlOptions { flight_mode: mode });
+        app.insert_resource(ControlOptions { flight_mode: mode, ..ControlOptions::default() });
         app.world_mut().spawn((
             Player { pos: Vec3::new(8.5, 11.0 + EPS, 8.5), spawned: true, ..Player::default() },
             Transform::default(),

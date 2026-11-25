@@ -3341,3 +3341,41 @@ etc.) instead of inventing a new approach:
     and showing button glyphs instead of names. The layout is verified from a screenshot; actual
     hardware input is not (no controller here) - the logic is tested through `PadState`/`Gamepad`
     entities, not through `bevy_gilrs`.
+
+- **Stick tuning applies the dead zone once, where the sticks are read, not where they are used.**
+  `read_pads` removes the player's dead zone (`ControlOptions::deadzone`, `apply_deadzone_with`) and
+  rescales the rest to 0..1 before writing `PadState::left/right`, so movement, menu flicks and
+  look all see the same cleaned value and none re-applies a threshold of its own. Look speed and
+  invert are applied in `mouse_look` (`look_delta(right, dt, speed, invert)`). The settings are
+  integer percentages (`look_speed_pct`, `deadzone_pct`) because `ControlOptions` is `Eq`/`Copy`
+  and a float would break that; accessors clamp, so a hand-edited file can't set a zero dead zone
+  or a 9999% look speed, and `Default` is written by hand because the derived one would give 0%
+  (an old `controls.json` without the fields deserialises through per-field serde defaults).
+- **Glyphs are a second small skin, not part of `Element`.** `pad_glyphs.rs` paints 16 pictures on
+  a 12x12 grid (x2), keyed by `PadButton`, overridable from `textures/gui/glyphs/<id>.png` (square,
+  whole multiple of 12; bad files ignored) through the same installed-mods directory list as the
+  GUI skin. A node shows one with `PadGlyph(button)` + `apply_glyphs`; `ButtonOpts::glyph` puts one
+  before a button's label. Kept out of `Element` so its README table test and logical-size/slice
+  machinery didn't have to learn about 16 non-sliced images.
+- **Inventory by controller is the menu highlight generalised, not a second input path.**
+  `menu_nav` now highlights any `Button` (inventory slots, recipes, knap cells, Done/Cancel), is active
+  while the inventory, knapping or death screen is open, and presses by setting `Interaction::Pressed`
+  for a frame - which the existing click handlers already react to. Four additions made that work:
+  - **Secondary press.** X sets `MenuFocus::secondary` for the frame; `click_slots`/`craft_clicks`
+    treat it as Shift (quick move / craft all). A flag on the resource instead of faking a held Shift
+    key, which would stay held if anything went wrong.
+  - **Restoring the highlight after a rebuild.** The inventory despawns and respawns its whole tree
+    after every click, which used to drop the highlight each time. `menu_nav` remembers the highlight's
+    centre (updated at the *end* of the frame so a move followed by a rebuild remembers the new spot -
+    the first version stored the previous frame's and the test caught it) and, `RESTORE_FRAMES` later
+    (new nodes have no layout yet), re-highlights the nearest button.
+  - **Scroll into view.** `scroll_focus_into_view` walks up from the highlighted node to the first
+    `ScrollPosition` ancestor and scrolls by the exact overshoot (layout is one frame behind, so it
+    never double-applies). Also fixes long lists on the main menus.
+  - **No pointer, so things that hang off the pointer hang off the highlight**: the held stack and
+    tooltip position (`sync_cursor_ui`), the slot hover texture (`apply_skin`), the tooltip text
+    (`track_hovered_item`), and the knap cell under the highlight (`knap_input`, ringed by
+    `knap_focus_ring`). A strikes and X taps a knap cell, as well as the bound triggers. B closes the
+    inventory / abandons knapping (`inventory_escape`/`knap_input` check `PadButton::East`).
+  `menu_nav_for_tests` exists because the real system is gated on app state; the inventory test drives
+  it directly alongside the real `click_slots` (break-tested: removing the secondary flag turns it red).

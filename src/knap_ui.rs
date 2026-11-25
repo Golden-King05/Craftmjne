@@ -104,9 +104,29 @@ pub(crate) fn abandon_when_inventory_closes(inv: Res<InventoryState>, mut knap: 
     }
 }
 
+/// Rings the knap cell the controller/keyboard has highlighted (the mouse gets the plain hover).
+pub(crate) fn knap_focus_ring(knap: Res<KnapState>, focus: Option<Res<crate::menu_nav::MenuFocus>>, mut cells: Query<(Entity, &KnapCell, &mut BorderColor)>) {
+    let Some(active) = knap.active.as_ref() else { return };
+    let keyed = focus.and_then(|f| f.entity);
+    for (e, &KnapCell(x, y), mut border) in &mut cells {
+        let want = if keyed == Some(e) {
+            Color::WHITE
+        } else if active.session.outline.contains(x, y) {
+            Color::srgba(0.95, 0.85, 0.3, 0.8)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.05)
+        };
+        if border.0 != want {
+            border.0 = want;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn knap_input(
     keys: Res<ButtonInput<KeyCode>>,
+    pad: Option<Res<crate::gamepad::PadState>>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
     act: Actions,
     book: Res<RecipeBook>,
     registry: Res<ItemRegistry>,
@@ -115,13 +135,13 @@ pub(crate) fn knap_input(
     mut inventory: ResMut<Inventory>,
     players: Query<&Player>,
     mut drops: EventWriter<SpawnDrop>,
-    cells: Query<(&Interaction, &KnapCell)>,
+    cells: Query<(Entity, &Interaction, &KnapCell)>,
     buttons: Query<(&Interaction, &KnapButton), Changed<Interaction>>,
 ) {
     if !knap.is_open() {
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) || pad.as_deref().is_some_and(|p| p.started(crate::gamepad::PadButton::East)) {
         knap.active = None;
         return;
     }
@@ -162,11 +182,17 @@ pub(crate) fn knap_input(
         }
     }
 
-    let tap = act.just_pressed(Action::UseItem);
-    if !(act.just_pressed(Action::Attack) || tap) {
+    // The cell under the mouse, or the one the controller/keyboard has highlighted. On a
+    // controller A strikes and X taps, as well as the bound triggers.
+    let keyed = focus.and_then(|f| f.entity);
+    let pad_pressed = |b| pad.as_deref().is_some_and(|p| p.started(b));
+    let keyed_cell = cells.iter().any(|(e, ..)| keyed == Some(e));
+    let tap = act.just_pressed(Action::UseItem) || (keyed_cell && pad_pressed(crate::gamepad::PadButton::West));
+    let strike = act.just_pressed(Action::Attack) || (keyed_cell && pad_pressed(crate::gamepad::PadButton::South));
+    if !(strike || tap) {
         return;
     }
-    let Some((_, &KnapCell(x, y))) = cells.iter().find(|(i, _)| **i != Interaction::None) else { return };
+    let Some((_, _, &KnapCell(x, y))) = cells.iter().find(|(e, i, _)| **i != Interaction::None || keyed == Some(*e)) else { return };
     let Some(active) = knap.active.as_mut() else { return };
     let recipe = &book.recipes[active.recipe];
     if !active.session.stone.present(x, y) || (tap && active.session.taps_left() == 0) {

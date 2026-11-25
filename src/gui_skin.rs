@@ -577,10 +577,18 @@ impl Skinned {
     }
 }
 
-pub fn apply_skin(skin: Option<Res<GuiSkin>>, mut nodes: Query<(&Skinned, Option<&Interaction>, Option<&mut ImageNode>, Entity)>, mut commands: Commands) {
+pub fn apply_skin(
+    skin: Option<Res<GuiSkin>>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
+    mut nodes: Query<(&Skinned, Option<&Interaction>, Option<&mut ImageNode>, Entity)>,
+    mut commands: Commands,
+) {
     let Some(skin) = skin else { return };
     for (s, interaction, existing, entity) in &mut nodes {
+        // A node the keyboard or controller has highlighted looks hovered.
+        let keyed = focus.as_ref().is_some_and(|f| f.entity == Some(entity));
         let e = match (s.hover, interaction) {
+            (Some(h), _) if keyed => h,
             (Some(h), Some(Interaction::Hovered | Interaction::Pressed)) => h,
             _ => s.element,
         };

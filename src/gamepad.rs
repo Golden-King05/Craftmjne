@@ -92,8 +92,8 @@ impl PadButton {
             PadButton::RightTrigger => "Right Trigger",
             PadButton::Select => "Back / Select",
             PadButton::Start => "Start",
-            PadButton::LeftStick => "Left Stick Click",
-            PadButton::RightStick => "Right Stick Click",
+            PadButton::LeftStick => "L-Stick Click",
+            PadButton::RightStick => "R-Stick Click",
             PadButton::DPadUp => "D-Pad Up",
             PadButton::DPadDown => "D-Pad Down",
             PadButton::DPadLeft => "D-Pad Left",
@@ -154,6 +154,7 @@ impl PadButton {
 pub struct PadState {
     pub pressed: HashSet<PadButton>,
     pub just_pressed: HashSet<PadButton>,
+    /// The sticks, with the dead zone already removed (see [`apply_deadzone`]).
     pub left: Vec2,
     pub right: Vec2,
     /// A controller is plugged in (used to decide whether to mention it in the UI).
@@ -170,7 +171,8 @@ impl PadState {
 }
 
 /// Folds all [`Gamepad`]s into the [`PadState`] resource.
-pub fn read_pads(pads: Query<&Gamepad>, mut state: ResMut<PadState>) {
+pub fn read_pads(pads: Query<&Gamepad>, options: Option<Res<crate::keybinds::ControlOptions>>, mut state: ResMut<PadState>) {
+    let deadzone = options.as_deref().map_or(DEADZONE, |o| o.deadzone());
     let mut next = PadState { connected: false, ..default() };
     for pad in &pads {
         next.connected = true;
@@ -183,7 +185,7 @@ pub fn read_pads(pads: Query<&Gamepad>, mut state: ResMut<PadState>) {
             }
         }
         // The stick furthest from centre wins, so a second idle pad can't cancel the first.
-        let (l, r) = (pad.left_stick(), pad.right_stick());
+        let (l, r) = (apply_deadzone_with(pad.left_stick(), deadzone), apply_deadzone_with(pad.right_stick(), deadzone));
         if l.length() > next.left.length() {
             next.left = l;
         }
@@ -196,7 +198,7 @@ pub fn read_pads(pads: Query<&Gamepad>, mut state: ResMut<PadState>) {
     }
 }
 
-/// Below this a stick counts as centred (cheap sticks drift).
+/// Below this a stick counts as centred (cheap sticks drift). The default; it is a setting.
 pub const DEADZONE: f32 = 0.2;
 /// How far the left stick must be pushed before it counts as a held movement key.
 pub const MOVE_THRESHOLD: f32 = 0.5;
@@ -205,12 +207,17 @@ pub const LOOK_SPEED: f32 = 2.6;
 
 /// A stick with the dead zone removed and the remaining range rescaled to 0..1, so
 /// look speed ramps up smoothly from nothing instead of jumping at the edge.
-pub fn apply_deadzone(v: Vec2) -> Vec2 {
+pub fn apply_deadzone_with(v: Vec2, deadzone: f32) -> Vec2 {
     let len = v.length();
-    if len <= DEADZONE {
+    if len <= deadzone {
         return Vec2::ZERO;
     }
-    v / len * ((len - DEADZONE) / (1.0 - DEADZONE)).min(1.0)
+    v / len * ((len - deadzone) / (1.0 - deadzone)).min(1.0)
+}
+
+/// [`apply_deadzone_with`] at the default dead zone.
+pub fn apply_deadzone(v: Vec2) -> Vec2 {
+    apply_deadzone_with(v, DEADZONE)
 }
 
 /// Which of the four movement keys the left stick is holding down: `[forward, back, left, right]`.
@@ -218,11 +225,12 @@ pub fn move_keys(left: Vec2) -> [bool; 4] {
     [left.y > MOVE_THRESHOLD, left.y < -MOVE_THRESHOLD, left.x < -MOVE_THRESHOLD, left.x > MOVE_THRESHOLD]
 }
 
-/// `(yaw, pitch)` change this frame from the right stick. Pushing right turns right
-/// (yaw decreases, as for the mouse); pushing up looks up.
-pub fn look_delta(right: Vec2, dt: f32) -> (f32, f32) {
-    let v = apply_deadzone(right);
-    (-v.x * LOOK_SPEED * dt, v.y * LOOK_SPEED * dt)
+/// `(yaw, pitch)` change this frame from the right stick (whose dead zone is already
+/// removed). Pushing right turns right (yaw decreases, as for the mouse); pushing up
+/// looks up, or down when `invert_y`. `speed` scales [`LOOK_SPEED`].
+pub fn look_delta(right: Vec2, dt: f32, speed: f32, invert_y: bool) -> (f32, f32) {
+    let k = LOOK_SPEED * speed * dt;
+    (-right.x * k, if invert_y { -right.y } else { right.y } * k)
 }
 
 pub struct GamepadPlugin;
@@ -279,13 +287,43 @@ mod tests {
 
     #[test]
     fn the_right_stick_turns_and_tilts_in_the_expected_directions() {
-        let (yaw, pitch) = look_delta(Vec2::new(1.0, 0.0), 1.0);
+        let (yaw, pitch) = look_delta(Vec2::new(1.0, 0.0), 1.0, 1.0, false);
         assert!(yaw < 0.0 && pitch == 0.0, "right turns right, like the mouse");
-        let (yaw, pitch) = look_delta(Vec2::new(0.0, 1.0), 1.0);
+        let (yaw, pitch) = look_delta(Vec2::new(0.0, 1.0), 1.0, 1.0, false);
         assert!(pitch > 0.0 && yaw == 0.0, "up looks up");
-        assert_eq!(look_delta(Vec2::new(0.1, 0.1), 1.0), (0.0, 0.0));
-        let (a, _) = look_delta(Vec2::new(1.0, 0.0), 0.5);
-        let (b, _) = look_delta(Vec2::new(1.0, 0.0), 1.0);
+        let (_, inverted) = look_delta(Vec2::new(0.0, 1.0), 1.0, 1.0, true);
+        assert_eq!(inverted, -pitch, "inverting flips only the vertical");
+        let (a, _) = look_delta(Vec2::new(1.0, 0.0), 0.5, 1.0, false);
+        let (b, _) = look_delta(Vec2::new(1.0, 0.0), 1.0, 1.0, false);
         assert!((a * 2.0 - b).abs() < 1e-6, "scales with time, not frame rate");
+        let (fast, _) = look_delta(Vec2::new(1.0, 0.0), 1.0, 2.0, false);
+        assert!((fast - 2.0 * b).abs() < 1e-6, "the speed setting is a straight multiplier");
+    }
+
+    #[test]
+    fn a_bigger_dead_zone_swallows_more_and_still_reaches_full() {
+        let v = Vec2::new(0.3, 0.0);
+        assert!(apply_deadzone_with(v, 0.1).x > 0.0);
+        assert_eq!(apply_deadzone_with(v, 0.4), Vec2::ZERO);
+        assert!((apply_deadzone_with(Vec2::new(1.0, 0.0), 0.4).x - 1.0).abs() < 1e-5, "full push is still full");
+    }
+
+    /// The setting reaches the resource every system reads: through a real `Gamepad`.
+    #[test]
+    fn read_pads_applies_the_players_dead_zone() {
+        let mut app = App::new();
+        app.init_resource::<PadState>().add_systems(Update, read_pads);
+        let mut options = crate::keybinds::ControlOptions::default();
+        options.deadzone_pct = 40;
+        app.insert_resource(options);
+        let mut gp = Gamepad::default();
+        gp.analog_mut().set(GamepadAxis::RightStickX, 0.3);
+        gp.analog_mut().set(GamepadAxis::LeftStickY, 1.0);
+        app.world_mut().spawn(gp);
+        app.update();
+        let state = app.world().resource::<PadState>();
+        assert_eq!(state.right, Vec2::ZERO, "0.3 is inside a 40% dead zone");
+        assert!(state.left.y > 0.99, "a full push still counts as full");
+        assert!(state.connected);
     }
 }

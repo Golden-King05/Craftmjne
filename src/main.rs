@@ -217,6 +217,8 @@ fn ui_shot(
     mut view: ResMut<craftmjne::settings::SettingsView>,
     mut paused: ResMut<craftmjne::state::PauseState>,
     mut inventory: ResMut<craftmjne::inventory::InventoryState>,
+    mut focus: ResMut<craftmjne::menu_nav::MenuFocus>,
+    buttons: Query<(Entity, &GlobalTransform), With<Button>>,
     mut exit: EventWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
@@ -246,6 +248,7 @@ fn ui_shot(
                 "settings-controller" => {
                     view.section = Section::Controls;
                     view.device = craftmjne::keybinds::Device::Controller;
+                    view.search = "btn:".into();
                 }
                 "settings-options" => {
                     view.section = Section::Controls;
@@ -263,6 +266,12 @@ fn ui_shot(
                 inventory.open = true;
             }
             *phase = 3;
+        }
+        3 if name == "inventory" && focus.entity.is_none() && t > 15.0 => {
+            // Highlight a slot as a controller would, so the screenshot shows it.
+            let mut all: Vec<_> = buttons.iter().map(|(e, g)| (e, g.translation())).collect();
+            all.sort_by(|a, b| a.1.y.total_cmp(&b.1.y).then(a.1.x.total_cmp(&b.1.x)));
+            focus.entity = all.get(12).map(|(e, _)| *e);
         }
         3 if t > if in_game { 16.0 } else { 7.0 } => {
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(out));

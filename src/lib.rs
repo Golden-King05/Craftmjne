@@ -35,6 +35,7 @@ pub mod mesher;
 pub mod noise;
 pub mod overlay;
 pub mod particles;
+pub mod pad_glyphs;
 pub mod player;
 pub mod render;
 pub mod save;

@@ -101,6 +101,9 @@ enum SettingsButton {
     ControlsTab(ControlsTab),
     SetDevice(Device),
     SetFlightMode(FlightMode),
+    LookSpeedDelta(i32),
+    DeadzoneDelta(i32),
+    ToggleInvertLook,
     RenderDistanceDelta(i32),
     ToggleDefaultModStorage,
     Rebind(String),
@@ -211,6 +214,17 @@ fn sbutton(parent: &mut ChildSpawnerCommands, label: &str, action: SettingsButto
     theme::button(parent, action, label, ButtonOpts::new(style).size(width, height).font(font).selected(selected).text(text).accent(accent));
 }
 
+/// A value with a minus and a plus beside it.
+fn stepper(parent: &mut ChildSpawnerCommands, label: &str, minus: SettingsButton, plus: SettingsButton) {
+    parent.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
+        sbutton(row, "-", minus, ButtonStyle::Normal, 44.0, 38.0, 20.0, false, theme::TEXT, None);
+        row.spawn((Node { width: Val::Px(220.0), justify_content: JustifyContent::Center, ..default() },)).with_children(|c| {
+            c.spawn((Text::new(label), TextFont { font_size: 17.0, ..default() }, TextColor(theme::TEXT)));
+        });
+        sbutton(row, "+", plus, ButtonStyle::Normal, 44.0, 38.0, 20.0, false, theme::TEXT, None);
+    });
+}
+
 fn rebuild_settings(
     mut commands: Commands,
     view: Res<SettingsView>,
@@ -314,6 +328,11 @@ fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
                 }
             });
             dim(body, options.flight_mode.description(), 14.0);
+            body.spawn((Text::new("Controller sticks"), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(14.0)), ..default() }));
+            stepper(body, &format!("Look speed: {}%", options.look_speed_pct), SettingsButton::LookSpeedDelta(-25), SettingsButton::LookSpeedDelta(25));
+            stepper(body, &format!("Dead zone: {}%", options.deadzone_pct), SettingsButton::DeadzoneDelta(-5), SettingsButton::DeadzoneDelta(5));
+            sbutton(body, if options.invert_look_y { "Invert look (Y): On" } else { "Invert look (Y): Off" }, SettingsButton::ToggleInvertLook, ButtonStyle::Choice, 260.0, 38.0, 16.0, options.invert_look_y, theme::TEXT, None);
+            dim(body, "Dead zone is how far a stick must move before it counts - raise it if the view drifts on its own.", 13.0);
         }
     }
 }
@@ -429,7 +448,8 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
                                 (false, None) => ("Unbound".to_string(), TEXT_DIM),
                             };
                             let accent = if listening { Some(YELLOW) } else if clash { Some(RED) } else { None };
-                            sbutton(buttons, &text, SettingsButton::Rebind(id.clone()), ButtonStyle::Key, 200.0, 32.0, 15.0, false, color, accent);
+                            let glyph = (device == Device::Controller && !listening).then(|| bindings.pad_get(&id)).flatten();
+                            theme::button(buttons, SettingsButton::Rebind(id.clone()), &text, ButtonOpts::new(ButtonStyle::Key).size(200.0, 32.0).font(15.0).text(color).accent(accent).glyph(glyph));
                             let is_default = if device == Device::Keyboard { bindings.is_default(&id) } else { bindings.pad_is_default(&id) };
                             let changed = if is_default { TEXT_DIM } else { theme::TEXT };
                             sbutton(buttons, "Reset", SettingsButton::Reset(id.clone()), ButtonStyle::Normal, 62.0, 32.0, 13.0, false, changed, None);
@@ -515,6 +535,18 @@ fn handle_settings_buttons(
             }
             SettingsButton::SetFlightMode(mode) => {
                 options.flight_mode = mode;
+                let _ = store.save_control_options(&options);
+            }
+            SettingsButton::LookSpeedDelta(d) => {
+                options.nudge_look_speed(d);
+                let _ = store.save_control_options(&options);
+            }
+            SettingsButton::DeadzoneDelta(d) => {
+                options.nudge_deadzone(d);
+                let _ = store.save_control_options(&options);
+            }
+            SettingsButton::ToggleInvertLook => {
+                options.invert_look_y = !options.invert_look_y;
                 let _ = store.save_control_options(&options);
             }
             SettingsButton::RenderDistanceDelta(d) => {
@@ -1110,5 +1142,27 @@ mod tests {
         s.click(SettingsButton::SetDevice(Device::Controller));
         assert!(s.texts().iter().any(|t| t.contains("share a button")));
         assert!(s.texts().iter().any(|t| t.starts_with("Also used by")));
+    }
+
+    #[test]
+    fn stick_tuning_steps_within_its_range_shows_and_saves() {
+        let mut s = screen();
+        s.click(SettingsButton::Section(Section::Controls));
+        s.click(SettingsButton::ControlsTab(ControlsTab::Options));
+        assert!(s.texts().iter().any(|t| t == "Look speed: 100%") && s.texts().iter().any(|t| t == "Dead zone: 20%"));
+        s.click(SettingsButton::LookSpeedDelta(25));
+        s.click(SettingsButton::DeadzoneDelta(-5));
+        s.click(SettingsButton::ToggleInvertLook);
+        let o = *s.app.world().resource::<ControlOptions>();
+        assert_eq!((o.look_speed_pct, o.deadzone_pct, o.invert_look_y), (125, 15, true));
+        assert!(s.texts().iter().any(|t| t == "Look speed: 125%") && s.texts().iter().any(|t| t == "Invert look (Y): On"));
+        let saved = s.app.world().resource::<SaveStore>().load_control_options();
+        assert_eq!(saved, o, "written to disk");
+        for _ in 0..40 {
+            s.click(SettingsButton::LookSpeedDelta(-25));
+            s.click(SettingsButton::DeadzoneDelta(5));
+        }
+        let o = *s.app.world().resource::<ControlOptions>();
+        assert_eq!((o.look_speed_pct, o.deadzone_pct), (ControlOptions::LOOK_SPEED_RANGE.0, ControlOptions::DEADZONE_RANGE.1), "stops at the ends");
     }
 }

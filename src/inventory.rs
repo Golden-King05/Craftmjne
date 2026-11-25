@@ -29,7 +29,7 @@ use crate::gui_skin::{Element, Skinned};
 use crate::keybinds::{Action, Actions};
 use crate::ui_theme::{self as theme, ButtonStyle, ThemedButton};
 use crate::chat::ChatState;
-use crate::knap_ui::{abandon_when_inventory_closes, knap_input, sync_knap_screen, KnapState};
+use crate::knap_ui::{abandon_when_inventory_closes, knap_focus_ring, knap_input, sync_knap_screen, KnapState};
 use crate::crafting::{can_start_knapping, craft, stations_near, times_craftable, KnownItems, NearbyStations, RecipeBook};
 use crate::interact::Hotbar;
 use crate::item_registry::{ItemId, ItemRegistry, ItemStack, NO_ITEM};
@@ -293,12 +293,14 @@ fn toggle_inventory(
 
 fn inventory_escape(
     keys: Res<ButtonInput<KeyCode>>,
+    pad: Option<Res<crate::gamepad::PadState>>,
     knap: Res<KnapState>,
     mut inv: ResMut<InventoryState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     // Escape closes the knapping screen first (`knap_ui`), not the inventory under it.
-    if !inv.open || knap.is_open() || !keys.just_pressed(KeyCode::Escape) {
+    let back = keys.just_pressed(KeyCode::Escape) || pad.as_deref().is_some_and(|p| p.started(crate::gamepad::PadButton::East));
+    if !inv.open || knap.is_open() || !back {
         return;
     }
     let Ok(mut window) = windows.single_mut() else { return };
@@ -352,13 +354,15 @@ fn scroll_creative_list(
 
 fn click_slots(
     keys: Res<ButtonInput<KeyCode>>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
     registry: Res<ItemRegistry>,
     mut held: ResMut<HeldStack>,
     mut hotbar: ResMut<Hotbar>,
     mut inventory: ResMut<Inventory>,
     clicks: Query<(&Interaction, &SlotRef), Changed<Interaction>>,
 ) {
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    // X on a controller is a shift-click.
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) || focus.is_some_and(|f| f.secondary);
     for (interaction, &slot) in &clicks {
         if *interaction != Interaction::Pressed {
             continue;
@@ -393,6 +397,7 @@ fn handle_creative_click(
 #[allow(clippy::too_many_arguments)]
 fn craft_clicks(
     keys: Res<ButtonInput<KeyCode>>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
     book: Res<RecipeBook>,
     registry: Res<ItemRegistry>,
     mut hotbar: ResMut<Hotbar>,
@@ -402,7 +407,7 @@ fn craft_clicks(
     mut knap: ResMut<KnapState>,
     clicks: Query<(&Interaction, &CraftButton), Changed<Interaction>>,
 ) {
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) || focus.is_some_and(|f| f.secondary);
     for (interaction, button) in &clicks {
         if *interaction != Interaction::Pressed {
             continue;
@@ -459,13 +464,15 @@ fn track_nearby_stations(
 fn track_hovered_item(
     registry: Res<ItemRegistry>,
     mut inv: ResMut<InventoryState>,
-    slots: Query<(&Interaction, &SlotItem)>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
+    slots: Query<(Entity, &Interaction, &SlotItem)>,
 ) {
     if !inv.open {
         return;
     }
-    let hovered = slots.iter().find_map(|(interaction, slot)| {
-        (slot.0 != NO_ITEM && matches!(interaction, Interaction::Hovered | Interaction::Pressed))
+    let keyed = focus.and_then(|f| f.entity);
+    let hovered = slots.iter().find_map(|(entity, interaction, slot)| {
+        (slot.0 != NO_ITEM && (matches!(interaction, Interaction::Hovered | Interaction::Pressed) || keyed == Some(entity)))
             .then(|| tip_for(&registry, slot.0, slot.1))
     });
     if inv.tooltip != hovered {
@@ -810,10 +817,15 @@ fn sync_inventory_screen(
 fn sync_cursor_ui(
     inv: Res<InventoryState>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    focus: Option<Res<crate::menu_nav::MenuFocus>>,
+    spots: Query<(&GlobalTransform, &ComputedNode)>,
     mut tooltips: Query<(&mut Text, &mut Node, &mut Visibility, &mut TextColor), (With<TooltipText>, Without<HeldIcon>)>,
     mut held_icons: Query<&mut Node, (With<HeldIcon>, Without<TooltipText>)>,
 ) {
-    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
+    // With a controller (or the keyboard) driving the highlight there is no pointer: the held
+    // stack and the tooltip hang off the highlighted slot instead.
+    let keyed = focus.and_then(|f| f.entity).and_then(|e| spots.get(e).ok()).map(|(gt, n)| gt.translation().truncate() * n.inverse_scale_factor());
+    let cursor = keyed.or_else(|| windows.single().ok().and_then(|w| w.cursor_position()));
     if let (Ok(mut node), Some(cursor)) = (held_icons.single_mut(), cursor) {
         node.left = Val::Px(cursor.x - 20.0);
         node.top = Val::Px(cursor.y - 20.0);
@@ -883,6 +895,7 @@ impl Plugin for InventoryPlugin {
                     abandon_when_inventory_closes,
                     knap_input,
                     sync_knap_screen,
+                    knap_focus_ring,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
@@ -1053,5 +1066,54 @@ mod tests {
         assert_eq!(tip_for(&items, pick, 5).text, "Stone Pickaxe\nTrash");
         let plain = tip_for(&items, items.id("stick"), 0);
         assert_eq!((plain.text.as_str(), plain.color), ("Stick", [1.0; 3]), "plain items show just a name");
+    }
+
+    /// The whole controller path through the inventory: D-pad highlights a slot, A picks the stack
+    /// up, X shift-clicks it across, and the highlight survives the screen being rebuilt.
+    #[test]
+    fn a_controller_can_pick_up_and_shift_click_stacks() {
+        use crate::gamepad::{PadButton, PadState};
+        use crate::menu_nav::{MenuFocus, MenuNavPlugin};
+        let blocks = crate::blocks::BlockRegistry::with_defaults();
+        let items = ItemRegistry::with_defaults(&blocks);
+        let stone = items.id("stone");
+        let mut app = App::new();
+        app.add_plugins(bevy::input::InputPlugin);
+        app.insert_resource(items).init_resource::<PadState>().init_resource::<HeldStack>().init_resource::<MenuFocus>();
+        app.insert_resource(Hotbar { slots: vec![ItemStack::EMPTY; 9], selected: 0 });
+        let mut inv = Inventory::default();
+        inv.slots[0] = ItemStack::new(stone, 12);
+        app.insert_resource(inv);
+        app.add_systems(PreUpdate, crate::menu_nav::menu_nav_for_tests.after(bevy::ui::UiSystem::Focus));
+        app.add_systems(Update, click_slots);
+        let _ = MenuNavPlugin; // (the real plugin gates on app state; the test drives the system directly)
+        let slot = |app: &mut App, r: SlotRef, x: f32, y: f32| {
+            app.world_mut()
+                .spawn((Button, r, GlobalTransform::from_xyz(x, y, 0.0), ComputedNode { size: Vec2::new(40.0, 40.0), inverse_scale_factor: 1.0, ..default() }))
+                .id()
+        };
+        let a = slot(&mut app, SlotRef::Storage(0), 100.0, 100.0);
+        let _b = slot(&mut app, SlotRef::Storage(1), 150.0, 100.0);
+        let _h = slot(&mut app, SlotRef::Hotbar(0), 100.0, 200.0);
+        let tap = |app: &mut App, b: PadButton| {
+            let mut p = PadState::default();
+            p.just_pressed.insert(b);
+            p.pressed.insert(b);
+            *app.world_mut().resource_mut::<PadState>() = p;
+            app.update();
+            *app.world_mut().resource_mut::<PadState>() = PadState::default();
+            app.update(); // releases the fake press
+        };
+        tap(&mut app, PadButton::DPadDown); // first slot in reading order
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(a));
+        tap(&mut app, PadButton::South); // A: pick the stack up
+        assert_eq!(app.world().resource::<HeldStack>().0.count, 12);
+        assert!(app.world().resource::<Inventory>().slots[0].is_empty());
+        tap(&mut app, PadButton::South); // A again: put it back
+        assert_eq!(app.world().resource::<Inventory>().slots[0].count, 12);
+        tap(&mut app, PadButton::West); // X: shift-click, straight to the hotbar
+        assert!(app.world().resource::<HeldStack>().0.is_empty(), "a quick move doesn't pick the stack up");
+        assert_eq!(app.world().resource::<Hotbar>().slots[0].count, 12);
+        assert!(app.world().resource::<Inventory>().slots[0].is_empty());
     }
 }

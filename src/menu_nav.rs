@@ -19,8 +19,9 @@ use bevy::ui::UiSystem;
 
 use crate::gamepad::{PadButton, PadState};
 use crate::menu::WorldsScreenMode;
-use crate::state::{AppState, PauseState};
-use crate::ui_theme::ThemedButton;
+use crate::inventory::InventoryState;
+use crate::knap_ui::KnapState;
+use crate::state::{AppState, DeathState, PauseState};
 
 /// Which button the keyboard has highlighted.
 #[derive(Resource, Default, Debug)]
@@ -30,7 +31,17 @@ pub struct MenuFocus {
     pressed: Option<Entity>,
     /// The direction the left stick was held in last frame, so a held stick moves once.
     stick: Option<Dir>,
+    /// Where the highlight was, kept for when a rebuild replaces its button.
+    last_center: Option<Vec2>,
+    /// Frames to wait for a rebuilt screen to be laid out before re-highlighting.
+    restore_in: u8,
+    /// The press this frame was the secondary action (X): shift-click in the inventory.
+    /// Read by the screens' click handlers instead of Shift.
+    pub secondary: bool,
 }
+
+/// How long to wait after a screen is rebuilt: the new nodes need a frame to get positions.
+const RESTORE_FRAMES: u8 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
@@ -93,6 +104,11 @@ pub fn navigate(spots: &[Spot], current: Option<usize>, dir: Dir) -> Option<usiz
     }
 }
 
+/// The index of the point closest to `at`.
+pub fn nearest_to(points: &[Vec2], at: Vec2) -> Option<usize> {
+    (0..points.len()).min_by(|&a, &b| points[a].distance_squared(at).total_cmp(&points[b].distance_squared(at)))
+}
+
 /// A direction from a fresh D-pad press.
 fn pad_direction(pad: &PadState) -> Option<Dir> {
     for (b, d) in [(PadButton::DPadUp, Dir::Up), (PadButton::DPadDown, Dir::Down), (PadButton::DPadLeft, Dir::Left), (PadButton::DPadRight, Dir::Right)] {
@@ -118,21 +134,37 @@ pub fn stick_direction(v: Vec2) -> Option<Dir> {
 }
 
 /// Where keyboard navigation applies right now.
-fn nav_active(state: Option<Res<State<AppState>>>, mode: Option<Res<WorldsScreenMode>>, paused: Option<Res<PauseState>>) -> bool {
+fn nav_active(
+    state: Option<Res<State<AppState>>>,
+    mode: Option<Res<WorldsScreenMode>>,
+    paused: Option<Res<PauseState>>,
+    inventory: Option<Res<InventoryState>>,
+    knap: Option<Res<KnapState>>,
+    death: Option<Res<DeathState>>,
+) -> bool {
     let Some(state) = state else { return false };
     match state.get() {
         AppState::MainMenu | AppState::Mods => true,
         AppState::Worlds => mode.is_none_or(|m| *m != WorldsScreenMode::Create),
-        AppState::InGame => paused.is_some_and(|p| p.open),
+        AppState::InGame => paused.is_some_and(|p| p.open) || inventory.is_some_and(|i| i.open) || knap.is_some_and(|k| k.is_open()) || death.is_some_and(|d| d.open),
         AppState::Settings => false,
     }
+}
+
+pub(crate) fn menu_nav_for_tests(
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    pad: Option<Res<PadState>>,
+    focus: ResMut<MenuFocus>,
+    buttons: Query<(Entity, &GlobalTransform, &ComputedNode, Mut<Interaction>), With<Button>>,
+) {
+    menu_nav(keys, pad, focus, buttons);
 }
 
 fn menu_nav(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     pad: Option<Res<PadState>>,
     mut focus: ResMut<MenuFocus>,
-    mut buttons: Query<(Entity, &GlobalTransform, &ComputedNode, Mut<Interaction>), With<ThemedButton>>,
+    mut buttons: Query<(Entity, &GlobalTransform, &ComputedNode, Mut<Interaction>), With<Button>>,
 ) {
     // Release what we pressed last frame.
     if let Some(e) = focus.pressed.take() {
@@ -140,20 +172,40 @@ fn menu_nav(
             *i = Interaction::None;
         }
     }
+    focus.secondary = false;
     // The mouse arriving on a button takes over from the keyboard.
     let focused = focus.entity;
     if buttons.iter().any(|(e, _, _, i)| i.is_changed() && *i == Interaction::Hovered && Some(e) != focused) {
         focus.entity = None;
+        focus.restore_in = 0;
     }
-    // A highlighted button that no longer exists (the screen was rebuilt).
+    // A highlighted button that no longer exists (the screen was rebuilt - the inventory
+    // does that after every click): remember where it was and re-highlight whatever is
+    // there once the new screen has been laid out.
     if focus.entity.is_some_and(|e| buttons.get(e).is_err()) {
         focus.entity = None;
+        focus.restore_in = RESTORE_FRAMES;
+    }
+    if let Some(e) = focus.entity {
+        if let Ok((_, t, ..)) = buttons.get(e) {
+            focus.last_center = Some(t.translation().truncate());
+        }
+    }
+    if focus.restore_in > 0 && focus.entity.is_none() {
+        focus.restore_in -= 1;
+        if focus.restore_in == 0 {
+            if let Some(at) = focus.last_center {
+                let list: Vec<(Entity, Vec2)> = buttons.iter().map(|(e, t, ..)| (e, t.translation().truncate())).collect();
+                focus.entity = nearest_to(&list.iter().map(|(_, c)| *c).collect::<Vec<_>>(), at).map(|i| list[i].0);
+            }
+        }
     }
     let stick = pad.as_deref().and_then(|p| stick_direction(p.left));
     let flick = if stick.is_some() && stick != focus.stick { stick } else { None };
     focus.stick = stick;
     let pad_dir = pad.as_deref().and_then(pad_direction).or(flick);
     let pad_confirm = pad.as_deref().is_some_and(|p| p.started(PadButton::South));
+    let pad_secondary = pad.as_deref().is_some_and(|p| p.started(PadButton::West));
     let keys_default = ButtonInput::<KeyCode>::default();
     let keys = keys.as_deref().unwrap_or(&keys_default);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -182,13 +234,50 @@ fn menu_nav(
             focus.entity = Some(list[i].0);
         }
     }
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) || pad_confirm {
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) || pad_confirm || pad_secondary {
+        focus.secondary = pad_secondary && !pad_confirm;
         if let Some(e) = focus.entity {
             if let Ok((.., mut i)) = buttons.get_mut(e) {
                 *i = Interaction::Pressed;
                 focus.pressed = Some(e);
             }
         }
+    }
+    // Remember where the highlight ended up *this* frame, so a rebuild right after a
+    // move still restores to the right place.
+    if let Some(e) = focus.entity {
+        if let Ok((_, t, ..)) = buttons.get(e) {
+            focus.last_center = Some(t.translation().truncate());
+        }
+    }
+}
+
+/// Keeps the highlighted button visible: if it sits outside the scrolling list that holds it,
+/// scrolls that list just enough. (Only the highlight scrolls; the mouse wheel is unchanged.)
+fn scroll_focus_into_view(
+    focus: Res<MenuFocus>,
+    nodes: Query<(&GlobalTransform, &ComputedNode)>,
+    parents: Query<&ChildOf>,
+    mut lists: Query<&mut ScrollPosition>,
+) {
+    let Some(entity) = focus.entity else { return };
+    let Ok((gt, node)) = nodes.get(entity) else { return };
+    let (centre, half) = (gt.translation().y, node.size().y * 0.5);
+    let mut at = entity;
+    while let Ok(parent) = parents.get(at) {
+        at = parent.parent();
+        let Ok(mut scroll) = lists.get_mut(at) else { continue };
+        let Ok((lgt, lnode)) = nodes.get(at) else { continue };
+        let (lc, lh) = (lgt.translation().y, lnode.size().y * 0.5);
+        let above = (lc - lh) - (centre - half);
+        let below = (centre + half) - (lc + lh);
+        let k = lnode.inverse_scale_factor();
+        if above > 0.5 {
+            scroll.offset_y -= above * k;
+        } else if below > 0.5 {
+            scroll.offset_y += below * k;
+        }
+        break;
     }
 }
 
@@ -197,7 +286,8 @@ pub struct MenuNavPlugin;
 impl Plugin for MenuNavPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuFocus>()
-            .add_systems(PreUpdate, menu_nav.after(UiSystem::Focus).run_if(nav_active));
+            .add_systems(PreUpdate, menu_nav.after(UiSystem::Focus).run_if(nav_active))
+            .add_systems(Update, scroll_focus_into_view.run_if(nav_active));
     }
 }
 
@@ -356,5 +446,86 @@ mod tests {
         stick(&mut app, Vec2::ZERO);
         stick(&mut app, Vec2::new(0.0, -0.9));
         assert_eq!(app.world().resource::<MenuFocus>().entity, Some(b), "a second flick moves again");
+    }
+
+    fn nav_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<MenuFocus>().init_resource::<PadState>().add_systems(Update, (menu_nav, scroll_focus_into_view).chain());
+        app
+    }
+
+    fn button_at(app: &mut App, x: f32, y: f32) -> Entity {
+        app.world_mut()
+            .spawn((Button, GlobalTransform::from_xyz(x, y, 0.0), ComputedNode { size: Vec2::new(40.0, 40.0), inverse_scale_factor: 1.0, ..default() }))
+            .id()
+    }
+
+    fn tap(app: &mut App, b: PadButton) {
+        let mut p = PadState::default();
+        p.just_pressed.insert(b);
+        p.pressed.insert(b);
+        *app.world_mut().resource_mut::<PadState>() = p;
+        app.update();
+        *app.world_mut().resource_mut::<PadState>() = PadState::default();
+    }
+
+    #[test]
+    fn the_highlight_comes_back_where_it_was_when_the_screen_is_rebuilt() {
+        let mut app = nav_app();
+        let _a = button_at(&mut app, 100.0, 100.0);
+        let b = button_at(&mut app, 100.0, 160.0);
+        tap(&mut app, PadButton::DPadDown);
+        tap(&mut app, PadButton::DPadDown);
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(b));
+        // The inventory rebuilds itself after every click: same layout, new entities.
+        app.world_mut().despawn(b);
+        let a2 = button_at(&mut app, 100.0, 100.0);
+        let b2 = button_at(&mut app, 100.0, 160.0);
+        assert_ne!(b, b2);
+        for _ in 0..(RESTORE_FRAMES + 1) {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(b2), "highlight returned to the same spot, not the first button ({a2:?})");
+    }
+
+    #[test]
+    fn x_is_a_secondary_press_for_one_frame_and_a_is_not() {
+        let mut app = nav_app();
+        let b = button_at(&mut app, 100.0, 100.0);
+        tap(&mut app, PadButton::DPadDown);
+        tap(&mut app, PadButton::West);
+        assert!(app.world().resource::<MenuFocus>().secondary);
+        assert_eq!(*app.world().get::<Interaction>(b).unwrap(), Interaction::Pressed);
+        app.update();
+        assert!(!app.world().resource::<MenuFocus>().secondary, "only for the frame it was pressed");
+        tap(&mut app, PadButton::South);
+        assert!(!app.world().resource::<MenuFocus>().secondary, "A is the plain press");
+    }
+
+    #[test]
+    fn moving_the_highlight_scrolls_a_list_to_keep_it_in_view() {
+        let mut app = nav_app();
+        // A 100px-tall list centred at y=100 (50..150), scrolled to the top.
+        let list = app
+            .world_mut()
+            .spawn((GlobalTransform::from_xyz(100.0, 100.0, 0.0), ComputedNode { size: Vec2::new(200.0, 100.0), inverse_scale_factor: 1.0, ..default() }, ScrollPosition::default()))
+            .id();
+        let near = button_at(&mut app, 100.0, 80.0);
+        let far = button_at(&mut app, 100.0, 300.0); // far below the list's bottom edge
+        app.world_mut().entity_mut(near).insert(ChildOf(list));
+        app.world_mut().entity_mut(far).insert(ChildOf(list));
+        tap(&mut app, PadButton::DPadDown);
+        assert_eq!(app.world().get::<ScrollPosition>(list).unwrap().offset_y, 0.0, "already visible: no scrolling");
+        tap(&mut app, PadButton::DPadDown);
+        assert_eq!(app.world().resource::<MenuFocus>().entity, Some(far));
+        let y = app.world().get::<ScrollPosition>(list).unwrap().offset_y;
+        assert!(y > 100.0, "scrolled down to reach it: {y}");
+    }
+
+    #[test]
+    fn nearest_to_picks_the_closest_point() {
+        let pts = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0), Vec2::new(100.0, 90.0)];
+        assert_eq!(nearest_to(&pts, Vec2::new(95.0, 80.0)), Some(2));
+        assert_eq!(nearest_to(&[], Vec2::ZERO), None);
     }
 }

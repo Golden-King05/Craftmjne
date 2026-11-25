@@ -1293,10 +1293,58 @@ impl FlightMode {
 
 /// Settings about how controls behave. Saved next to the keybinds, so (like them)
 /// they belong to a launcher instance. Missing or unreadable reads as the defaults.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ControlOptions {
     #[serde(default)]
     pub flight_mode: FlightMode,
+    /// Right-stick look speed as a percentage of the default (whole numbers keep this
+    /// struct `Eq`, and a percentage is how it is shown).
+    #[serde(default = "default_look_speed_pct")]
+    pub look_speed_pct: u32,
+    /// How far a stick must move before it counts, as a percentage of its range.
+    #[serde(default = "default_deadzone_pct")]
+    pub deadzone_pct: u32,
+    /// Push the right stick up to look down.
+    #[serde(default)]
+    pub invert_look_y: bool,
+}
+
+fn default_look_speed_pct() -> u32 {
+    100
+}
+
+fn default_deadzone_pct() -> u32 {
+    20
+}
+
+impl Default for ControlOptions {
+    fn default() -> Self {
+        Self { flight_mode: FlightMode::default(), look_speed_pct: 100, deadzone_pct: 20, invert_look_y: false }
+    }
+}
+
+impl ControlOptions {
+    pub const LOOK_SPEED_RANGE: (u32, u32) = (25, 300);
+    pub const DEADZONE_RANGE: (u32, u32) = (5, 50);
+
+    /// Look speed as a multiplier, kept in range even if the file was edited by hand.
+    pub fn look_speed(&self) -> f32 {
+        self.look_speed_pct.clamp(Self::LOOK_SPEED_RANGE.0, Self::LOOK_SPEED_RANGE.1) as f32 / 100.0
+    }
+
+    /// The stick dead zone as a fraction of the stick's range.
+    pub fn deadzone(&self) -> f32 {
+        self.deadzone_pct.clamp(Self::DEADZONE_RANGE.0, Self::DEADZONE_RANGE.1) as f32 / 100.0
+    }
+
+    /// Steps look speed by `delta` percent, staying in range.
+    pub fn nudge_look_speed(&mut self, delta: i32) {
+        self.look_speed_pct = (self.look_speed_pct as i32 + delta).clamp(Self::LOOK_SPEED_RANGE.0 as i32, Self::LOOK_SPEED_RANGE.1 as i32) as u32;
+    }
+
+    pub fn nudge_deadzone(&mut self, delta: i32) {
+        self.deadzone_pct = (self.deadzone_pct as i32 + delta).clamp(Self::DEADZONE_RANGE.0 as i32, Self::DEADZONE_RANGE.1 as i32) as u32;
+    }
 }
 
 /// How close together two Jump presses have to be to count as a double-tap.
@@ -1763,7 +1811,7 @@ mod tests {
 
     #[test]
     fn toggle_mode_flies_on_the_key_and_ignores_jump_taps() {
-        let o = ControlOptions { flight_mode: FlightMode::Toggle };
+        let o = ControlOptions { flight_mode: FlightMode::Toggle, ..ControlOptions::default() };
         let mut t = DoubleTap::default();
         assert!(o.wants_fly_toggle(true, false, 0.0, &mut t));
         assert!(!o.wants_fly_toggle(false, true, 0.1, &mut t));
@@ -1772,7 +1820,7 @@ mod tests {
 
     #[test]
     fn double_tap_mode_flies_on_a_jump_double_tap_and_ignores_the_key() {
-        let o = ControlOptions { flight_mode: FlightMode::DoubleTapJump };
+        let o = ControlOptions { flight_mode: FlightMode::DoubleTapJump, ..ControlOptions::default() };
         let mut t = DoubleTap::default();
         assert!(!o.wants_fly_toggle(true, false, 0.0, &mut t), "the toggle key does nothing in this mode");
         assert!(!o.wants_fly_toggle(false, true, 1.0, &mut t), "one tap is just a jump");
@@ -1785,9 +1833,13 @@ mod tests {
     #[test]
     fn control_options_default_and_survive_a_save_with_or_without_the_field() {
         assert_eq!(ControlOptions::default().flight_mode, FlightMode::Toggle);
-        let saved = serde_json::to_string(&ControlOptions { flight_mode: FlightMode::DoubleTapJump }).unwrap();
-        assert_eq!(saved, r#"{"flight_mode":"double_tap_jump"}"#);
+        let saved = serde_json::to_string(&ControlOptions { flight_mode: FlightMode::DoubleTapJump, ..ControlOptions::default() }).unwrap();
+        assert_eq!(saved, r#"{"flight_mode":"double_tap_jump","look_speed_pct":100,"deadzone_pct":20,"invert_look_y":false}"#);
         assert_eq!(serde_json::from_str::<ControlOptions>(&saved).unwrap().flight_mode, FlightMode::DoubleTapJump);
+        let old = serde_json::from_str::<ControlOptions>(r#"{"flight_mode":"double_tap_jump"}"#).unwrap();
+        assert_eq!((old.look_speed_pct, old.deadzone_pct, old.invert_look_y), (100, 20, false), "a file from before stick tuning gets the defaults, not zeros");
+        let wild = ControlOptions { look_speed_pct: 99999, deadzone_pct: 0, ..ControlOptions::default() };
+        assert_eq!((wild.look_speed(), wild.deadzone()), (3.0, 0.05), "a hand-edited file is clamped on use");
         assert_eq!(serde_json::from_str::<ControlOptions>("{}").unwrap(), ControlOptions::default(), "a file from before the option existed");
         assert!(serde_json::from_str::<ControlOptions>("{\"flight_mode\": \"nope\"}").is_err(), "load_control_options turns that into the default");
     }

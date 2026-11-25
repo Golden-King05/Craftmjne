@@ -1045,7 +1045,7 @@ mod tests {
         assert_eq!(after_update.load_keybinds(), jump, "same instance, same controls");
 
         // The control options (flight mode) travel with them.
-        let double = crate::keybinds::ControlOptions { flight_mode: crate::keybinds::FlightMode::DoubleTapJump };
+        let double = crate::keybinds::ControlOptions { flight_mode: crate::keybinds::FlightMode::DoubleTapJump, ..Default::default() };
         a.save_control_options(&double).unwrap();
         assert_eq!(after_update.load_control_options(), double, "same instance keeps its flight mode through an update");
         assert_eq!(b.load_control_options(), Default::default(), "another instance has its own");

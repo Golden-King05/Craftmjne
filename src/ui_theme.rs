@@ -131,6 +131,9 @@ impl Plugin for ThemePlugin {
         if !app.is_plugin_added::<GuiSkinPlugin>() {
             app.add_plugins(GuiSkinPlugin);
         }
+        if !app.is_plugin_added::<crate::pad_glyphs::PadGlyphPlugin>() {
+            app.add_plugins(crate::pad_glyphs::PadGlyphPlugin);
+        }
         if !app.is_plugin_added::<crate::menu_nav::MenuNavPlugin>() {
             app.add_plugins(crate::menu_nav::MenuNavPlugin);
         }
@@ -152,11 +155,13 @@ pub struct ButtonOpts {
     pub selected: bool,
     pub text: Color,
     pub accent: Option<Color>,
+    /// A controller button's picture drawn before the label.
+    pub glyph: Option<crate::gamepad::PadButton>,
 }
 
 impl ButtonOpts {
     pub fn new(style: ButtonStyle) -> Self {
-        Self { style, width: 320.0, height: 46.0, font: 19.0, selected: false, text: TEXT, accent: None }
+        Self { style, width: 320.0, height: 46.0, font: 19.0, selected: false, text: TEXT, accent: None, glyph: None }
     }
 
     pub fn size(mut self, width: f32, height: f32) -> Self {
@@ -177,6 +182,11 @@ impl ButtonOpts {
 
     pub fn text(mut self, color: Color) -> Self {
         self.text = color;
+        self
+    }
+
+    pub fn glyph(mut self, button: Option<crate::gamepad::PadButton>) -> Self {
+        self.glyph = button;
         self
     }
 
@@ -208,6 +218,9 @@ pub fn button(parent: &mut ChildSpawnerCommands, action: impl Bundle, label: &st
             },
         ))
         .with_children(|b| {
+            if let Some(glyph) = o.glyph {
+                b.spawn((Node { width: Val::Px(24.0), height: Val::Px(24.0), margin: UiRect::right(Val::Px(8.0)), ..default() }, crate::pad_glyphs::PadGlyph(glyph)));
+            }
             b.spawn((Text::new(label), TextFont { font_size: o.font, ..default() }, TextColor(o.text), shadow()));
         });
 }
