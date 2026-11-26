@@ -160,6 +160,8 @@ fn accent(kind: char) -> &'static [&'static str] {
         '\u{303}' => &[".#.#", "#.#."],      // tilde
         '\u{308}' => &["#.#"],               // diaeresis
         '\u{306}' => &["#.#", ".#."],        // breve
+        '\u{304}' => &["###", "..."],        // macron (pinyin first tone, Hepburn long vowels)
+        '\u{30C}' => &["#.#", ".#."],        // caron (pinyin third tone; at this size it is the breve's shape)
         '\u{30A}' => &[".#.", "#.#", ".#."], // ring (three rows; only over capitals' two-row gap by shifting)
         _ => &[],
     }
@@ -181,7 +183,16 @@ const COMPOSED: &[(char, char, char)] = &[
     ('ò', 'o', '\u{300}'), ('ó', 'o', '\u{301}'), ('ô', 'o', '\u{302}'), ('õ', 'o', '\u{303}'), ('ö', 'o', '\u{308}'),
     ('ù', 'u', '\u{300}'), ('ú', 'u', '\u{301}'), ('û', 'u', '\u{302}'), ('ü', 'u', '\u{308}'),
     ('ý', 'y', '\u{301}'), ('ÿ', 'y', '\u{308}'),
+    // Pinyin tones and Hepburn macrons.
+    ('ā', 'a', '\u{304}'), ('ē', 'e', '\u{304}'), ('ī', 'ı', '\u{304}'), ('ō', 'o', '\u{304}'), ('ū', 'u', '\u{304}'),
+    ('Ā', 'A', '\u{304}'), ('Ē', 'E', '\u{304}'), ('Ī', 'I', '\u{304}'), ('Ō', 'O', '\u{304}'), ('Ū', 'U', '\u{304}'),
+    ('ǎ', 'a', '\u{30C}'), ('ě', 'e', '\u{30C}'), ('ǐ', 'ı', '\u{30C}'), ('ǒ', 'o', '\u{30C}'), ('ǔ', 'u', '\u{30C}'),
+    ('Ǎ', 'A', '\u{30C}'), ('Ě', 'E', '\u{30C}'), ('Ǐ', 'I', '\u{30C}'), ('Ǒ', 'O', '\u{30C}'), ('Ǔ', 'U', '\u{30C}'),
+    ('ḿ', 'm', '\u{301}'), ('ń', 'n', '\u{301}'), ('ň', 'n', '\u{30C}'), ('ǹ', 'n', '\u{300}'),
 ];
+
+/// `(character, base, ü's accent)`: ü with a tone mark above its dots (pinyin lü/nü syllables).
+const STACKED: &[(char, char, char)] = &[('ǖ', 'ü', '\u{304}'), ('ǘ', 'ü', '\u{301}'), ('ǚ', 'ü', '\u{30C}'), ('ǜ', 'ü', '\u{300}')];
 
 /// A glyph's ink: `(top cell row, width, rows of booleans)`.
 pub(crate) type Art = (i32, usize, Vec<Vec<bool>>);
@@ -252,6 +263,13 @@ pub fn glyphs() -> Vec<GlyphSpec> {
     for (c, base, mark) in COMPOSED {
         if let Some(b) = art_of(*base) {
             out.push(to_glyph(*c, &compose(&b, *mark)));
+        }
+    }
+    for (c, base, mark) in STACKED {
+        if let Some(b) = art_of('u') {
+            let dotted = compose(&b, '\u{308}');
+            let _ = base;
+            out.push(to_glyph(*c, &compose(&dotted, *mark)));
         }
     }
     out.extend(crate::pixel_scripts::glyphs());

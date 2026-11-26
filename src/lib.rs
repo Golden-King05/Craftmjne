@@ -7,6 +7,7 @@ pub mod biome;
 pub mod block_models;
 pub mod blocks;
 pub mod chat;
+pub mod cjk;
 pub mod commands;
 pub mod config;
 pub mod content;

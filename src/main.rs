@@ -152,6 +152,10 @@ fn main() {
         if name == "pause" || name == "game" || name == "inventory" {
             app.add_systems(Update, enter_smoke_world.run_if(in_state(AppState::MainMenu)));
         }
+        // `CRAFT_CJK=ja|zh-Hans|zh-Hant` picks the regional forms of the Chinese/Japanese screen.
+        if let Some(style) = std::env::var("CRAFT_CJK").ok().and_then(|l| craftmjne::cjk::Style::from_language(&l)) {
+            app.insert_resource(craftmjne::cjk::CjkStyle(style));
+        }
         app.insert_resource(ShotScreen(name)).add_systems(Update, ui_shot);
     }
     if smoke {
@@ -242,8 +246,9 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
-                "fonts" | "scripts" => {
+                "fonts" | "scripts" | "cjk" => {
                     let scripts = name == "scripts";
+                    let cjk = name == "cjk";
                     for e in &buttons_roots {
                         commands.entity(e).despawn();
                     }
@@ -252,7 +257,22 @@ fn ui_shot(
                         BackgroundColor(Color::srgb(0.16, 0.12, 0.09)),
                     ))
                     .with_children(|p| {
-                        let sample: &[(f32, &str)] = if scripts {
+                        let sample: &[(f32, &str)] = if cjk {
+                            &[
+                                (24.0, "ひらがな あいうえお かきくけこ さしすせそ たちつてと なにぬねの はひふへほ まみむめも やゆよ らりるれろ わをん"),
+                                (24.0, "カタカナ アイウエオ カキクケコ ガギグゲゴ パピプペポ ヴ ー ｱｲｳｴｵ ｶﾞ"),
+                                (24.0, "日本語のテキスト。「こんにちは、世界！」 漢字仮名交じり文"),
+                                (24.0, "直 骨 令 刃 海 角 糸 飲 食 語 話 読 鳥 魚 雪 愛 国 学 校"),
+                                (24.0, "中文文本。你好，世界！简体字：汉语 学习 电脑 门 车 马 鸟 鱼"),
+                                (24.0, "繁體字：漢語 學習 電腦 門 車 馬 鳥 魚 龍 龜 鬱 體 灣"),
+                                (24.0, "ㄅㄆㄇㄈ ㄉㄊㄋㄌ ㄍㄎㄏ ㄐㄑㄒ ㄓㄔㄕㄖ ㄗㄘㄙ ㄚㄛㄜ ㄧㄨㄩ"),
+                                (24.0, "nǐ hǎo, shìjiè  mā má mǎ mà  lǜ nǚ  ǖ ǘ ǚ ǜ  Tōkyō Ōsaka"),
+                                (24.0, "〒〃々〆〇〈〉《》「」『』【】〔〕〜 ① ② ③ ㈱ ㌔ ㍿ ＡＢＣ１２３"),
+                                (24.0, "※ → ← ↑ ↓ ⇒ ≠ ≦ ≧ ∞ ∴ ─│┌┐└┘ ■□●○◎▲△▼▽◆◇ ★☆♪♯♭ †‡…‥—“”‘’ ℃ № Σ π α β"),
+                                (24.0, "鬱 龍 驫 麤 齉 灕 㐂 𠀀 𠮷 𪚥"),
+                                (12.0, "日本語 中文 繁體 ひらがな カタカナ nǐ hǎo (twelve)"),
+                            ]
+                        } else if scripts {
                             &[
                                 (24.0, "Привет, мир! Съешь ещё этих мягких булок"),
                                 (24.0, "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"),

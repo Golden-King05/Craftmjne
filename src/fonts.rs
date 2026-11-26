@@ -4,6 +4,9 @@
 //! its colour emoji (`emoji.rs`); both are written as real font files in memory (`font_gen.rs`) and
 //! handed to Bevy. There is no other font in the game: the built-in one replaces Bevy's.
 //!
+//! **Chinese and Japanese** come from a third, fallback font (`cjk.rs`), built in the background at
+//! start-up in the style in force ([`crate::cjk::CjkStyle`]); changing the style swaps it.
+//!
 //! **Crisp text.** Pixel fonts blur at the wrong size, so a text's `font_size` is snapped to a
 //! multiple of the font's pixel grid (12 for ours: 12, 24, 36...) and drawn without smoothing. That
 //! happens for every text with a pixel font, in one system ([`apply_fonts`]), so no screen has to
@@ -164,6 +167,7 @@ pub struct FontBook {
     /// Every handle that has been "the default" - texts holding one of these follow the current one.
     managed: HashSet<AssetId<Font>>,
     emoji_faces: Vec<bevy::text::cosmic_text::fontdb::ID>,
+    cjk_faces: Vec<bevy::text::cosmic_text::fontdb::ID>,
 }
 
 impl Default for FontBook {
@@ -171,7 +175,7 @@ impl Default for FontBook {
         let base = Handle::<Font>::default();
         let mut units = HashMap::new();
         units.insert(base.id(), EM_ROWS as f32);
-        Self { default: base.clone(), named: HashMap::new(), roles: HashMap::new(), units, managed: HashSet::from([base.id()]), emoji_faces: Vec::new() }
+        Self { default: base.clone(), named: HashMap::new(), roles: HashMap::new(), units, managed: HashSet::from([base.id()]), emoji_faces: Vec::new(), cjk_faces: Vec::new() }
     }
 }
 
@@ -214,6 +218,37 @@ fn install_builtin(mut fonts: ResMut<Assets<Font>>, mut book: ResMut<FontBook>, 
     }
     if let Some(mut cosmic) = cosmic {
         book.emoji_faces = register_face(&mut cosmic, emoji_font_bytes());
+    }
+}
+
+/// Builds the Chinese/Japanese font for the style in force off the main thread (it has tens of
+/// thousands of glyphs) and, once it is ready, registers it as a fallback beside the emoji. Changing
+/// [`CjkStyle`] swaps it; text lays itself out again each time.
+fn update_cjk(
+    style: Option<Res<crate::cjk::CjkStyle>>,
+    cosmic: Option<ResMut<CosmicFontSystem>>,
+    mut book: ResMut<FontBook>,
+    mut texts: Query<&mut TextFont>,
+    mut pending: Local<Option<(crate::cjk::Style, bevy::tasks::Task<Vec<u8>>)>>,
+    mut shown: Local<Option<crate::cjk::Style>>,
+) {
+    let Some(mut cosmic) = cosmic else { return };
+    let want = style.map(|s| s.0).unwrap_or_default();
+    if pending.is_none() && *shown != Some(want) {
+        let task = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default).spawn(async move { crate::cjk::font_bytes(want) });
+        *pending = Some((want, task));
+    }
+    let Some((built_for, task)) = pending.as_mut() else { return };
+    let Some(bytes) = bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(task)) else { return };
+    let built_for = *built_for;
+    *pending = None;
+    for id in book.cjk_faces.drain(..) {
+        cosmic.0.db_mut().remove_face(id);
+    }
+    book.cjk_faces = register_face(&mut cosmic, bytes);
+    *shown = Some(built_for);
+    for mut tf in &mut texts {
+        tf.set_changed();
     }
 }
 
@@ -300,8 +335,18 @@ fn refresh_pack_fonts(
 /// Every frame, cheaply: gives tagged texts their font, moves untagged texts that hold a default
 /// handle onto the current default, and makes pixel-font texts crisp (size snapped to the pixel grid,
 /// no smoothing, a line height that is a whole number of pixels).
-fn apply_fonts(book: Res<FontBook>, mut texts: Query<(&mut TextFont, Option<&FontTag>)>) {
-    for (mut tf, tag) in &mut texts {
+/// The line height, as a multiple of the font size: 1.25 for the pixel font, more for text with Chinese
+/// or Japanese in it, whose 16-pixel glyphs would otherwise touch the line below.
+pub fn line_height_for(text: Option<&str>) -> f32 {
+    if text.is_some_and(|t| t.chars().any(crate::cjk::is_cjk)) {
+        1.5
+    } else {
+        1.25
+    }
+}
+
+fn apply_fonts(book: Res<FontBook>, mut texts: Query<(&mut TextFont, Option<&FontTag>, Option<&Text>)>) {
+    for (mut tf, tag, text) in &mut texts {
         let want = match tag {
             Some(t) => Some(book.resolve(&t.0)),
             None if book.managed.contains(&tf.font.id()) => Some(book.default.clone()),
@@ -320,8 +365,9 @@ fn apply_fonts(book: Res<FontBook>, mut texts: Query<(&mut TextFont, Option<&Fon
             if tf.font_smoothing != FontSmoothing::None {
                 tf.font_smoothing = FontSmoothing::None;
             }
-            if !matches!(tf.line_height, LineHeight::RelativeToFont(r) if (r - 1.25).abs() < 1e-6) {
-                tf.line_height = LineHeight::RelativeToFont(1.25);
+            let want = line_height_for(text.map(|t| t.0.as_str()));
+            if !matches!(tf.line_height, LineHeight::RelativeToFont(r) if (r - want).abs() < 1e-6) {
+                tf.line_height = LineHeight::RelativeToFont(want);
             }
         }
     }
@@ -332,8 +378,9 @@ pub struct FontPlugin;
 impl Plugin for FontPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FontBook>()
+            .init_resource::<crate::cjk::CjkStyle>()
             .add_systems(PreStartup, install_builtin)
-            .add_systems(Update, refresh_pack_fonts)
+            .add_systems(Update, (refresh_pack_fonts, update_cjk))
             .add_systems(PostUpdate, apply_fonts.before(bevy::ui::UiSystem::Prepare));
     }
 }
@@ -341,6 +388,77 @@ impl Plugin for FontPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cjk_text_gets_taller_lines() {
+        assert_eq!(line_height_for(Some("hello")), 1.25);
+        assert_eq!(line_height_for(None), 1.25);
+        assert_eq!(line_height_for(Some("hi \u{65E5}\u{672C}")), 1.5);
+    }
+
+    /// A fingerprint of one glyph's outline (its points, summed), to tell two drawings of it apart.
+    fn outline_sum(bytes: &[u8], c: char) -> f32 {
+        struct Sum(f32);
+        impl ttf_parser::OutlineBuilder for Sum {
+            fn move_to(&mut self, x: f32, y: f32) {
+                self.0 += x * 3.0 + y * 7.0;
+            }
+            fn line_to(&mut self, x: f32, y: f32) {
+                self.0 += x * 3.0 + y * 7.0;
+            }
+            fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+                self.0 += x1 + y1 + x + y;
+            }
+            fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+                self.0 += x1 + y1 + x2 + y2 + x + y;
+            }
+            fn close(&mut self) {}
+        }
+        let face = ttf_parser::Face::parse(bytes, 0).unwrap();
+        let mut sum = Sum(0.0);
+        face.outline_glyph(face.glyph_index(c).unwrap(), &mut sum).unwrap();
+        sum.0
+    }
+
+    #[test]
+    fn the_cjk_font_is_built_in_the_background_registered_and_swapped_with_the_style() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<Font>();
+        app.insert_resource(CosmicFontSystem::default());
+        app.add_plugins(FontPlugin);
+        let ids = |app: &App| app.world().resource::<FontBook>().cjk_faces.clone();
+        let wait_for = |app: &mut App, done: &dyn Fn(&App) -> bool| {
+            let start = std::time::Instant::now();
+            while !done(app) {
+                assert!(start.elapsed().as_secs() < 60, "the CJK font was never registered");
+                app.update();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait_for(&mut app, &|a| !ids(a).is_empty());
+        let first = ids(&app);
+        let has_kanji = |app: &App, id| {
+            let cosmic = app.world().resource::<CosmicFontSystem>();
+            cosmic.0.db().with_face_data(id, |data, i| ttf_parser::Face::parse(data, i).unwrap().glyph_index('\u{76F4}').is_some()).unwrap_or(false)
+        };
+        assert!(has_kanji(&app, first[0]), "the registered face draws the ideograph");
+        let before = {
+            let cosmic = app.world().resource::<CosmicFontSystem>();
+            cosmic.0.db().with_face_data(first[0], |d, _| outline_sum(d, '\u{76F4}')).unwrap()
+        };
+
+        app.insert_resource(crate::cjk::CjkStyle(crate::cjk::Style::Japanese));
+        wait_for(&mut app, &|a| {
+            let now = ids(a);
+            !now.is_empty() && now != first
+        });
+        let second = ids(&app);
+        let cosmic = app.world().resource::<CosmicFontSystem>();
+        assert!(cosmic.0.db().face(first[0]).is_none(), "the old style's face is removed");
+        let after = cosmic.0.db().with_face_data(second[0], |d, _| outline_sum(d, '\u{76F4}')).unwrap();
+        assert_ne!(before, after, "Japanese draws 直 differently");
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

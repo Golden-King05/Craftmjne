@@ -87,6 +87,7 @@ jobs:
           cp -r tiers "$stage/tiers"
           cp -r rarities "$stage/rarities"
           cp -r entities "$stage/entities"
+          cp -r third_party "$stage/third_party"
           # The whole directories, not just their READMEs - a past version of
           # this step copied only textures/blocks/README.md, which silently
           # shipped every released build with the procedural placeholder art

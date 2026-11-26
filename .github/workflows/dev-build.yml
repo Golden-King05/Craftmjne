@@ -83,6 +83,7 @@ jobs:
           cp -r tiers "$stage/tiers"
           cp -r rarities "$stage/rarities"
           cp -r entities "$stage/entities"
+          cp -r third_party "$stage/third_party"
           cp -r textures "$stage/textures"
 
       - name: Package (Linux/macOS)

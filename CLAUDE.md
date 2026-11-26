@@ -3581,3 +3581,34 @@ etc.) instead of inventing a new approach:
   - Not verified: the people sprites were only looked at in a software-rendered contact sheet
     (`CRAFT_EMOJI_SHEET=<png> CRAFT_EMOJI_CROP=<0..1> cargo test --lib emoji::tests::sheet`).
     They are small and plain; treat them as a first pass.
+
+- **Chinese and Japanese came from a full bitmap font, because nothing hand-drawn reaches 21,000
+  ideographs - and the data source decided the design.** GNU Unifont (SIL OFL 1.1) is complete for the
+  BMP and ships three glyph sets (default/Simplified, `_t` Traditional, `_jp` Japanese; 9,665 shared
+  ideographs differ between default and Japanese, 26,407 between default and Traditional). `tools/
+  build_cjk_data.py` keeps only the CJK-related ranges as one base blob plus two *overlays that hold
+  only the glyphs that differ* (1.6 MB total, `include_bytes!`, so no packaging step to forget -
+  the notice in `third_party/unifont/` ships via the workflows' `cp -r third_party`). Facts that
+  mattered:
+  - **16 pixels does not fit a 12-row em, so the glyphs hang above it by design.** `cjk.rs` places
+    row 0 at `BASELINE_ROW - 14` and uses the same `PIXEL` unit, so at Latin size 12k the CJK is 16k
+    screen pixels: integer scaling for both, 4/3 the Latin height. Scaling it into 12 rows would have
+    blurred 1-pixel strokes away. The cost is real: lines overlap, so `fonts::line_height_for` gives
+    text containing CJK a 1.5 line height (1.25 otherwise).
+  - **Unifont cannot make "all of Han" complete.** BMP is complete (tested against the Unicode ranges
+    per style), Extensions B-I are ~8,000 of ~70,000. Say so; don't claim full Han coverage.
+  - **The CJK font must not define anything the emoji font or the joiners own.** `glyph_specs` skips
+    every emoji character and `emoji::joiners()` - the symbol blocks (arrows, dingbats) overlap emoji,
+    and a ZWJ or ☀ resolving to the wrong face would split an emoji sequence across two fonts.
+    `the_cjk_font_never_takes_over_an_emoji_or_a_joiner` guards it. Format characters (U+2000-200F,
+    2028-202F, 205F-206F) are not in the ranges for the same reason.
+  - **Build ~40,000 glyphs off the main thread.** `fonts::update_cjk` spawns the build on
+    `AsyncComputeTaskPool`, polls with `block_on(poll_once)`, registers the face as a fallback beside
+    the emoji, and re-registers (removing the old face) when `CjkStyle` changes. The app-level test
+    waits for the task and checks the swap (and the old face's removal; break-tested by keeping it).
+  - **Pinyin and romaji marks were a Latin gap, not a CJK one**: macron/caron accents and the four
+    stacked ü tones were composed in `pixel_font.rs`. At this size caron and breve are the same
+    three pixels. Capital Ǖ Ǘ Ǚ Ǜ are not made (no room above a capital for two marks).
+  - Not done: a language setting (translations will own it), vertical writing, input method, and
+    judging legibility of the smallest ideographs at 1x - checked only in software-rendered screenshots
+    (`CRAFT_SHOT=cjk`).

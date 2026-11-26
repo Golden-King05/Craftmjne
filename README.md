@@ -1485,6 +1485,21 @@ default font that ships with Bevy is turned off, so there is no other font unles
 - **Other scripts.** Cyrillic (Russian, Ukrainian, Belarusian, Serbian letters), Hebrew, Korean,
   Arabic and Hindi (Devanagari) are in the same font, so they work everywhere text does, including
   chat. Details and limits are under *Other scripts* below.
+- **Chinese and Japanese** (`src/cjk.rs`): hiragana, katakana (and halfwidth forms), Bopomofo, CJK
+  punctuation and symbols, fullwidth forms, **every ideograph of the Basic Multilingual Plane** (the 20,992
+  unified ideographs, Extension A's 6,592, and the compatibility ideographs), and the symbols that
+  Japanese and Chinese text uses (circled numbers, arrows, maths, box drawing, shapes, Greek). Pinyin
+  tone marks and Hepburn macrons (ā ǎ ǜ ...) are part of the Latin font. The glyphs are GNU Unifont's
+  16x16 bitmaps under the SIL OFL (`third_party/unifont/`), in three styles because one code point is
+  drawn differently by language: **Simplified Chinese** (the base), **Traditional Chinese** and
+  **Japanese**. `CjkStyle` (a resource; `Style::from_language("ja")` maps a language tag) picks the
+  style and the font is rebuilt in the background when it changes; translations will set it from the
+  player's language. A glyph is 16 pixels tall and lands on whole screen pixels like the Latin text, so
+  CJK looks 4/3 the Latin height and lines containing it use a taller line height. Coverage limits: of
+  the ~70,000 rare ideographs in Extensions B to I (names, historical texts) Unifont draws about 8,000,
+  so the rest show as an empty box; Hong Kong or other regional forms beyond the three styles are not
+  made. `CRAFT_SHOT=cjk CRAFT_CJK=ja|zh-Hans|zh-Hant` renders a sample screen; `tools/build_cjk_data.py`
+  rebuilds the data from a Unifont release.
 - **Emoji.** 12x12 colour emoji (about 700 drawn, the rest generated, see below) drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second
   built-in font used as a fallback, so they work anywhere text does, including chat and signs. In chat,
