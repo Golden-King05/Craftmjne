@@ -1750,3 +1750,101 @@ fn world_packs_apply_only_in_their_world_and_changes_apply_live_in_game() {
     // And every loaded chunk was marked for remeshing so the new art actually appears.
     assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 4, 2000));
 }
+
+fn model_height_of_dirt(app: &App) -> Option<f32> {
+    let id = app.world().resource::<BlockRegistry>().id("dirt") as usize;
+    app.world().resource::<craftmjne::blocks::BlockTables>().0.pack_models[id].as_ref().map(|m| m.boxes[0].max[1])
+}
+
+/// Mods and resource packs share one load order: whichever sits higher wins, a manual order
+/// is kept (live in game, and on entry), and Auto puts the global pack back on top.
+#[test]
+fn mods_and_packs_share_a_load_order_that_decides_who_wins() {
+    let temp = temp_saves();
+    let installed_mods = temp.0.join("installed-mods");
+    let mod_dir = installed_mods.join("tallmod");
+    std::fs::create_dir_all(mod_dir.join("resourcepack").join("models").join("blocks").join("craftmjne")).unwrap();
+    std::fs::write(mod_dir.join("mod.json"), r#"{"id": "tall"}"#).unwrap();
+    // The mod makes dirt 12/16 tall; the pack makes it 4/16.
+    std::fs::write(
+        mod_dir.join("resourcepack").join("models").join("blocks").join("craftmjne").join("dirt.json"),
+        r#"{"boxes": [{"from": [0, 0, 0], "to": [16, 12, 16], "textures": {"all": "craftmjne/dirt"}}]}"#,
+    )
+    .unwrap();
+    let mut app = app_without_a_world(&temp, &installed_mods);
+    app.add_plugins(craftmjne::packs::PackPlugin);
+    let low = install_slab_pack(&temp.0.join("packs"), "low");
+    // `install_slab_pack` makes an 8/16 model; rewrite it to 4/16.
+    std::fs::write(
+        low.path.join("models").join("blocks").join("dirt.json"),
+        r#"{"boxes": [{"from": [0, 0, 0], "to": [16, 4, 16], "textures": {"all": "dirt"}}]}"#,
+    )
+    .unwrap();
+    app.world_mut().insert_resource(craftmjne::packs::InstalledPacks(vec![low]));
+    app.world_mut().resource_mut::<craftmjne::packs::PackSelection>().enabled = vec!["low".into()];
+
+    use craftmjne::mods::{create_world_with_mods, ModSetup};
+    let store = SaveStore::at(temp.0.clone());
+    let (slug, meta) = create_world_with_mods(&store, "Ordered", 7, GameMode::Survival, &ModSetup::Instance(vec!["tallmod".into()]), &installed_mods).unwrap();
+    enter(&mut app, slug.clone(), meta);
+    assert!(in_game(&app));
+    // Automatic: the global pack is on top of the mod, so the pack's 4/16 wins.
+    assert_eq!(model_height_of_dirt(&app), Some(0.25), "global packs sit on top in automatic order");
+
+    // The player moves the mod above the pack: the mod's 12/16 wins, live.
+    app.world_mut().resource_mut::<ActiveWorld>().meta.load_order = Some(vec!["global:low".into(), "mod:tallmod".into()]);
+    app.update();
+    app.update();
+    assert_eq!(model_height_of_dirt(&app), Some(0.75), "a manual order is applied while playing");
+
+    // Auto puts it back.
+    app.world_mut().resource_mut::<ActiveWorld>().meta.load_order = None;
+    app.update();
+    app.update();
+    assert_eq!(model_height_of_dirt(&app), Some(0.25), "Auto restores the global pack to the top");
+
+    // A saved manual order is used when the world is entered, too.
+    let mut meta = app.world().resource::<ActiveWorld>().meta.clone();
+    meta.load_order = Some(vec!["global:low".into(), "mod:tallmod".into()]);
+    leave(&mut app);
+    enter(&mut app, slug, meta);
+    assert_eq!(model_height_of_dirt(&app), Some(0.75), "entering with a manual order applies it");
+}
+
+/// Ctrl+R reloads resource packs from disk while playing, so a pack author who edits files in
+/// place sees the change without leaving the world.
+#[test]
+fn the_reload_key_rereads_pack_files_from_disk_in_game() {
+    let temp = temp_saves();
+    let installed_mods = temp.0.join("installed-mods");
+    std::fs::create_dir_all(&installed_mods).unwrap();
+    let mut app = app_without_a_world(&temp, &installed_mods);
+    app.add_plugins(craftmjne::packs::PackPlugin);
+    app.init_resource::<ButtonInput<KeyCode>>();
+    app.insert_resource(craftmjne::packs::PackFolder(temp.0.join("packs")));
+    let pack = install_slab_pack(&temp.0.join("packs"), "work"); // dirt 8/16 tall
+    let model_file = pack.path.join("models").join("blocks").join("dirt.json");
+    app.world_mut().insert_resource(craftmjne::packs::InstalledPacks(vec![pack]));
+    app.world_mut().resource_mut::<craftmjne::packs::PackSelection>().enabled = vec!["work".into()];
+
+    let store = SaveStore::at(temp.0.clone());
+    let (slug, meta) = store.create_world("Author", 7, GameMode::Survival).unwrap();
+    enter(&mut app, slug, meta);
+    assert_eq!(model_height_of_dirt(&app), Some(0.5));
+
+    // The author edits the file: nothing changes by itself...
+    std::fs::write(&model_file, r#"{"boxes": [{"from": [0, 0, 0], "to": [16, 4, 16], "textures": {"all": "dirt"}}]}"#).unwrap();
+    app.update();
+    app.update();
+    assert_eq!(model_height_of_dirt(&app), Some(0.5), "files aren't watched; the key reloads them");
+
+    // ...until Ctrl+R.
+    {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::KeyR);
+    }
+    app.update();
+    app.update();
+    assert_eq!(model_height_of_dirt(&app), Some(0.25), "Ctrl+R picked up the edited file");
+}

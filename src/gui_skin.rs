@@ -570,14 +570,16 @@ fn rebuild_skin(
     assets: Option<ResMut<Assets<Image>>>,
     installed: Option<Res<crate::mods::InstalledMods>>,
     effective: Option<Res<crate::packs::EffectivePacks>>,
-    mut last: Local<Option<Vec<PathBuf>>>,
+    reload: Option<Res<crate::packs::PackReload>>,
+    mut last: Local<Option<(Vec<PathBuf>, u64)>>,
 ) {
     let (Some(mut assets), Some(effective)) = (assets, effective) else { return };
-    if last.as_ref() == Some(&effective.0) {
+    let now = (effective.0.clone(), reload.map_or(0, |r| r.0));
+    if last.as_ref() == Some(&now) {
         return;
     }
     let first = last.is_none();
-    *last = Some(effective.0.clone());
+    *last = Some(now);
     if first {
         return; // `build_skin` just made it from the same packs
     }

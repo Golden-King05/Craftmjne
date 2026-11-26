@@ -73,6 +73,20 @@ impl ContentPaths {
         self
     }
 
+    /// Restacks the resource-pack layers in `layers`' order (a mod's layer is its `resourcepack/`),
+    /// above the game. Use after [`ContentPaths::with_mods`] (which fixes the *data* order): this
+    /// is what lets packs and mods interleave in one load order.
+    pub fn with_layers(mut self, layers: &[crate::load_order::LayerSource]) -> Self {
+        self.stack = PackStack::core();
+        for layer in layers {
+            self.stack = match layer {
+                crate::load_order::LayerSource::Mod(m) => self.stack.with_mod(&m.ns, &m.path),
+                crate::load_order::LayerSource::Pack(p) => self.stack.with_user_packs(std::slice::from_ref(p)),
+            };
+        }
+        self
+    }
+
     /// The core game with `mods` laid over it, in load order, each under its namespace.
     pub fn with_mods(mut self, mods: &[ModSource]) -> Self {
         for m in mods {

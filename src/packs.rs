@@ -261,39 +261,83 @@ pub fn legacy_layout_note(mod_root: &Path) -> Option<String> {
     })
 }
 
-/// The pack paths in force, lowest priority first: the player's **global** packs (every world and
-/// the menus), then the world's own packs on top (`world`, top of its list first). A pack on both
-/// lists counts once, at the world's position.
-pub fn effective_pack_paths(global: Option<&PackSelection>, installed: Option<&InstalledPacks>, world: &[String]) -> Vec<PathBuf> {
-    let (Some(global), Some(installed)) = (global, installed) else { return Vec::new() };
-    let mut lower = global.clone();
-    lower.enabled.retain(|f| !world.iter().any(|w| w == f));
-    let mut paths = lower.active_paths(&installed.0);
-    paths.extend(PackSelection { enabled: world.to_vec() }.active_paths(&installed.0));
-    paths
+/// The folder packs are scanned from (the game's `resourcepacks/` unless something else says).
+#[derive(Resource, Clone, Debug)]
+pub struct PackFolder(pub PathBuf);
+
+impl Default for PackFolder {
+    fn default() -> Self {
+        Self(user_packs_dir())
+    }
 }
 
-/// What the game is showing right now: global packs always, plus the loaded world's own packs
-/// while one is open. Menu art (skin, glyphs), sky and - in a world - block art, models and sounds
-/// all follow it, live: change a selection and everything rebuilds (see `refresh_effective`).
+/// Bumped every time the player asks for a reload (Ctrl+R by default). Everything built from
+/// packs remembers the last value it saw and rebuilds when it moves, even if the list of packs is
+/// the same - which is what lets a pack author edit files in place and see them live.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackReload(pub u64);
+
+/// Reload key: rescans the installed packs (a folder may have appeared) and bumps [`PackReload`].
+fn reload_on_key(
+    act: crate::keybinds::Actions,
+    chat: Option<Res<crate::chat::ChatState>>,
+    mut installed: ResMut<InstalledPacks>,
+    folder: Res<PackFolder>,
+    mut reload: ResMut<PackReload>,
+    log: Option<ResMut<crate::chat::ChatLog>>,
+) {
+    if !act.just_pressed(crate::keybinds::Action::ReloadPacks) || chat.is_some_and(|c| c.open) {
+        return;
+    }
+    installed.0 = scan_packs(&folder.0);
+    reload.0 += 1;
+    if let Some(mut log) = log {
+        log.push("Resource packs reloaded.".to_string());
+    }
+}
+
+/// The resource-pack paths in force (lowest first): in a world every pack of its load order
+/// (its own and the global ones, interleaved with its mods as the order says); in the menus the
+/// global packs. Menu art (skin, glyphs), sky and the rest follow it, live.
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct EffectivePacks(pub Vec<PathBuf>);
 
+/// The full stack above the game, lowest first: what content is rebuilt from (see `load_order`).
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub struct EffectiveLayers(pub Vec<crate::load_order::LayerSource>);
+
+/// Works out [`EffectiveLayers`]/[`EffectivePacks`] when anything they depend on changed.
+#[allow(clippy::too_many_arguments)]
 fn refresh_effective(
     selection: Res<PackSelection>,
     installed: Res<InstalledPacks>,
     state: Option<Res<State<crate::state::AppState>>>,
     world: Option<Res<crate::state::ActiveWorld>>,
-    mut effective: ResMut<EffectivePacks>,
+    loaded: Option<Res<crate::mods::LoadedContent>>,
+    reload: Res<PackReload>,
+    mut packs: ResMut<EffectivePacks>,
+    mut layers: ResMut<EffectiveLayers>,
 ) {
+    let changed = selection.is_changed()
+        || installed.is_changed()
+        || reload.is_changed()
+        || state.as_ref().is_some_and(|s| s.is_changed())
+        || world.as_ref().is_some_and(|w| w.is_changed())
+        || loaded.as_ref().is_some_and(|l| l.is_changed());
+    if !changed {
+        return;
+    }
     let in_world = state.is_some_and(|s| *s.get() == crate::state::AppState::InGame);
-    let world_list: &[String] = match (&world, in_world) {
-        (Some(w), true) => &w.meta.world_packs,
-        _ => &[],
+    let now = match (&world, &loaded, in_world) {
+        (Some(w), Some(l), true) => {
+            let order = crate::load_order::world_order(w.meta.load_order.as_deref(), &l.mods, &w.meta.world_packs, &selection, &installed);
+            crate::load_order::layer_sources(&order, &l.mods, &installed)
+        }
+        _ => crate::load_order::menu_layers(&selection, &installed),
     };
-    let now = effective_pack_paths(Some(&selection), Some(&installed), world_list);
-    if effective.0 != now {
-        effective.0 = now;
+    if layers.0 != now {
+        packs.0 = now.iter().filter_map(|l| l.pack_path().cloned()).collect();
+        layers.0 = now;
     }
 }
 
@@ -303,10 +347,14 @@ impl Plugin for PackPlugin {
     fn build(&self, app: &mut App) {
         let selection = app.world().get_resource::<SaveStore>().map(|s| s.load_pack_selection()).unwrap_or_default();
         let installed = scan_packs(&user_packs_dir());
-        let initial = effective_pack_paths(Some(&selection), Some(&InstalledPacks(installed.clone())), &[]);
+        let initial = crate::load_order::menu_layers(&selection, &InstalledPacks(installed.clone()));
         app.insert_resource(selection)
             .insert_resource(InstalledPacks(installed))
-            .insert_resource(EffectivePacks(initial))
+            .insert_resource(EffectivePacks(initial.iter().filter_map(|l| l.pack_path().cloned()).collect()))
+            .insert_resource(EffectiveLayers(initial))
+            .init_resource::<PackReload>()
+            .init_resource::<PackFolder>()
+            .add_systems(Update, reload_on_key)
             .add_systems(PreUpdate, refresh_effective)
             // Entering a world adds its own packs; settle that before the first frame in it, or
             // `world::refresh_content_live` would see a stale list and undo them.
@@ -363,18 +411,6 @@ mod tests {
         assert_eq!(active, ["a", "b"], "lowest priority first, so the top of the list is stacked last and wins");
         s.disable("a");
         assert_eq!(s.enabled, ["b"]);
-    }
-
-    #[test]
-    fn world_packs_stack_above_global_ones_and_a_pack_on_both_counts_once() {
-        let installed = InstalledPacks(vec![info("a"), info("b"), info("c")]);
-        let global = PackSelection { enabled: vec!["a".into(), "b".into()] }; // a on top
-        let names = |v: Vec<PathBuf>| v.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>();
-        assert_eq!(names(effective_pack_paths(Some(&global), Some(&installed), &[])), ["b", "a"]);
-        assert_eq!(names(effective_pack_paths(Some(&global), Some(&installed), &["c".into()])), ["b", "a", "c"], "the world's pack wins");
-        // `b` is global and also the world's: it moves up to the world's layer, once.
-        assert_eq!(names(effective_pack_paths(Some(&global), Some(&installed), &["b".into()])), ["a", "b"]);
-        assert!(effective_pack_paths(None, None, &["a".into()]).is_empty());
     }
 
     #[test]

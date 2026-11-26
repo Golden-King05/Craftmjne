@@ -3442,3 +3442,31 @@ etc.) instead of inventing a new approach:
   disabling `refresh_content_live` fails `world_packs_apply_only_in_their_world_and_changes_apply_live_in_game`.
   Not verified from here: how the in-game remesh burst feels with many chunks loaded, and the layout of
   the pause-menu panel (no display).
+- **Mods and resource packs are one stack, and "which layer" is separate from "which data order".**
+  `load_order.rs` (pure, tested): `Entry::{Mod, Pack, Global}` keyed `mod:`/`pack:`/`global:<folder>`;
+  `auto_order` = mods topologically sorted (`mod.json` `load_after` ids + `patches`, found by reading a mod's
+  block/item files for `other:thing` ids; folder order breaks ties; a cycle or unknown id can't hang or drop a
+  mod), then the world's packs, then global packs on top; `resolve` fits a saved manual order
+  (`WorldMeta::load_order`, `Option`, `SAVE_FORMAT` 11) to what exists (new mod just under the globals, new
+  global on top, vanished entries dropped); `None` = Auto, which is how "global packs back on top" works. The
+  game is the bottom `PackStack::core()` layer and is not an `Entry`, so nothing can move below it by
+  construction. `ContentPaths::with_layers(&[LayerSource])` restacks the *art* layers in that order (a mod's
+  layer is its `resourcepack/`); `with_mods` still fixes the *data* order. **They deliberately differ in
+  `refresh_content_live`**: data keeps `loaded.mods`' order (block ids must not move under loaded chunks)
+  while art/models/sounds take the new order at once; `apply_world_mods` applies both on entry.
+  `LoadedContent.packs` became `layers`. `EffectivePacks` (pack paths, for gui/glyph/sky) and
+  `EffectiveLayers` (full stack, for content) are recomputed in `refresh_effective` only when an input
+  `is_changed` (it reads each mod's `mod.json` via `read_mod`, so not every frame).
+  **Reload key (Ctrl+R, `Action::ReloadPacks`)**: `PackReload(u64)` counter; `reload_on_key` rescans
+  `PackFolder` (a resource, so tests can point it at a temp dir - the first test failed because the rescan
+  read the real folder and emptied the injected list) and bumps it. Every consumer remembers the last
+  counter beside the last list (`Local<Option<(Vec<PathBuf>, u64)>>`; `LoadedContent::reload` for content), so
+  a reload rebuilds even when the list is unchanged, and `apply_world_mods` also respects it so edits made
+  in a menu show on the next world entry. Break-tested both: `Some(saved) => return auto` fails
+  `mods_and_packs_share_a_load_order_that_decides_who_wins`; `forced = false` fails
+  `the_reload_key_rereads_pack_files_from_disk_in_game`. A global pack now ranks *above* a world pack
+  by default (previously the reverse) because the player asked for global packs on top; the Load order
+  tab lets them swap. UI: the pause menu's pack panel has a third `PackScope::Order`
+  tab (`pack_panel::spawn_order`); settings' Packs stays global-only (no world there).
+  Disk reminder: this session hit "No space left" three times; `rm -rf target/debug/incremental` plus
+  deleting stale `craftmjne-<hash>`/`headless-<hash>` test binaries and old `libcraftmjne-*.rlib` freed ~10 GB.

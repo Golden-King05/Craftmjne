@@ -953,13 +953,16 @@ pub fn compile_content(
     selection: Option<Res<crate::packs::PackSelection>>,
     installed_packs: Option<Res<crate::packs::InstalledPacks>>,
 ) {
-    let packs = crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref());
-    let content = build_content(&ContentPaths::vanilla().with_packs(&packs));
+    let layers = match (selection.as_deref(), installed_packs.as_deref()) {
+        (Some(s), Some(i)) => crate::load_order::menu_layers(s, i),
+        _ => Vec::new(),
+    };
+    let content = build_content(&ContentPaths::vanilla().with_layers(&layers));
     let before = texture_report.names();
     install_content(&mut commands, content, &mut texture_report);
     loaded.block_textures = texture_report.names().into_iter().filter(|n| !before.contains(n)).collect();
     loaded.mods = Vec::new();
-    loaded.packs = packs;
+    loaded.layers = layers;
     loaded.generation += 1;
 }
 
@@ -1010,19 +1013,24 @@ pub struct LiveContentSet;
 #[allow(clippy::too_many_arguments)]
 pub fn refresh_content_live(
     mut commands: Commands,
-    effective: Res<crate::packs::EffectivePacks>,
+    effective: Res<crate::packs::EffectiveLayers>,
     ok: Res<ContentOk>,
     mut loaded: ResMut<LoadedContent>,
     mut report: ResMut<TextureReport>,
     mut map: ResMut<ChunkMap>,
     mut hotbar: ResMut<Hotbar>,
     chat: Option<ResMut<crate::chat::ChatLog>>,
+    reload: Option<Res<crate::packs::PackReload>>,
 ) {
-    if !ok.0 || effective.0 == loaded.packs {
+    let reload = reload.map_or(0, |r| r.0);
+    let forced = reload != loaded.reload;
+    if !ok.0 || (effective.0 == loaded.layers && !forced) {
         return;
     }
-    let packs = effective.0.clone();
-    match try_build_content(&ContentPaths::vanilla().with_mods(&loaded.mods).with_packs(&packs)) {
+    // The mods' *data* keeps the order it was loaded with (block ids must not move under loaded
+    // chunks); the art, models and sounds follow the new order straight away.
+    let layers = effective.0.clone();
+    match try_build_content(&ContentPaths::vanilla().with_mods(&loaded.mods).with_layers(&layers)) {
         Ok(content) => {
             report.remove(&loaded.block_textures);
             let before = report.names();
@@ -1040,7 +1048,8 @@ pub fn refresh_content_live(
             }
         }
     }
-    loaded.packs = packs;
+    loaded.layers = layers;
+    loaded.reload = reload;
 }
 
 /// `OnEnter(AppState::InGame)`, before `enter_world`: gives the world the content
@@ -1070,6 +1079,7 @@ fn apply_world_mods(
     chat: Option<ResMut<crate::chat::ChatLog>>,
     selection: Option<Res<crate::packs::PackSelection>>,
     installed_packs: Option<Res<crate::packs::InstalledPacks>>,
+    reload: Option<Res<crate::packs::PackReload>>,
 ) {
     let refuse = |why: String, ok: &mut ContentOk, notice: &mut MenuNotice, next: &mut NextState<AppState>| {
         ok.0 = false;
@@ -1092,25 +1102,43 @@ fn apply_world_mods(
             chat.push(format!("Mod warning: {warning}"));
         }
     }
-    let mods = resolved.sources;
+    // One load order for the world's mods and packs: its saved one, or automatic. The data
+    // (blocks, items...) of the mods is laid over the game in that order, and so are the layers.
+    let (mods, layers) = match (selection.as_deref(), installed_packs.as_deref()) {
+        (Some(s), Some(i)) => {
+            let order = crate::load_order::world_order(active.meta.load_order.as_deref(), &resolved.sources, &active.meta.world_packs, s, i);
+            let layers = crate::load_order::layer_sources(&order, &resolved.sources, i);
+            let mut sorted = resolved.sources.clone();
+            sorted.sort_by_key(|m| {
+                let folder = m.path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                order.iter().position(|e| matches!(e, crate::load_order::Entry::Mod(f) if f == folder)).unwrap_or(usize::MAX)
+            });
+            (sorted, layers)
+        }
+        _ => {
+            let layers = resolved.sources.iter().cloned().map(crate::load_order::LayerSource::Mod).collect();
+            (resolved.sources, layers)
+        }
+    };
     // No mods now and none before: the content is already right. Anything else
     // is rebuilt - including the same mods again, so editing a mod's files and
     // re-entering the world shows the change.
     // The player's resource packs are part of the content too: turning one on or off in Settings
     // changes the atlas, models and sounds, so a change there rebuilds on the next world entry.
-    let packs = crate::packs::effective_pack_paths(selection.as_deref(), installed_packs.as_deref(), &active.meta.world_packs);
-    if mods.is_empty() && loaded.mods.is_empty() && packs == loaded.packs {
+    let reload = reload.map_or(0, |r| r.0);
+    if mods.is_empty() && loaded.mods.is_empty() && layers == loaded.layers && reload == loaded.reload {
         ok.0 = true;
         return;
     }
-    match try_build_content(&ContentPaths::vanilla().with_mods(&mods).with_packs(&packs)) {
+    match try_build_content(&ContentPaths::vanilla().with_mods(&mods).with_layers(&layers)) {
         Ok(content) => {
             report.remove(&loaded.block_textures);
             let before = report.names();
             install_content(&mut commands, content, &mut report);
             loaded.block_textures = report.names().into_iter().filter(|n| !before.contains(n)).collect();
             loaded.mods = mods;
-            loaded.packs = packs;
+            loaded.layers = layers;
+            loaded.reload = reload;
             loaded.generation += 1;
             // Icons and textures changed; the hotbar draws from them.
             hotbar.set_changed();
@@ -2063,7 +2091,7 @@ impl Plugin for WorldPlugin {
                 refresh_content_live
                     .in_set(LiveContentSet)
                     .before(ChunkPipelineSet::Stream)
-                    .run_if(in_state(AppState::InGame).and(resource_exists::<crate::packs::EffectivePacks>).and(resource_exists::<ChunkMaterials>)),
+                    .run_if(in_state(AppState::InGame).and(resource_exists::<crate::packs::EffectiveLayers>).and(resource_exists::<ChunkMaterials>)),
             )
             .add_systems(
                 Update,

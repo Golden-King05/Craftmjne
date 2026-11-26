@@ -714,11 +714,19 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
 #[derive(Resource, Default)]
 pub struct PausePacksOpen(pub bool);
 
-fn spawn_pause_screen(commands: &mut Commands, packs_open: bool, panel: &crate::pack_panel::PackPanel, selection: &crate::packs::PackSelection, installed: &crate::packs::InstalledPacks, world_packs: &[String]) {
+fn spawn_pause_screen(
+    commands: &mut Commands,
+    packs_open: bool,
+    panel: &crate::pack_panel::PackPanel,
+    selection: &crate::packs::PackSelection,
+    installed: &crate::packs::InstalledPacks,
+    world_packs: &[String],
+    order: Option<(&[crate::load_order::Entry], bool)>,
+) {
     commands.spawn((PauseRoot, theme::overlay_root())).with_children(|root| {
         root.spawn(theme::panel(if packs_open { 620.0 } else { 420.0 })).with_children(|p| {
             if packs_open {
-                crate::pack_panel::spawn_pack_panel(p, panel.scope, true, selection, world_packs, installed);
+                crate::pack_panel::spawn_pack_panel(p, panel.scope, true, selection, world_packs, installed, order);
                 nav_button(p, "Back", MenuButton::PausePacksBack, ButtonStyle::Primary);
             } else {
                 theme::heading(p, "Paused");
@@ -744,6 +752,7 @@ fn sync_pause_screen(
     selection: Res<crate::packs::PackSelection>,
     installed: Res<crate::packs::InstalledPacks>,
     world: Option<Res<ActiveWorld>>,
+    loaded: Option<Res<crate::mods::LoadedContent>>,
     roots: Query<Entity, With<PauseRoot>>,
 ) {
     if !paused.open && packs_open.0 {
@@ -757,8 +766,12 @@ fn sync_pause_screen(
         commands.entity(e).despawn();
     }
     if paused.open {
-        let world_packs = world.map(|w| w.meta.world_packs.clone()).unwrap_or_default();
-        spawn_pause_screen(&mut commands, packs_open.0, &panel, &selection, &installed, &world_packs);
+        let world_packs = world.as_ref().map(|w| w.meta.world_packs.clone()).unwrap_or_default();
+        let order = match (&world, &loaded) {
+            (Some(w), Some(l)) if packs_open.0 => Some((crate::pack_panel::current_order(w, l, &selection, &installed), w.meta.load_order.is_some())),
+            _ => None,
+        };
+        spawn_pause_screen(&mut commands, packs_open.0, &panel, &selection, &installed, &world_packs, order.as_ref().map(|(o, m)| (o.as_slice(), *m)));
     }
 }
 
@@ -951,6 +964,7 @@ mod tests {
             branch_of: branch.map(str::to_string),
             mod_ids: Default::default(),
             world_packs: Vec::new(),
+            load_order: None,
             created_at: 0,
             last_played_at: 0,
         }

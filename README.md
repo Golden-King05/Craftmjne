@@ -1406,17 +1406,33 @@ anything *looks and sounds*, never how it *plays*. Two kinds:
 
 **Two ways to load a pack.** *Global* packs (Settings > Packs, or **Resource Packs** in the pause
 menu) apply to every world and to the menus. *World* packs (the **This world** tab in the pause menu)
-apply only inside that world and are saved with it (`world_packs` in its `meta.json`). A world's packs
-sit above your global ones; a pack on both lists counts once, at the world's position.
+apply only inside that world and are saved with it (`world_packs` in its `meta.json`).
+
+**One load order for mods and packs.** Resource packs can override mods and mods can override resource
+packs, so a world has a single list - the **Load order** tab in the pause menu - holding its mods,
+its own packs and the global packs. **The game is always at the bottom and can't move.** Higher wins.
+- **Auto** (the default) puts each mod after the mods it builds on - a mod names them with
+  `"load_after": ["base_mod_id"]` in `mod.json`, and a mod whose block/item files patch
+  `base_mod_id:thing` is placed after `base_mod_id` without saying so - then the world's packs, then
+  the **global packs on top**, in the order you gave them in the global list. That is how an add-on
+  for a popular mod lands after it.
+- **Manual**: move any entry Up or Down; the order is saved with the world. New mods you add go in
+  just under the global packs, new global packs go on top, entries that are gone drop out, and
+  **Auto** forgets your order (global packs back on top).
+Packs reorder at once while playing. A mod's *data* (blocks, items, recipes) is laid over the game in
+the order the world was opened with, because block ids must not move under loaded chunks - a changed
+mod order applies to the data next time the world is opened (its art follows immediately).
 
 **Changes apply at once, in menus and in game.** Pick or reorder a pack and the menu textures,
 controller glyphs and sun/moon retexture on the spot; in a world the block art, models and sounds are
 rebuilt and every loaded chunk is remeshed (a short burst of remeshing, no re-entering the world).
 Per-world packs are swapped out again when you go to another world.
 
-**Order.** Lowest to highest: the game, each of the world's mods (load order), your global packs, then
-the world's own packs. The highest layer holding a file wins, so a player's pack can retexture even a
-mod's art.
+**Ctrl+R reloads resource packs** (rebind it under Controls > Interface > "Reload resource packs").
+It rescans the `resourcepacks/` folder and rebuilds everything from the files on disk, so a pack
+author working inside the game folder sees an edit in game without leaving the world. Files are not
+watched; the key is the trigger.
+
 **Names:** in the game's folder and in a player's pack a plain name is the core game's (`dirt`) and
 `<mod id>/<name>` is a mod's; inside a mod's pack a plain name is the mod's own and
 `craftmjne/dirt` re-skins vanilla.
@@ -1489,6 +1505,7 @@ mods/any_folder_name/
   recipes/*.json
   tiers/*.json        tool tiers (material, mining speed, damage)
   rarities/*.json     what a tool's quality is called: id, name, min percent, colour
+  (mod.json also takes "load_after": ["other_mod_id"] for the automatic load order)
   keybinds/*.json     controls added to Settings > Controls > Keybinds (see below)
   resourcepack/       the mod's textures, models and sounds (see Resource packs above)
 ```

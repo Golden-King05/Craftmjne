@@ -91,6 +91,9 @@ struct Manifest {
     version: Option<String>,
     description: Option<String>,
     target_ver: Option<TargetVer>,
+    /// Ids of mods this one should load after (it builds on them).
+    #[serde(default)]
+    load_after: Vec<String>,
 }
 
 /// Whether one `target_ver` entry covers `game`. An entry is dotted numbers; a
@@ -120,6 +123,11 @@ pub struct ModInfo {
     /// The game versions it says it works with (`target_ver`); empty if it
     /// doesn't say.
     pub target_ver: Vec<String>,
+    /// Mod ids named in `"load_after"` in `mod.json`: this mod must come after them.
+    pub load_after: Vec<String>,
+    /// Other mods' ids this one patches, found by reading its block/item files for names like
+    /// `other_mod:thing` - the automatic load order puts it after them.
+    pub patches: Vec<String>,
     pub path: PathBuf,
 }
 
@@ -212,10 +220,33 @@ pub fn read_mod(path: &Path) -> Result<ModInfo, String> {
             Some(TargetVer::Many(v)) => v,
             None => Vec::new(),
         },
+        load_after: manifest.load_after,
+        patches: patched_mods(path, &id),
         id,
         folder,
         path: path.to_path_buf(),
     })
+}
+
+/// The ids of other mods whose names a mod's block and item files give (`"id": "other:thing"`):
+/// a file whose id carries another namespace is a patch of that mod's content.
+fn patched_mods(path: &Path, own_id: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for kind in ["blocks", "items"] {
+        let Ok(rd) = std::fs::read_dir(path.join(kind)) else { continue };
+        for file in rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")) {
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let Some(id) = value.get("id").and_then(|v| v.as_str()) else { continue };
+            if let Some((ns, _)) = id.split_once(':') {
+                if ns != own_id && ns != crate::overlay::CORE_NS && !found.iter().any(|f| f == ns) {
+                    found.push(ns.to_string());
+                }
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Every mod in `dir` that works, sorted by folder name, and the folders that
@@ -519,12 +550,14 @@ impl Default for InstalledMods {
 #[derive(Resource, Default, Debug)]
 pub struct LoadedContent {
     pub mods: Vec<ModSource>,
-    /// The player's resource packs (paths, lowest priority first) the content was built with.
-    pub packs: Vec<std::path::PathBuf>,
+    /// The layers (mods and resource packs, lowest first, above the game) the content was built with.
+    pub layers: Vec<crate::load_order::LayerSource>,
     pub block_textures: Vec<String>,
     /// Bumped every time content is installed, so things built from it (the GPU
     /// atlas) can tell they're out of date.
     pub generation: u64,
+    /// The [`crate::packs::PackReload`] count the content was built at.
+    pub reload: u64,
 }
 
 /// Whether the active world's content is in place. `world::enter_world` waits on
@@ -655,6 +688,8 @@ mod tests {
             version: String::new(),
             description: String::new(),
             target_ver: Vec::new(),
+            load_after: Vec::new(),
+            patches: Vec::new(),
             path: PathBuf::from(folder),
         }
     }

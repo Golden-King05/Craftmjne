@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 10;
+pub const SAVE_FORMAT: u32 = 11;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +108,8 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
         // a format-4 build would read a saved tool back as quality 0 and
         // write that over the real value.
+        // Step 10 -> 11 (a world's saved load order, `load_order`) needs no rewrite: an old world
+        // is automatic. Bumped because a format-10 build would write the meta back without it.
         // Step 9 -> 10 (a world's own resource packs, `world_packs`) needs no rewrite: an old
         // world has none. Bumped because a format-9 build would load the world and write its
         // meta back without the list.
@@ -216,6 +218,10 @@ pub struct WorldMeta {
     /// They stack above the player's global packs (`packs::PackSelection`), in this world only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub world_packs: Vec<String>,
+    /// The world's load order for mods and resource packs, lowest first, as `load_order::Entry`
+    /// keys. `None` is automatic (the game works it out, global packs on top).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_order: Option<Vec<String>>,
     pub created_at: u64,
     pub last_played_at: u64,
 }
@@ -556,6 +562,7 @@ impl SaveStore {
             branch_of: None,
             mod_ids: Default::default(),
             world_packs: Vec::new(),
+            load_order: None,
             created_at: now,
             last_played_at: now,
         };

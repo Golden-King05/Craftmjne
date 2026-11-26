@@ -309,7 +309,7 @@ fn rebuild_settings(
                 }
                 dim(body, "Resource packs and mods can replace any sound: see sounds/ in a pack.", 13.0);
             }
-            Section::Packs => crate::pack_panel::spawn_pack_panel(body, crate::pack_panel::PackScope::Global, false, &pack_selection, &[], &installed_packs),
+            Section::Packs => crate::pack_panel::spawn_pack_panel(body, crate::pack_panel::PackScope::Global, false, &pack_selection, &[], &installed_packs, None),
             Section::Mods => {
                 body.spawn((Text::new("Mods"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 let storage = store.load_graphics_settings().mod_storage;
@@ -526,6 +526,7 @@ fn handle_settings_buttons(
     mut options: ResMut<ControlOptions>,
     mut sound: ResMut<crate::sound::SoundOptions>,
     mut installed_packs: ResMut<crate::packs::InstalledPacks>,
+    pack_folder: Res<crate::packs::PackFolder>,
     store: Res<SaveStore>,
 ) {
     for (interaction, button) in &interactions {
@@ -535,7 +536,7 @@ fn handle_settings_buttons(
         match button.clone() {
             SettingsButton::Section(section) => {
                 if section == Section::Packs {
-                    installed_packs.0 = crate::packs::scan_packs(&crate::packs::user_packs_dir());
+                    installed_packs.0 = crate::packs::scan_packs(&pack_folder.0);
                 }
                 view.section = section;
                 view.scroll = 0.0;
@@ -673,7 +674,7 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<crate::sound::SoundOptions>();
+        app.init_resource::<crate::sound::SoundOptions>().init_resource::<crate::packs::PackFolder>();
         if !app.is_plugin_added::<crate::pack_panel::PackPanelPlugin>() {
             app.add_plugins(crate::pack_panel::PackPanelPlugin);
         }

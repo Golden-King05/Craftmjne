@@ -901,14 +901,16 @@ fn refresh_sky(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<CelestialMaterial>>,
     mut texture_report: ResMut<TextureReport>,
-    mut last: Local<Option<Vec<std::path::PathBuf>>>,
+    reload: Option<Res<crate::packs::PackReload>>,
+    mut last: Local<Option<(Vec<std::path::PathBuf>, u64)>>,
 ) {
     let (Some(effective), Some(sky)) = (effective, sky) else { return };
-    if last.as_ref() == Some(&effective.0) {
+    let now = (effective.0.clone(), reload.map_or(0, |r| r.0));
+    if last.as_ref() == Some(&now) {
         return;
     }
     let first = last.is_none();
-    *last = Some(effective.0.clone());
+    *last = Some(now);
     if first {
         return; // `spawn_sky` used the same packs
     }

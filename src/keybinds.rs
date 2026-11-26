@@ -445,6 +445,7 @@ actions! {
     Command => ("command", "Open chat with /", Category::Interface, key(KeyCode::Slash)),
     DebugOverlay => ("debug_overlay", "Debug overlay", Category::Interface, key(KeyCode::F3)),
     Pause => ("pause", "Pause menu", Category::Interface, key(KeyCode::Escape)),
+    ReloadPacks => ("reload_packs", "Reload resource packs", Category::Interface, ctrl_key(KeyCode::KeyR)),
 }
 
 impl Action {
@@ -1610,7 +1611,7 @@ mod tests {
         assert_eq!(search(&b, "key:a"), ids(&[Action::Left]), "A, not Alt or anything starting with a");
         assert_eq!(search(&b, "key:space"), ids(&[Action::Jump]));
         assert_eq!(search(&b, "KEY:Q"), ids(&[Action::DropItem, Action::DropStack]), "Q alone and Ctrl+Q both use Q");
-        assert_eq!(search(&b, "key:ctrl"), ids(&[Action::Sprint, Action::DropStack]), "Ctrl as a key and as a modifier");
+        assert_eq!(search(&b, "key:ctrl"), ids(&[Action::Sprint, Action::DropStack, Action::ReloadPacks]), "Ctrl as a key and as a modifier");
         assert_eq!(search(&b, "key:ctrl+q"), ids(&[Action::DropStack]), "every named key must be in the chord");
         assert_eq!(search(&b, "key:q ctrl"), ids(&[Action::DropStack]), "spaces work too");
         assert_eq!(search(&b, "key:left click"), ids(&[Action::Attack]));
