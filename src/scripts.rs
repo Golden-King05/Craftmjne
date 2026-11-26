@@ -298,8 +298,9 @@ mod tests {
                 assert!(face.glyph_index(char::from_u32(cp).unwrap()).is_some(), "U+{cp:X} is not in the font");
             }
         }
-        // Emoji and joiners belong to the emoji font.
-        for j in crate::emoji::joiners() {
+        // Emoji and joiners belong to the emoji font - except the zero-width joiner itself, which Sinhala and
+        // Malayalam conjuncts need in this font too (an engine-level test checks emoji sequences still hold).
+        for j in crate::emoji::joiners().into_iter().filter(|c| *c != '\u{200D}') {
             assert!(face.glyph_index(j).is_none(), "U+{:X} must stay the emoji font's", j as u32);
         }
     }

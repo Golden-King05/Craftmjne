@@ -283,7 +283,10 @@ fn ui_shot(
                                 (24.0, "Odia: କ୍ଷ ଷ୍ଟ  Malayalam: ക്ഷ ന്ത  Gurmukhi: ਸ੍ਹ ਪ੍ਰ"),
                                 (24.0, "Kannada: ಕ್ಷ ಸ್ತ ರ್ಕ  Telugu: క్ష స్త ప్ర"),
                                 (24.0, "Khmer: ក្ខ ស្ត ក្រ ស្ថាន  Burmese: က္ခ ပ္ပ ဗုဒ္ဓ"),
-                                (24.0, "Javanese: ꦏ꧀ꦐ  Balinese: ᬓ᭄ᬔ  Tibetan: ཀྐ སྒ བྲ"),
+                                (24.0, "Javanese: ꦏ꧀ꦐ  Balinese: ᬓ᭄ᬔ  Tibetan: ཀྐ སྒ བྲ  Sundanese: ᮊ᮫ᮌ"),
+                                (24.0, "Sinhala: ක්‍ය ක්‍ර ක්‍ෂ  Tamil: க்ஷ ஸ்ரீ  Bengali ya-phala: ক্য ন্য"),
+                                (24.0, "Malayalam chillu: ണ്‍ ന്‍ ര്‍ ല്‍ ള്‍  Khmer: ក្ខុ ស្តូ  Tibetan: ཀྐུ"),
+                                (24.0, "Buginese: ᨀᨙ ᨀᨗ ᨀᨘ  Tagalog: ᜃᜒ ᜃᜓ  Batak: ᯂᯰ"),
                             ]
                         } else if mongol {
                             &[

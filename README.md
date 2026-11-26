@@ -1585,11 +1585,18 @@ default font that ships with Bevy is turned off, so there is no other font unles
     letter before (Kannada, Telugu, Khmer, Burmese, Javanese, Balinese, and Gurmukhi's ha/ra/va/ya),
     **reph** (Bengali, Gujarati, Odia, Kannada) and **Tibetan stacks** (its subjoined letters moved under
     the letter). They are squeezed copies of the plain letters: readable and correctly placed, not the
-    calligraphic ligatures a native reader would see. Not done: Sinhala and Tamil (their visible
-    al-lakuna / pulli is normal writing; Grantha and rakaransaya conjuncts are not made), Sundanese, Batak,
-    Buginese and the Philippine scripts (no conjuncts in normal use), Bengali ya-phala and the special
-    ligature shapes of Indic scripts (e.g. Bengali ক্ষ looks like a half ka + ṣa), vowel signs under a
-    subjoined letter, and Malayalam chillus and post-base forms. `CRAFT_SHOT=conjuncts` renders samples.
+    calligraphic ligatures a native reader would see. Also derived: **Sinhala** conjuncts (yansaya,
+    rakaransaya and the stacked forms - written with a zero-width joiner after the al-lakuna, as in Unicode;
+    without the joiner the al-lakuna stays visible), **Sundanese** (its virama), **Tamil** க்ஷ and ஸ்ரீ/ஶ்ரீ (the two
+    real Tamil ligatures; every other Tamil cluster keeps its pulli), **Bengali ya-phala** (the hook after a whole
+    base letter), **Malayalam chillus** typed as consonant + virama + joiner (they become the atomic chillu
+    letter), and **vowel signs under a subjoined letter** (Khmer, Burmese, Javanese, Balinese, Sundanese,
+    Sinhala, Tibetan: the pair becomes one glyph with the sign moved below the stack). Batak, Buginese and the
+    Philippine scripts have no conjuncts to make; what they needed was checked instead: Buginese's vowel e is
+    reordered before its letter, and the Philippine kudlit marks take no room. Not done: Bengali ra-phala as a
+    hook (it is a half form), Odia ya-phala, the special ligature shapes of Indic scripts (Bengali ক্ষ looks like a
+    half ka + ṣa), Kannada/Telugu vowel signs (Unifont draws them as spacing letters, so nothing overprints),
+    and Malayalam post-base forms. `CRAFT_SHOT=conjuncts` renders samples.
     Everything was judged only from software-rendered
     screenshots, and the sample words in the preview screens are only to exercise the shaping, not to be
     correct prose.

@@ -3789,3 +3789,27 @@ etc.) instead of inventing a new approach:
   - Break-tested: removing the `emergency_save` registration, the real save's `delete_autosave`, or the
     recovery call in `enter_world` each turn their own test red. Settings tabs were narrowed (90/170 px)
     so seven fit the panel; checked in a screenshot.
+
+- **Second conjunct round: the odd cases were each a different mechanism, and a probe-first pass found which.**
+  Probing the real engine before writing anything (a throwaway test printing glyph ids per cluster) showed:
+  - **A joiner needs a glyph in the font that holds the rest of the sequence.** Sinhala (`virama ZWJ C`) and
+    Malayalam chillus (`C virama ZWJ`) left the joiner as glyph 1 in another font, splitting the run. `derived()`
+    adds an empty zero-advance ZWJ glyph; `scripts::glyph_specs` otherwise skips joiners on purpose (the emoji font
+    owns them) and ligature components that have no glyph are silently dropped by `font_gen`.
+  - **Shapers order the vowel sign and the subjoined letter differently** (Khmer/Tibetan: letter then sign; Kannada
+    put the sign first), so `lowered_vowels` registers `[sub, mark]` and `[mark, sub]` under `blws`/`psts`.
+    The below-signs are found from the bitmaps (combining and ink starting in the lower rows), not listed.
+    Kannada's signs turned out to be spacing marks in Unifont (not combining), so nothing overprints there and
+    they get no ligature. Tibetan's default shaper has no `blws`, so it uses `ccmp`.
+  - **Scripts with nothing to join were checked, not decorated.** Buginese reorders its e sign by itself (USE),
+    Philippine kudlits are zero-width marks; no conjuncts were invented for Batak/Buginese/Philippine, and the
+    test says what was verified.
+  - **Chillu = a ligature whose output already has a code point**: `Ligature.to` is resolved through the cmap, so
+    it points straight at U+0D7A..0D7F with no new glyph; the test asserts the glyph id equals the atomic letter's.
+  - Break-tested: removing the ZWJ glyph, the lowered-vowel pass, or ya-phala each turns its tests red. A
+    pre-existing test that used Tamil ksha as its "untouched" example had to change, since ksha is now a ligature.
+  - **Found, not fixed (unrelated):** in the engine-level test setup an emoji ZWJ sequence that follows other
+    text on the same line (`"a 👨‍👩"`) comes out as separate glyphs (5, not 3), with or without the scripts
+    font's new ZWJ; the same sequence on its own is one glyph. It looks like cosmic-text's per-word fallback
+    handing the joiner and the emoji to different faces. Worth its own look before relying on emoji ZWJ sequences
+    inside chat lines.

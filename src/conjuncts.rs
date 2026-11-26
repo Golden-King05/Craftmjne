@@ -23,8 +23,8 @@
 //! scripts are deliberately left alone: their visible virama (al-lakuna, pulli, pamudpod) is how
 //! they are normally written.
 
-use crate::cjk::Glyph;
-use crate::font_gen::{rects_from_mask, GlyphSpec, Layer, Ligature, BASELINE_ROW};
+use crate::cjk::{spec_of, Glyph};
+use crate::font_gen::{rects_from_mask, GlyphSpec, Layer, Ligature, Rect, BASELINE_ROW};
 
 /// Where the derived glyphs live (plane 15 private use; this font has nothing else there).
 const BASE: u32 = 0xF4000;
@@ -48,20 +48,28 @@ struct Script {
     only: &'static [u32],
     /// The ra that makes a reph, if the script has one.
     reph: Option<u32>,
+    /// The form needs a zero-width joiner after the virama (Sinhala writes conjuncts that way).
+    zwj: bool,
+    /// The script's block, to find its vowel signs in.
+    block: (u32, u32),
 }
 
 const SCRIPTS: &[Script] = &[
-    Script { name: "Bengali", tags: &[*b"bng2", *b"beng"], features: &[*b"half"], virama: 0x9CD, consonants: &[(0x995, 0x9B9)], kind: Kind::Half, only: &[], reph: Some(0x9B0) },
-    Script { name: "Gujarati", tags: &[*b"gjr2", *b"gujr"], features: &[*b"half"], virama: 0xACD, consonants: &[(0xA95, 0xAB9)], kind: Kind::Half, only: &[], reph: Some(0xAB0) },
-    Script { name: "Odia", tags: &[*b"ory2", *b"orya"], features: &[*b"half"], virama: 0xB4D, consonants: &[(0xB15, 0xB39)], kind: Kind::Half, only: &[], reph: Some(0xB30) },
-    Script { name: "Malayalam", tags: &[*b"mlm2", *b"mlym"], features: &[*b"half"], virama: 0xD4D, consonants: &[(0xD15, 0xD3A)], kind: Kind::Half, only: &[], reph: None },
-    Script { name: "Gurmukhi", tags: &[*b"gur2", *b"guru"], features: &[*b"blwf"], virama: 0xA4D, consonants: &[(0xA2F, 0xA39)], kind: Kind::Below, only: &[0xA2F, 0xA30, 0xA35, 0xA39], reph: None },
-    Script { name: "Kannada", tags: &[*b"knd2", *b"knda"], features: &[*b"blwf"], virama: 0xCCD, consonants: &[(0xC95, 0xCB9)], kind: Kind::Below, only: &[], reph: Some(0xCB0) },
-    Script { name: "Telugu", tags: &[*b"tel2", *b"telu"], features: &[*b"blwf"], virama: 0xC4D, consonants: &[(0xC15, 0xC39)], kind: Kind::Below, only: &[], reph: None },
-    Script { name: "Khmer", tags: &[*b"khmr"], features: &[*b"pref", *b"blwf", *b"pstf"], virama: 0x17D2, consonants: &[(0x1780, 0x17A2)], kind: Kind::Below, only: &[], reph: None },
-    Script { name: "Burmese", tags: &[*b"mym2", *b"mymr"], features: &[*b"blwf", *b"pstf"], virama: 0x1039, consonants: &[(0x1000, 0x1021)], kind: Kind::Below, only: &[], reph: None },
-    Script { name: "Javanese", tags: &[*b"java"], features: &[*b"blwf", *b"pstf"], virama: 0xA9C0, consonants: &[(0xA98F, 0xA9B2)], kind: Kind::Below, only: &[], reph: None },
-    Script { name: "Balinese", tags: &[*b"bali"], features: &[*b"blwf", *b"pstf"], virama: 0x1B44, consonants: &[(0x1B13, 0x1B33)], kind: Kind::Below, only: &[], reph: None },
+    Script { name: "Bengali", tags: &[*b"bng2", *b"beng"], features: &[*b"half"], virama: 0x9CD, consonants: &[(0x995, 0x9B9)], kind: Kind::Half, only: &[], reph: Some(0x9B0), zwj: false, block: (0x980, 0x9FF) },
+    Script { name: "Gujarati", tags: &[*b"gjr2", *b"gujr"], features: &[*b"half"], virama: 0xACD, consonants: &[(0xA95, 0xAB9)], kind: Kind::Half, only: &[], reph: Some(0xAB0), zwj: false, block: (0xA80, 0xAFF) },
+    Script { name: "Odia", tags: &[*b"ory2", *b"orya"], features: &[*b"half"], virama: 0xB4D, consonants: &[(0xB15, 0xB39)], kind: Kind::Half, only: &[], reph: Some(0xB30), zwj: false, block: (0xB00, 0xB7F) },
+    Script { name: "Malayalam", tags: &[*b"mlm2", *b"mlym"], features: &[*b"half"], virama: 0xD4D, consonants: &[(0xD15, 0xD3A)], kind: Kind::Half, only: &[], reph: None, zwj: false, block: (0xD00, 0xD7F) },
+    Script { name: "Gurmukhi", tags: &[*b"gur2", *b"guru"], features: &[*b"blwf"], virama: 0xA4D, consonants: &[(0xA2F, 0xA39)], kind: Kind::Below, only: &[0xA2F, 0xA30, 0xA35, 0xA39], reph: None, zwj: false, block: (0xA00, 0xA7F) },
+    Script { name: "Kannada", tags: &[*b"knd2", *b"knda"], features: &[*b"blwf"], virama: 0xCCD, consonants: &[(0xC95, 0xCB9)], kind: Kind::Below, only: &[], reph: Some(0xCB0), zwj: false, block: (0xC80, 0xCFF) },
+    Script { name: "Telugu", tags: &[*b"tel2", *b"telu"], features: &[*b"blwf"], virama: 0xC4D, consonants: &[(0xC15, 0xC39)], kind: Kind::Below, only: &[], reph: None, zwj: false, block: (0xC00, 0xC7F) },
+    Script { name: "Khmer", tags: &[*b"khmr"], features: &[*b"pref", *b"blwf", *b"pstf"], virama: 0x17D2, consonants: &[(0x1780, 0x17A2)], kind: Kind::Below, only: &[], reph: None, zwj: false, block: (0x1780, 0x17FF) },
+    Script { name: "Burmese", tags: &[*b"mym2", *b"mymr"], features: &[*b"blwf", *b"pstf"], virama: 0x1039, consonants: &[(0x1000, 0x1021)], kind: Kind::Below, only: &[], reph: None, zwj: false, block: (0x1000, 0x109F) },
+    Script { name: "Javanese", tags: &[*b"java"], features: &[*b"blwf", *b"pstf"], virama: 0xA9C0, consonants: &[(0xA98F, 0xA9B2)], kind: Kind::Below, only: &[], reph: None, zwj: false, block: (0xA980, 0xA9DF) },
+    Script { name: "Balinese", tags: &[*b"bali"], features: &[*b"blwf", *b"pstf"], virama: 0x1B44, consonants: &[(0x1B13, 0x1B33)], kind: Kind::Below, only: &[], reph: None, zwj: false, block: (0x1B00, 0x1B7F) },
+    // Sinhala writes conjuncts with a zero-width joiner after the al-lakuna: yansaya, rakaransaya and the
+    // traditional stacked forms. Without the joiner the al-lakuna stays visible, as it normally is.
+    Script { name: "Sinhala", tags: &[*b"sinh"], features: &[*b"vatu", *b"blwf", *b"pstf", *b"cjct", *b"akhn"], virama: 0xDCA, consonants: &[(0xD9A, 0xDC6)], kind: Kind::Below, only: &[], reph: None, zwj: true, block: (0xD80, 0xDFF) },
+    Script { name: "Sundanese", tags: &[*b"sund"], features: &[*b"blwf", *b"pstf"], virama: 0x1BAB, consonants: &[(0x1B8A, 0x1BA0)], kind: Kind::Below, only: &[], reph: None, zwj: false, block: (0x1B80, 0x1BBF) },
 ];
 
 /// Rows of the em the subjoined forms start at (just under the letter before: its ink ends near row 9).
@@ -130,7 +138,8 @@ pub fn derived(set: &std::collections::BTreeMap<u32, Glyph>) -> (Vec<GlyphSpec>,
         next += 1;
         c
     };
-    for s in SCRIPTS {
+    let mut subs: Vec<(usize, char, GlyphSpec)> = Vec::new();
+    for (si, s) in SCRIPTS.iter().enumerate() {
         let Some(virama) = char::from_u32(s.virama) else { continue };
         for (&cp, g) in set {
             if !wanted(s, cp) || g.combining || g.width != 16 {
@@ -149,12 +158,14 @@ pub fn derived(set: &std::collections::BTreeMap<u32, Glyph>) -> (Vec<GlyphSpec>,
                     let m = quarter_mask(g);
                     // Zero advance, drawn centred under the 16-wide letter before it.
                     let w = m.first().map_or(0, Vec::len) as i32;
-                    specs.push(spec(to, 0, &m, -16 + (16 - w) / 2, BELOW_TOP));
+                    let below = spec(to, 0, &m, -16 + (16 - w) / 2, BELOW_TOP);
+                    subs.push((si, to, below.clone()));
+                    specs.push(below);
                 }
             }
             for &script in s.tags {
                 for &feature in s.features {
-                    let components = if s.kind == Kind::Half { vec![c, virama] } else { vec![virama, c] };
+                    let components = components_of(s, c, virama);
                     ligs.push(Ligature { script, feature, components, to });
                 }
             }
@@ -169,7 +180,156 @@ pub fn derived(set: &std::collections::BTreeMap<u32, Glyph>) -> (Vec<GlyphSpec>,
             }
         }
     }
+    lowered_vowels(set, &subs, &mut specs, &mut ligs, &mut alloc);
+    tibetan_stacks(set, &mut specs, &mut ligs, &mut alloc);
+    chillus(set, &mut ligs);
+    tamil(set, &mut specs, &mut ligs, &mut alloc);
+    ya_phala(set, &mut specs, &mut ligs, &mut alloc);
+    // Sinhala and Malayalam write some forms with a joiner after the virama; the font needs a glyph for
+    // it or the shaper cannot match the sequence (and would draw a box for it).
+    specs.push(GlyphSpec { chars: vec![ZWJ], advance: 0, layers: vec![Layer { color: 0, rects: vec![] }], colour: false });
     (specs, ligs)
+}
+
+const ZWJ: char = '\u{200D}';
+
+fn components_of(s: &Script, c: char, virama: char) -> Vec<char> {
+    match (s.kind, s.zwj) {
+        (Kind::Half, _) => vec![c, virama],
+        (Kind::Below, false) => vec![virama, c],
+        (Kind::Below, true) => vec![virama, ZWJ, c],
+    }
+}
+
+/// `a` and `b` as one glyph (no advance): `b`'s ink moved down so its top sits on `a`'s bottom.
+fn stacked(to: char, a: &GlyphSpec, b: &GlyphSpec) -> GlyphSpec {
+    let bottom = a.layers[0].rects.iter().map(|r| r.y1).max().unwrap_or(0);
+    let top = b.layers[0].rects.iter().map(|r| r.y0).min().unwrap_or(0);
+    let dy = (bottom - top).max(0);
+    let mut rects = a.layers[0].rects.clone();
+    rects.extend(b.layers[0].rects.iter().map(|r| Rect { x0: r.x0, x1: r.x1, y0: r.y0 + dy, y1: r.y1 + dy }));
+    GlyphSpec { chars: vec![to], advance: 0, layers: vec![Layer { color: 0, rects }], colour: false }
+}
+
+/// A vowel sign that hangs below its letter: a combining mark whose ink starts in the lower rows of its cell.
+fn is_below_mark(g: &Glyph) -> bool {
+    g.combining && (0..16).find(|&y| (0..g.width).any(|x| g.ink(x, y))).is_some_and(|top| top >= 10)
+}
+
+/// Vowel signs under a subjoined letter. Both sit just under the letter before them, so they would overprint
+/// each other; the pair becomes one glyph with the sign moved down below the subjoined letter. Shapers order
+/// the two differently (Kannada puts the sign first, Khmer the letter first), so both orders are matched.
+fn lowered_vowels(
+    set: &std::collections::BTreeMap<u32, Glyph>,
+    subs: &[(usize, char, GlyphSpec)],
+    specs: &mut Vec<GlyphSpec>,
+    ligs: &mut Vec<Ligature>,
+    alloc: &mut impl FnMut() -> char,
+) {
+    for (si, s) in SCRIPTS.iter().enumerate() {
+        let marks: Vec<(char, GlyphSpec)> = set
+            .iter()
+            .filter(|(cp, g)| (s.block.0..=s.block.1).contains(cp) && is_below_mark(g))
+            .filter_map(|(cp, g)| Some((char::from_u32(*cp)?, spec_of(char::from_u32(*cp)?, g))))
+            .collect();
+        for (_, sub, sub_spec) in subs.iter().filter(|(i, _, _)| *i == si) {
+            for (mark, mark_spec) in &marks {
+                let to = alloc();
+                specs.push(stacked(to, sub_spec, mark_spec));
+                for &script in s.tags {
+                    for feature in [*b"blws", *b"psts"] {
+                        ligs.push(Ligature { script, feature, components: vec![*sub, *mark], to });
+                        ligs.push(Ligature { script, feature, components: vec![*mark, *sub], to });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Tibetan stacks with a vowel sign under them: the lowered subjoined letter and the sign, one glyph.
+fn tibetan_stacks(set: &std::collections::BTreeMap<u32, Glyph>, specs: &mut Vec<GlyphSpec>, ligs: &mut Vec<Ligature>, alloc: &mut impl FnMut() -> char) {
+    let marks: Vec<(char, GlyphSpec)> = set
+        .iter()
+        .filter(|(cp, g)| (0xF00..=0xFFF).contains(*cp) && !(0xF90..=0xFBC).contains(*cp) && is_below_mark(g))
+        .filter_map(|(cp, g)| Some((char::from_u32(*cp)?, spec_of(char::from_u32(*cp)?, g))))
+        .collect();
+    for (&cp, g) in set.range(0xF90..=0xFBC) {
+        let Some(sub) = char::from_u32(cp) else { continue };
+        let mut sub_spec = spec_of(sub, g);
+        lower_tibetan_subjoined(std::slice::from_mut(&mut sub_spec));
+        if sub_spec.layers[0].rects.is_empty() {
+            continue;
+        }
+        for (mark, mark_spec) in &marks {
+            let to = alloc();
+            specs.push(stacked(to, &sub_spec, mark_spec));
+            for feature in [*b"ccmp", *b"blws"] {
+                ligs.push(Ligature { script: *b"tibt", feature, components: vec![sub, *mark], to });
+            }
+        }
+    }
+}
+
+/// Malayalam's old way of writing a chillu: consonant + virama + joiner is the chillu letter that already has
+/// its own code point.
+fn chillus(set: &std::collections::BTreeMap<u32, Glyph>, ligs: &mut Vec<Ligature>) {
+    for (consonant, chillu) in [(0xD23, 0xD7A), (0xD28, 0xD7B), (0xD30, 0xD7C), (0xD32, 0xD7D), (0xD33, 0xD7E), (0xD15, 0xD7F)] {
+        if !set.contains_key(&chillu) {
+            continue;
+        }
+        let (Some(c), Some(to)) = (char::from_u32(consonant), char::from_u32(chillu)) else { continue };
+        for script in [*b"mlm2", *b"mlym"] {
+            for feature in [*b"akhn", *b"cjct", *b"calt", *b"haln"] {
+                ligs.push(Ligature { script, feature, components: vec![c, '\u{D4D}', ZWJ], to });
+            }
+        }
+    }
+}
+
+/// Side by side: each glyph's ink (the first squeezed to half width when `squeeze_first`), as one glyph.
+fn joined_glyph(to: char, parts: &[&Glyph], squeeze_first: bool) -> GlyphSpec {
+    let masks: Vec<Vec<Vec<bool>>> = parts.iter().enumerate().map(|(i, g)| if i == 0 && squeeze_first { half_mask(g) } else { rows_of(g) }).collect();
+    let rows: Vec<Vec<bool>> = (0..16).map(|y| masks.iter().flat_map(|m| m[y].iter().copied()).collect()).collect();
+    let width = rows[0].len() as i32;
+    spec(to, width, &rows, 0, BASELINE_ROW - 14)
+}
+
+/// Tamil's two real ligatures: க்ஷ (ksha) and ஶ்ரீ / ஸ்ரீ (shri). Everything else in Tamil keeps its visible pulli.
+fn tamil(set: &std::collections::BTreeMap<u32, Glyph>, specs: &mut Vec<GlyphSpec>, ligs: &mut Vec<Ligature>, alloc: &mut impl FnMut() -> char) {
+    const PULLI: char = '\u{BCD}';
+    let get = |cp: u32| set.get(&cp);
+    let mut add = |components: Vec<char>, glyph: GlyphSpec| {
+        for script in [*b"tml2", *b"taml"] {
+            ligs.push(Ligature { script, feature: *b"akhn", components: components.clone(), to: glyph.chars[0] });
+        }
+        specs.push(glyph);
+    };
+    if let (Some(ka), Some(ssa)) = (get(0xB95), get(0xBB7)) {
+        let to = alloc();
+        add(vec!['\u{B95}', PULLI, '\u{BB7}'], joined_glyph(to, &[ka, ssa], true));
+    }
+    for sa in [0xBB6u32, 0xBB8] {
+        if let (Some(g_sa), Some(ra), Some(ii)) = (get(sa), get(0xBB0), get(0xBC0)) {
+            let to = alloc();
+            add(vec![char::from_u32(sa).unwrap(), PULLI, '\u{BB0}', '\u{BC0}'], joined_glyph(to, &[g_sa, ra, ii], true));
+        }
+    }
+}
+
+/// Bengali ya-phala (the ya after a virama, written as a hook to the right of the letter before): a quarter-size
+/// ya standing on the baseline, after the base.
+fn ya_phala(set: &std::collections::BTreeMap<u32, Glyph>, specs: &mut Vec<GlyphSpec>, ligs: &mut Vec<Ligature>, alloc: &mut impl FnMut() -> char) {
+    let Some(ya) = set.get(&0x9AF) else { return };
+    let m = quarter_mask(ya);
+    let (h, w) = (m.len() as i32, m.first().map_or(0, Vec::len) as i32);
+    let to = alloc();
+    specs.push(spec(to, w + 1, &m, 0, BASELINE_ROW - h));
+    for script in [*b"bng2", *b"beng"] {
+        for feature in [*b"pstf", *b"vatu", *b"cjct"] {
+            ligs.push(Ligature { script, feature, components: vec!['\u{9CD}', '\u{9AF}'], to });
+        }
+    }
 }
 
 /// Tibetan's subjoined letters (`U+0F90-0FBC`), moved down to sit under the letter they belong to.
@@ -219,7 +379,7 @@ mod tests {
                         continue;
                     }
                     let c = char::from_u32(cp).unwrap();
-                    let want = if s.kind == Kind::Half { vec![c, virama] } else { vec![virama, c] };
+                    let want = components_of(s, c, virama);
                     for tag in s.tags {
                         assert!(
                             ligs.iter().any(|l| &l.script == tag && l.components == want),
@@ -269,6 +429,39 @@ mod tests {
             assert_eq!(g.advance, 0);
             assert!(g.layers[0].rects.iter().all(|r| r.y1 <= 0), "a reph reaches below the top of the line");
         }
+    }
+
+    #[test]
+    fn a_stacked_pair_puts_the_second_glyph_directly_below_the_first() {
+        let r = |y0, y1| Rect { x0: 0, x1: 4, y0, y1 };
+        let a = GlyphSpec { chars: vec!['a'], advance: 0, layers: vec![Layer { color: 0, rects: vec![r(10, 15)] }], colour: false };
+        let b = GlyphSpec { chars: vec!['b'], advance: 0, layers: vec![Layer { color: 0, rects: vec![r(11, 13)] }], colour: false };
+        let s = stacked('c', &a, &b);
+        assert_eq!(s.advance, 0);
+        let ys: Vec<(i32, i32)> = s.layers[0].rects.iter().map(|r| (r.y0, r.y1)).collect();
+        assert_eq!(ys, vec![(10, 15), (15, 17)], "b starts where a ends");
+    }
+
+    #[test]
+    fn lowered_vowel_ligatures_exist_in_both_orders_for_every_subjoining_script() {
+        let ligs = all().1;
+        for s in SCRIPTS.iter().filter(|s| s.kind == Kind::Below) {
+            let has = |first_is_mark: bool| {
+                ligs.iter().any(|l| {
+                    s.tags.contains(&l.script) && l.feature == *b"blws" && l.components.len() == 2 && {
+                        let c0 = l.components[0] as u32;
+                        let in_block = |c: u32| (s.block.0..=s.block.1).contains(&c);
+                        // The mark is in the script's block; the subjoined letter is a private-use glyph.
+                        if first_is_mark { in_block(c0) } else { c0 >= BASE }
+                    }
+                })
+            };
+            // A script with no below-sign in Unifont has none to lower; the rest must have both orders.
+            if ligs.iter().any(|l| s.tags.contains(&l.script) && l.feature == *b"blws") {
+                assert!(has(true) && has(false), "{}", s.name);
+            }
+        }
+        assert!(ligs.iter().any(|l| l.script == *b"khmr" && l.feature == *b"blws"), "Khmer has below signs");
     }
 
     #[test]

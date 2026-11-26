@@ -530,6 +530,84 @@ mod tests {
         }
     }
 
+    fn first_glyph(fs: &mut bevy::text::cosmic_text::FontSystem, text: &str) -> u16 {
+        engine_glyphs(fs, text)[0].2
+    }
+
+    #[test]
+    fn sinhala_conjuncts_need_the_joiner_and_tamil_keeps_its_pulli_except_in_its_two_ligatures() {
+        let mut fs = engine();
+        // Yansaya / rakaransaya: al-lakuna + zero-width joiner + letter.
+        assert_eq!(count(&mut fs, "\u{D9A}\u{DCA}\u{200D}\u{DBA}"), 2, "Sinhala ka + yansaya");
+        assert_eq!(count(&mut fs, "\u{D9A}\u{DCA}\u{200D}\u{DBB}"), 2, "Sinhala ka + rakaransaya");
+        // No joiner, no conjunct: the al-lakuna is drawn.
+        assert_eq!(count(&mut fs, "\u{D9A}\u{DCA}\u{DBA}"), 3, "Sinhala without the joiner");
+        // Tamil: ksha and shri are single glyphs; any other consonant + pulli + consonant is still three.
+        assert_eq!(count(&mut fs, "\u{B95}\u{BCD}\u{BB7}"), 1, "Tamil ksha");
+        assert_eq!(count(&mut fs, "\u{BB8}\u{BCD}\u{BB0}\u{BC0}"), 1, "Tamil sri");
+        assert_eq!(count(&mut fs, "\u{B95}\u{BCD}\u{BA4}"), 3, "Tamil k + t keeps its pulli");
+    }
+
+    #[test]
+    fn a_malayalam_chillu_written_with_a_joiner_is_the_chillu_letter() {
+        let mut fs = engine();
+        for (c, chillu) in [('\u{D23}', '\u{D7A}'), ('\u{D28}', '\u{D7B}'), ('\u{D30}', '\u{D7C}'), ('\u{D32}', '\u{D7D}'), ('\u{D33}', '\u{D7E}'), ('\u{D15}', '\u{D7F}')] {
+            let typed: String = [c, '\u{D4D}', '\u{200D}'].iter().collect();
+            assert_eq!(count(&mut fs, &typed), 1, "U+{:04X} + virama + joiner", c as u32);
+            assert_eq!(first_glyph(&mut fs, &typed), first_glyph(&mut fs, &chillu.to_string()), "it must be the atomic chillu's own glyph");
+        }
+        // Without the joiner it is an ordinary half-form cluster, not a chillu.
+        assert_ne!(first_glyph(&mut fs, "\u{D23}\u{D4D}\u{D37}"), first_glyph(&mut fs, "\u{D7A}"));
+    }
+
+    #[test]
+    fn bengali_ya_phala_follows_a_whole_base_letter_and_sundanese_conjoins() {
+        let mut fs = engine();
+        // ka + virama + ya: the ka stays whole (it is the base) and the ya becomes the hook after it.
+        assert_eq!(count(&mut fs, "\u{995}\u{9CD}\u{9AF}"), 2);
+        assert_eq!(first_glyph(&mut fs, "\u{995}\u{9CD}\u{9AF}"), first_glyph(&mut fs, "\u{995}"), "base ka is not squeezed");
+        // ... unlike any other second letter, which makes ka a half form.
+        assert_ne!(first_glyph(&mut fs, "\u{995}\u{9CD}\u{9B7}"), first_glyph(&mut fs, "\u{995}"));
+        assert_eq!(count(&mut fs, "\u{1B8A}\u{1BAB}\u{1B8B}"), 2, "Sundanese virama conjunct");
+    }
+
+    #[test]
+    fn a_vowel_sign_under_a_subjoined_letter_is_moved_below_it() {
+        let mut fs = engine();
+        // Khmer ka + coeng kha + u: the subscript kha and the sign under it are one glyph, not two overprinting.
+        assert_eq!(count(&mut fs, "\u{1780}\u{17D2}\u{1781}\u{17BB}"), 2, "Khmer");
+        assert_eq!(count(&mut fs, "\u{1780}\u{17D2}\u{1781}"), 2, "and the plain stack is the same two glyphs");
+        // Tibetan stack + vowel u.
+        assert_eq!(count(&mut fs, "\u{F40}\u{F90}\u{F74}"), 2, "Tibetan");
+        assert_ne!(engine_glyphs(&mut fs, "\u{F40}\u{F90}\u{F74}")[1].2, engine_glyphs(&mut fs, "\u{F40}\u{F90}")[1].2);
+    }
+
+    #[test]
+    fn emoji_joiner_sequences_still_shape_as_one_glyph_now_the_scripts_font_has_a_joiner_too() {
+        let mut fs = engine();
+        // Family (man ZWJ woman ZWJ girl) and a flag: one glyph each, drawn by the emoji font.
+        assert_eq!(count(&mut fs, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), 1, "family");
+        assert_eq!(count(&mut fs, "\u{1F1EF}\u{1F1F5}"), 1, "flag");
+        // A Sinhala conjunct keeps shaping when ordinary text follows it.
+        assert_eq!(count(&mut fs, "\u{D9A}\u{DCA}\u{200D}\u{DBA} x"), 4, "conjunct then text");
+    }
+
+    #[test]
+    fn buginese_philippine_and_batak_signs_sit_where_their_scripts_put_them() {
+        let mut fs = engine();
+        // Buginese vowel e is written left of its consonant though typed after it: the engine reorders.
+        let typed = engine_glyphs(&mut fs, "\u{1A00}\u{1A19}");
+        let ka = first_glyph(&mut fs, "\u{1A00}");
+        assert_eq!(typed.len(), 2);
+        assert_ne!(typed[0].2, ka, "the e sign comes first");
+        assert_eq!(typed[1].2, ka);
+        // The kudlit vowel marks of Tagalog, Hanunoo, Buhid and Tagbanwa take no room of their own.
+        let set = crate::scripts::glyphs();
+        for cp in [0x1712u32, 0x1713, 0x1732, 0x1733, 0x1752, 0x1753, 0x1772, 0x1773] {
+            assert!(set.get(&cp).is_some_and(|g| g.combining), "U+{cp:04X} should be a zero-width mark");
+        }
+    }
+
     #[test]
     fn a_virama_with_nothing_after_it_stays_visible_and_unjoined_scripts_are_untouched() {
         let mut fs = engine();
@@ -538,7 +616,7 @@ mod tests {
         assert_eq!(count(&mut fs, "\u{C95}\u{CCD}"), 2, "Kannada final halant");
         // Sinhala and Tamil write their virama visibly: three characters stay three glyphs.
         assert_eq!(count(&mut fs, "\u{D9A}\u{DCA}\u{DAF}"), 3, "Sinhala");
-        assert_eq!(count(&mut fs, "\u{B95}\u{BCD}\u{BB7}"), 3, "Tamil");
+        assert_eq!(count(&mut fs, "\u{B95}\u{BCD}\u{BA4}"), 3, "Tamil");
     }
 
     #[test]
