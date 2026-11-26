@@ -17,7 +17,7 @@ use crate::keybinds::{Action, Actions, ControlOptions, DoubleTap};
 use crate::health::Vitals;
 use crate::save::GameMode;
 use crate::state::{AppState, DeathState, PauseState};
-use crate::world::ChunkMap;
+use crate::world::{ChunkMap, Collider};
 
 pub const HALF_W: f32 = 0.3;
 pub const HEIGHT: f32 = 1.8;
@@ -134,14 +134,23 @@ impl Player {
                 None => candidate,
             });
         };
+        // Boxes a mod's model gave a block (a half block, a post): treated like the entity boxes
+        // below, in world space.
+        let mut model_boxes: Vec<Aabb> = Vec::new();
         for y in min.y..=max.y {
             for z in min.z..=max.z {
                 for x in min.x..=max.x {
-                    if !map.is_solid(tables, IVec3::new(x, y, z)) {
-                        continue;
+                    match map.collider_at(tables, IVec3::new(x, y, z)) {
+                        Collider::None => {}
+                        Collider::Full => {
+                            let v = [x, y, z][axis];
+                            tighten(if delta > 0.0 { v as f32 } else { (v + 1) as f32 });
+                        }
+                        Collider::Boxes(boxes) => {
+                            let cell = Vec3::new(x as f32, y as f32, z as f32);
+                            model_boxes.extend(boxes.iter().map(|b| Aabb { min: cell + Vec3::from(b.min), max: cell + Vec3::from(b.max) }));
+                        }
                     }
-                    let v = [x, y, z][axis];
-                    tighten(if delta > 0.0 { v as f32 } else { (v + 1) as f32 });
                 }
             }
         }
@@ -154,7 +163,7 @@ impl Player {
             max: Vec3::new(p.x + HALF_W, p.y + HEIGHT, p.z + HALF_W),
         };
         let (now, was) = (body(self.pos), body(before));
-        for solid in &self.solids {
+        for solid in self.solids.iter().chain(&model_boxes) {
             if !now.overlaps(solid) {
                 continue;
             }
@@ -573,6 +582,26 @@ mod tests {
             }
         }
         (map, tables)
+    }
+
+    #[test]
+    fn a_model_collision_box_replaces_the_blocks_full_cell() {
+        let (map, tables) = flat_world();
+        let mut tables = std::sync::Arc::try_unwrap(tables).ok().expect("sole owner");
+        let reg = crate::blocks::BlockRegistry::with_defaults();
+        let stone = reg.id("stone") as usize;
+        // Stone now collides as a half-height slab (what a mod's `"collision": "model"` does).
+        tables.collision_boxes[stone] = Some(std::sync::Arc::new(vec![crate::models::CollisionBox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 0.5, 1.0],
+        }]));
+        // The old top layer (y = 10) is now only half a block tall: ground is at 10.5.
+        let keys = ButtonInput::<KeyCode>::default();
+        let mut player = Player { pos: Vec3::new(8.5, 20.0, 8.5), spawned: true, ..Player::default() };
+        for _ in 0..600 {
+            player.step(STEP, &keys, &map, &tables);
+        }
+        assert!((player.pos.y - 10.5).abs() < 0.01, "stood at {}", player.pos.y);
     }
 
     #[test]

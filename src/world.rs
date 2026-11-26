@@ -135,6 +135,14 @@ pub struct Chunk {
     pub water_entity: Option<Entity>,
 }
 
+/// What stops the player at a cell (see [`ChunkMap::collider_at`]).
+pub enum Collider {
+    None,
+    Full,
+    /// A mod's model shape, in block units relative to the cell.
+    Boxes(Arc<Vec<crate::models::CollisionBox>>),
+}
+
 #[derive(Resource, Default)]
 pub struct ChunkMap {
     pub chunks: HashMap<IVec2, Chunk>,
@@ -262,6 +270,27 @@ impl ChunkMap {
             pos.y as usize,
             pos.z.rem_euclid(CHUNK_SIZE) as usize,
         )] as usize]
+    }
+
+    /// What the player's body collides with at `pos`: nothing, the whole cell, or - where a mod's
+    /// model replaced a block's collision - that model's boxes. Unloaded terrain is solid, as in
+    /// [`ChunkMap::is_solid`].
+    pub fn collider_at(&self, tables: &Tables, pos: IVec3) -> Collider {
+        if pos.y < 0 {
+            return Collider::Full;
+        }
+        if pos.y >= WORLD_HEIGHT {
+            return Collider::None;
+        }
+        let Some(blocks) = self.chunks.get(&Self::chunk_coord(pos.x, pos.z)).and_then(|c| c.blocks.as_ref()) else {
+            return Collider::Full;
+        };
+        let id = blocks[block_index(pos.x.rem_euclid(CHUNK_SIZE) as usize, pos.y as usize, pos.z.rem_euclid(CHUNK_SIZE) as usize)] as usize;
+        match &tables.collision_boxes[id] {
+            Some(boxes) => Collider::Boxes(boxes.clone()),
+            None if tables.solid[id] => Collider::Full,
+            None => Collider::None,
+        }
     }
 
     /// Border edits affect neighbouring chunks' culling/AO shells too, so a

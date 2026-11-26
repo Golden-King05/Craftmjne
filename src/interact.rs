@@ -134,14 +134,26 @@ pub struct RayHit {
     pub normal: IVec3,
 }
 
+/// What a ray test says about one cell.
+pub enum CellHit {
+    Miss,
+    /// The whole cell is hit (the ray's entry face is the hit face).
+    Full,
+    /// Something inside the cell is hit, `t` along the ray, on the face with this `normal`
+    /// (a mod's model shape - see [`ray_boxes`]).
+    Inside { t: f32, normal: IVec3 },
+}
+
 /// Voxel raycast (Amanatides & Woo DDA). Steps exactly through the grid cells
 /// along the ray — no float sampling, no missed corners.
-pub fn raycast_voxel(
-    origin: Vec3,
-    dir: Vec3,
-    max_dist: f32,
-    mut hit_test: impl FnMut(IVec3) -> bool,
-) -> Option<RayHit> {
+pub fn raycast_voxel(origin: Vec3, dir: Vec3, max_dist: f32, mut hit_test: impl FnMut(IVec3) -> bool) -> Option<RayHit> {
+    raycast_voxel_with(origin, dir, max_dist, |c| if hit_test(c) { CellHit::Full } else { CellHit::Miss })
+}
+
+/// [`raycast_voxel`] where a cell can be hit only in part: `test` may answer
+/// [`CellHit::Inside`] with the exact hit, which ends the ray there (a ray that passes a half
+/// block's empty upper half carries on into the cells behind it).
+pub fn raycast_voxel_with(origin: Vec3, dir: Vec3, max_dist: f32, mut test: impl FnMut(IVec3) -> CellHit) -> Option<RayHit> {
     let mut cell = origin.floor().as_ivec3();
     let step = IVec3::new(
         if dir.x > 0.0 { 1 } else { -1 },
@@ -165,11 +177,19 @@ pub fn raycast_voxel(
     let mut normal = IVec3::ZERO;
     let mut t = 0.0;
     while t <= max_dist {
-        if hit_test(cell) {
-            if normal == IVec3::ZERO {
-                return None; // started inside a block
+        match test(cell) {
+            CellHit::Miss => {}
+            CellHit::Full => {
+                if normal == IVec3::ZERO {
+                    return None; // started inside a block
+                }
+                return Some(RayHit { pos: cell, normal });
             }
-            return Some(RayHit { pos: cell, normal });
+            CellHit::Inside { t: hit_t, normal: hit_normal } => {
+                if hit_t <= max_dist {
+                    return Some(RayHit { pos: cell, normal: hit_normal });
+                }
+            }
         }
         if t_max.x < t_max.y && t_max.x < t_max.z {
             cell.x += step.x;
@@ -189,6 +209,49 @@ pub fn raycast_voxel(
         }
     }
     None
+}
+
+/// Where a ray first meets any of `boxes` (block units, relative to `cell`): the distance along the
+/// ray and the face's outward normal. A ray that starts inside a box finds nothing in it, like
+/// [`raycast_voxel`]'s "started inside a block".
+pub fn ray_boxes(origin: Vec3, dir: Vec3, cell: IVec3, boxes: &[crate::models::CollisionBox]) -> Option<(f32, IVec3)> {
+    let base = cell.as_vec3();
+    let mut best: Option<(f32, IVec3)> = None;
+    for b in boxes {
+        let (lo, hi) = (base + Vec3::from(b.min), base + Vec3::from(b.max));
+        let (mut t_near, mut t_far) = (f32::NEG_INFINITY, f32::INFINITY);
+        let mut normal = IVec3::ZERO;
+        let mut missed = false;
+        for a in 0..3 {
+            let (o, d) = (origin[a], dir[a]);
+            if d.abs() < 1e-9 {
+                if o < lo[a] || o > hi[a] {
+                    missed = true;
+                    break;
+                }
+                continue;
+            }
+            let (t1, t2) = ((lo[a] - o) / d, (hi[a] - o) / d);
+            let (enter, exit, face) = if t1 < t2 { (t1, t2, -1) } else { (t2, t1, 1) };
+            if enter > t_near {
+                t_near = enter;
+                normal = IVec3::ZERO;
+                normal[a] = face;
+            }
+            t_far = t_far.min(exit);
+            if t_near > t_far {
+                missed = true;
+                break;
+            }
+        }
+        if missed || t_near < 0.0 || normal == IVec3::ZERO {
+            continue;
+        }
+        if best.is_none_or(|(t, _)| t_near < t) {
+            best = Some((t_near, normal));
+        }
+    }
+    best
 }
 
 pub const HOTBAR_SLOTS: usize = 9;
@@ -389,9 +452,21 @@ fn interact(
 
     // Crosshair target.
     target.0 = if player.spawned {
-        raycast_voxel(player.eye(), player.look_dir(), REACH, |cell| {
+        let (eye, look) = (player.eye(), player.look_dir());
+        raycast_voxel_with(eye, look, REACH, |cell| {
             let id = map.get_block(cell);
-            id != AIR && registry.def(id).selectable
+            if id == AIR || !registry.def(id).selectable {
+                return CellHit::Miss;
+            }
+            // Where a mod's model replaced the block's shape, only that shape can be targeted.
+            let boxes = content.tables.as_ref().and_then(|t| t.0.collision_boxes.get(id as usize)).and_then(|b| b.as_ref());
+            match boxes {
+                Some(boxes) => match ray_boxes(eye, look, cell, boxes) {
+                    Some((t, normal)) => CellHit::Inside { t, normal },
+                    None => CellHit::Miss,
+                },
+                None => CellHit::Full,
+            }
         })
     } else {
         None
@@ -399,13 +474,26 @@ fn interact(
 
     if let Some(hit) = &target.0 {
         // A thin box around something lying on the ground, a cube otherwise.
-        let flat = registry.def(map.get_block(hit.pos)).shape == Shape::Floor;
-        let (centre, size) = if flat {
-            (hit.pos.as_vec3() + Vec3::new(0.5, 0.05, 0.5), Vec3::new(1.002, 0.1, 1.002))
+        let id = map.get_block(hit.pos);
+        let flat = registry.def(id).shape == Shape::Floor;
+        let colour = Color::srgba(0.05, 0.05, 0.05, 0.9);
+        let boxes = content.tables.as_ref().and_then(|t| t.0.collision_boxes.get(id as usize)).and_then(|b| b.as_ref());
+        if let Some(boxes) = boxes {
+            // A mod's model replaced the shape: outline exactly what can be hit.
+            for b in boxes.iter() {
+                let (lo, hi) = (Vec3::from(b.min), Vec3::from(b.max));
+                let size = hi - lo + Vec3::splat(0.002);
+                gizmos.cuboid(Transform::from_translation(hit.pos.as_vec3() + (lo + hi) * 0.5).with_scale(size), colour);
+            }
         } else {
-            (hit.pos.as_vec3() + Vec3::splat(0.5), Vec3::splat(1.002))
-        };
-        gizmos.cuboid(Transform::from_translation(centre).with_scale(size), Color::srgba(0.05, 0.05, 0.05, 0.9));
+            // A thin box around something lying on the ground, a cube otherwise.
+            let (centre, size) = if flat {
+                (hit.pos.as_vec3() + Vec3::new(0.5, 0.05, 0.5), Vec3::new(1.002, 0.1, 1.002))
+            } else {
+                (hit.pos.as_vec3() + Vec3::splat(0.5), Vec3::splat(1.002))
+            };
+            gizmos.cuboid(Transform::from_translation(centre).with_scale(size), colour);
+        }
     }
 
     let dt = time.delta_secs();
@@ -603,6 +691,7 @@ pub struct Content<'w> {
     pub blocks: Res<'w, BlockRegistry>,
     pub items: Res<'w, ItemRegistry>,
     pub book: Res<'w, RecipeBook>,
+    pub tables: Option<Res<'w, BlockTables>>,
 }
 
 /// A number in `0..1` for a block's drop chance, different for every break
@@ -732,6 +821,54 @@ impl Plugin for InteractPlugin {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::CollisionBox;
+
+    fn slab() -> Vec<CollisionBox> {
+        vec![CollisionBox { min: [0.0, 0.0, 0.0], max: [1.0, 0.5, 1.0] }]
+    }
+
+    #[test]
+    fn a_ray_over_a_half_block_passes_it_and_one_through_it_hits() {
+        let cell = IVec3::new(0, 0, 0);
+        let dir = Vec3::X;
+        // Above the slab's top (y = 0.5): nothing.
+        assert!(ray_boxes(Vec3::new(-2.0, 0.8, 0.5), dir, cell, &slab()).is_none());
+        // Through it: hits the west face, 2 blocks along.
+        let (t, n) = ray_boxes(Vec3::new(-2.0, 0.3, 0.5), dir, cell, &slab()).unwrap();
+        assert!((t - 2.0).abs() < 1e-5 && n == IVec3::new(-1, 0, 0));
+        // From above, down onto the top face.
+        let (t, n) = ray_boxes(Vec3::new(0.5, 2.0, 0.5), Vec3::NEG_Y, cell, &slab()).unwrap();
+        assert!((t - 1.5).abs() < 1e-5 && n == IVec3::Y);
+    }
+
+    #[test]
+    fn the_voxel_walk_carries_on_past_a_half_blocks_empty_half() {
+        let boxes = slab();
+        // A slab at x=3 and a full block at x=5; the ray at height 0.8 skips the slab, hits the full block.
+        let hit = raycast_voxel_with(Vec3::new(0.5, 0.8, 0.5), Vec3::X, 10.0, |c| match c.x {
+            3 => match ray_boxes(Vec3::new(0.5, 0.8, 0.5), Vec3::X, c, &boxes) {
+                Some((t, normal)) => CellHit::Inside { t, normal },
+                None => CellHit::Miss,
+            },
+            5 => CellHit::Full,
+            _ => CellHit::Miss,
+        })
+        .unwrap();
+        assert_eq!(hit.pos, IVec3::new(5, 0, 0));
+        assert_eq!(hit.normal, IVec3::new(-1, 0, 0));
+        // At height 0.3 the slab itself is hit.
+        let hit = raycast_voxel_with(Vec3::new(0.5, 0.3, 0.5), Vec3::X, 10.0, |c| match c.x {
+            3 => match ray_boxes(Vec3::new(0.5, 0.3, 0.5), Vec3::X, c, &boxes) {
+                Some((t, normal)) => CellHit::Inside { t, normal },
+                None => CellHit::Miss,
+            },
+            5 => CellHit::Full,
+            _ => CellHit::Miss,
+        })
+        .unwrap();
+        assert_eq!(hit.pos, IVec3::new(3, 0, 0));
+    }
+
     use super::*;
 
     #[test]
