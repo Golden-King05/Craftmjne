@@ -1104,7 +1104,10 @@ emergency save, and a crash between a world's creation and its first snapshot
 Settings > **Language** picks the language. Shipped: English, Español (España), Español (México), Português
 (Portugal), Português (Brasil), Français (France), हिन्दी, 繁體中文 (台灣) and 简体中文 (中国). Languages with regional
 variants are one heading in the list (Español, Português, 中文) that opens to show its variants; each language
-shows **how much of the game is translated**, as a percentage. The choice is saved per launcher instance
+shows **how much of the game is translated**, as a percentage, and is named twice: in its own language and in the
+one you're using (`Español (España) / Spanish (Spain)` while English is chosen; just once when they're the same). Those
+names are keys too - `lang.name.<code>` and `lang.group.<group>` - so a mod adding a language adds its name in each
+language it knows; without one, only its own name shows. The choice is saved per launcher instance
 (`language.json`). `CRAFT_LANG=<code>` overrides it for one run.
 
 **Everything is translated except commands**: `/give`, its arguments and its syntax stay English in every

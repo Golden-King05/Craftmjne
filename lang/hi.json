@@ -308,5 +308,17 @@
  "rarity.rare": "दुर्लभ",
  "rarity.trash": "कबाड़",
  " or ": " या ",
- "build  -  explore  -  survive": "बनाओ  -  खोजो  -  जीते रहो"
+ "build  -  explore  -  survive": "बनाओ  -  खोजो  -  जीते रहो",
+ "lang.name.en": "अंग्रेज़ी",
+ "lang.name.es-ES": "स्पेनिश (स्पेन)",
+ "lang.name.es-MX": "स्पेनिश (मेक्सिको)",
+ "lang.name.pt-PT": "पुर्तगाली (पुर्तगाल)",
+ "lang.name.pt-BR": "पुर्तगाली (ब्राज़ील)",
+ "lang.name.fr-FR": "फ़्रेंच (फ़्रांस)",
+ "lang.name.hi": "हिन्दी",
+ "lang.name.zh-Hant": "चीनी (पारंपरिक)",
+ "lang.name.zh-Hans": "चीनी (सरलीकृत)",
+ "lang.group.Español": "स्पेनिश",
+ "lang.group.Português": "पुर्तगाली",
+ "lang.group.中文 (普通话)": "चीनी (मंदारिन)"
 }

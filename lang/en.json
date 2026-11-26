@@ -308,5 +308,17 @@
  "rarity.rare": "Rare",
  "rarity.trash": "Trash",
  " or ": " or ",
- "build  -  explore  -  survive": "build  -  explore  -  survive"
+ "build  -  explore  -  survive": "build  -  explore  -  survive",
+ "lang.name.en": "English",
+ "lang.name.es-ES": "Spanish (Spain)",
+ "lang.name.es-MX": "Spanish (Mexico)",
+ "lang.name.pt-PT": "Portuguese (Portugal)",
+ "lang.name.pt-BR": "Portuguese (Brazil)",
+ "lang.name.fr-FR": "French (France)",
+ "lang.name.hi": "Hindi",
+ "lang.name.zh-Hant": "Chinese (Traditional)",
+ "lang.name.zh-Hans": "Chinese (Simplified)",
+ "lang.group.Español": "Spanish",
+ "lang.group.Português": "Portuguese",
+ "lang.group.中文 (普通话)": "Chinese (Mandarin)"
 }

@@ -3854,3 +3854,8 @@ etc.) instead of inventing a new approach:
   - Not done: the launcher (egui, separate crate), the F3 overlay, developer-facing error text, a first-run guess of the
     OS language (English is the default), right-to-left layout (no RTL language is shipped), and per-language fonts for
     scripts beyond what the font stack already draws.
+- **Language names are keys, and they're resolved against the language in use, not the global.** `Languages::
+  display_name(code)` = the language's own `_meta` name, then `lookup(ui_code, "lang.name.<code>")`, joined with " / " and
+  shown once when equal (Spanish in Spanish). It uses the catalog directly rather than `tr`, so the settings tests
+  can check both directions without touching the process-wide language. A mod's new language with no `lang.name.*`
+  entries just shows its own name. 12 keys x 9 languages were added; es-MX and pt-PT inherit theirs.

@@ -342,6 +342,19 @@ impl Default for Languages {
 }
 
 impl Languages {
+    /// A language as the picker lists it: its own name, then its name in the language in use - "Español (España) /
+    /// Spanish (Spain)" while English is chosen. The second part is left out when it is the same (Spanish while
+    /// Spanish is in use) or when nobody has named the language (a mod's new one: add `lang.name.<code>`).
+    pub fn display_name(&self, code: &str) -> String {
+        let native = self.catalog.language(code).map_or(code.to_string(), |l| l.name.clone());
+        both(&native, self.catalog.lookup(&self.code, &format!("lang.name.{code}")))
+    }
+
+    /// The same for a group heading (`Español / Spanish`).
+    pub fn display_group(&self, group: &str) -> String {
+        both(group, self.catalog.lookup(&self.code, &format!("lang.group.{group}")))
+    }
+
     /// Switches to `code` if it exists; returns whether it changed. [`apply_language`] installs it for [`tr`].
     pub fn select(&mut self, code: &str) -> bool {
         if !self.catalog.contains(code) || self.code == code {
@@ -369,6 +382,14 @@ impl Languages {
             "ja" => Some(crate::cjk::Style::Japanese),
             _ => None,
         }
+    }
+}
+
+/// A name next to its translation, once if they are the same.
+fn both(native: &str, translated: Option<&str>) -> String {
+    match translated {
+        Some(t) if !t.is_empty() && t != native => format!("{native} / {t}"),
+        _ => native.to_string(),
     }
 }
 

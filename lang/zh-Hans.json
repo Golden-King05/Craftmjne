@@ -309,5 +309,17 @@
  "rarity.rare": "稀有",
  "rarity.trash": "废品",
  " or ": " 或 ",
- "build  -  explore  -  survive": "建造  -  探索  -  生存"
+ "build  -  explore  -  survive": "建造  -  探索  -  生存",
+ "lang.name.en": "英语",
+ "lang.name.es-ES": "西班牙语（西班牙）",
+ "lang.name.es-MX": "西班牙语（墨西哥）",
+ "lang.name.pt-PT": "葡萄牙语（葡萄牙）",
+ "lang.name.pt-BR": "葡萄牙语（巴西）",
+ "lang.name.fr-FR": "法语（法国）",
+ "lang.name.hi": "印地语",
+ "lang.name.zh-Hant": "中文（繁体）",
+ "lang.name.zh-Hans": "中文（简体）",
+ "lang.group.Español": "西班牙语",
+ "lang.group.Português": "葡萄牙语",
+ "lang.group.中文 (普通话)": "中文（普通话）"
 }

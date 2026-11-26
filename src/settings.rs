@@ -362,8 +362,7 @@ fn open_group_of(languages: &crate::lang::Languages) -> Option<String> {
 
 /// "Español (México)  -  100%": a language and how much of the game is translated into it.
 pub(crate) fn language_label(languages: &crate::lang::Languages, code: &str) -> String {
-    let name = languages.catalog.language(code).map_or(code.to_string(), |l| l.name.clone());
-    format!("{name}  -  {}%", languages.catalog.percent(code))
+    format!("{}  -  {}%", languages.display_name(code), languages.catalog.percent(code))
 }
 
 fn spawn_language(body: &mut ChildSpawnerCommands, languages: &crate::lang::Languages, view: &SettingsView) {
@@ -391,7 +390,7 @@ fn spawn_language(body: &mut ChildSpawnerCommands, languages: &crate::lang::Lang
             }
             let open = view.lang_open.as_deref() == Some(group.name.as_str());
             let holds_current = group.members.contains(&languages.code);
-            let label = format!("{} {}", if open { "v" } else { ">" }, group.name);
+            let label = format!("{} {}", if open { "v" } else { ">" }, languages.display_group(&group.name));
             sbutton(list, &label, SettingsButton::LangGroup(group.name.clone()), ButtonStyle::Choice, 440.0, 36.0, 15.0, holds_current && !open, theme::TEXT, None);
             if open {
                 for code in &group.members {
@@ -997,6 +996,27 @@ mod tests {
         s.click(SettingsButton::PickLanguage("es-ES".into()));
         assert_eq!(s.app.world().resource::<crate::lang::Languages>().code, "es-ES");
         assert_eq!(s.app.world().resource::<SaveStore>().load_language(), "es-ES");
+    }
+
+    #[test]
+    fn each_language_is_listed_in_its_own_name_and_in_the_one_in_use() {
+        let files = |code: &str, json: &str| crate::lang::parse_file(code, json).unwrap().0;
+        let catalog = crate::lang::Catalog::build(vec![
+            files("en", r#"{"lang.name.en": "English", "lang.name.es-ES": "Spanish (Spain)", "lang.group.Español": "Spanish"}"#),
+            files("es-ES", r#"{"_meta": {"name": "Español (España)", "group": "Español"}, "lang.name.en": "Inglés", "lang.name.es-ES": "Español (España)", "lang.group.Español": "Español"}"#),
+            files("tlh", r#"{"_meta": {"name": "tlhIngan Hol"}}"#),
+        ]);
+        let mut languages = crate::lang::Languages { catalog: std::sync::Arc::new(catalog), ..Default::default() };
+        // English in use: native name, then English's name for it.
+        assert_eq!(languages.display_name("es-ES"), "Español (España) / Spanish (Spain)");
+        assert_eq!(languages.display_group("Español"), "Español / Spanish");
+        assert_eq!(languages.display_name("en"), "English", "the same in both: shown once");
+        assert_eq!(languages.display_name("tlh"), "tlhIngan Hol", "a language nobody has named is just its own name");
+        // Spanish in use: English keeps its own name first, then Spanish's word for it.
+        languages.select("es-ES");
+        assert_eq!(languages.display_name("en"), "English / Inglés");
+        assert_eq!(languages.display_name("es-ES"), "Español (España)", "Spanish in Spanish: once");
+        assert_eq!(languages.display_group("Español"), "Español");
     }
 
     #[test]
