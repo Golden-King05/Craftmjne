@@ -56,6 +56,17 @@ pub struct GlyphSpec {
     pub colour: bool,
 }
 
+/// A glyph substitution the shaper applies for a script's feature (Arabic joining forms): wherever
+/// the character `from` would be drawn, draw the glyph that `to` is mapped to instead. `to` is
+/// normally a private-use code point that exists only to name the form.
+#[derive(Clone, Copy, Debug)]
+pub struct Substitution {
+    pub script: [u8; 4],
+    pub feature: [u8; 4],
+    pub from: char,
+    pub to: char,
+}
+
 pub struct FontSpec {
     pub family: String,
     /// RGBA palette for colour glyphs.
@@ -67,6 +78,8 @@ pub struct FontSpec {
     pub baseline_row: i32,
     /// Advance of the space and of any code point with no glyph (`.notdef`), in pixels.
     pub space_advance: i32,
+    /// `GSUB` single substitutions (needs the glyphs both characters map to).
+    pub substitutions: Vec<Substitution>,
 }
 
 /// Merges a pixel grid (`rows[y][x]` = ink) into the fewest rectangles: horizontal runs, then
@@ -274,6 +287,117 @@ fn cmap_table(map: &BTreeMap<u32, u16>) -> Vec<u8> {
     t
 }
 
+/// A `GSUB` table holding single substitutions grouped by script and feature, one lookup per
+/// (script, feature). `gid_of` resolves a character to its glyph id.
+fn gsub_table(subs: &[Substitution], gid_of: &BTreeMap<u32, u16>) -> Option<Vec<u8>> {
+    // (feature tag, script tag, (from gid, to gid) sorted by from)
+    let mut entries: Vec<([u8; 4], [u8; 4], Vec<(u16, u16)>)> = Vec::new();
+    for s in subs {
+        let (Some(&from), Some(&to)) = (gid_of.get(&(s.from as u32)), gid_of.get(&(s.to as u32))) else { continue };
+        match entries.iter_mut().find(|e| e.0 == s.feature && e.1 == s.script) {
+            Some(e) => e.2.push((from, to)),
+            None => entries.push((s.feature, s.script, vec![(from, to)])),
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort_by_key(|e| (e.0, e.1));
+    for e in &mut entries {
+        e.2.sort();
+        e.2.dedup_by_key(|p| p.0);
+    }
+    let mut scripts: Vec<[u8; 4]> = entries.iter().map(|e| e.1).collect();
+    scripts.sort();
+    scripts.dedup();
+
+    // ScriptList: each script's default language system lists its features.
+    let mut script_list = Vec::new();
+    be16(&mut script_list, scripts.len() as i32);
+    let mut script_tables: Vec<Vec<u8>> = Vec::new();
+    for sc in &scripts {
+        let idx: Vec<usize> = entries.iter().enumerate().filter(|(_, e)| e.1 == *sc).map(|(i, _)| i).collect();
+        let mut t = Vec::new();
+        be16(&mut t, 4); // defaultLangSys, right after this header
+        be16(&mut t, 0); // no other language systems
+        be16(&mut t, 0); // lookupOrder
+        be16(&mut t, 0xFFFF); // no required feature
+        be16(&mut t, idx.len() as i32);
+        for i in idx {
+            be16(&mut t, i as i32);
+        }
+        script_tables.push(t);
+    }
+    let mut off = 2 + 6 * scripts.len();
+    for (sc, t) in scripts.iter().zip(&script_tables) {
+        script_list.extend_from_slice(sc);
+        be16(&mut script_list, off as i32);
+        off += t.len();
+    }
+    for t in &script_tables {
+        script_list.extend_from_slice(t);
+    }
+
+    // FeatureList: one feature per entry, each pointing at its own lookup.
+    let mut feature_list = Vec::new();
+    be16(&mut feature_list, entries.len() as i32);
+    let mut off = 2 + 6 * entries.len();
+    for e in &entries {
+        feature_list.extend_from_slice(&e.0);
+        be16(&mut feature_list, off as i32);
+        off += 6;
+    }
+    for i in 0..entries.len() {
+        be16(&mut feature_list, 0); // featureParams
+        be16(&mut feature_list, 1);
+        be16(&mut feature_list, i as i32);
+    }
+
+    // LookupList: type 1 (single substitution), format 2 (a substitute per covered glyph).
+    let mut lookup_tables: Vec<Vec<u8>> = Vec::new();
+    for e in &entries {
+        let n = e.2.len();
+        let mut t = Vec::new();
+        be16(&mut t, 1); // lookupType
+        be16(&mut t, 0); // lookupFlag
+        be16(&mut t, 1); // subTableCount
+        be16(&mut t, 8); // subtable offset
+        be16(&mut t, 2); // substFormat
+        be16(&mut t, (6 + 2 * n) as i32); // coverage offset
+        be16(&mut t, n as i32);
+        for (_, to) in &e.2 {
+            be16(&mut t, *to as i32);
+        }
+        be16(&mut t, 1); // coverage format 1
+        be16(&mut t, n as i32);
+        for (from, _) in &e.2 {
+            be16(&mut t, *from as i32);
+        }
+        lookup_tables.push(t);
+    }
+    let mut lookup_list = Vec::new();
+    be16(&mut lookup_list, lookup_tables.len() as i32);
+    let mut off = 2 + 2 * lookup_tables.len();
+    for t in &lookup_tables {
+        be16(&mut lookup_list, off as i32);
+        off += t.len();
+    }
+    for t in &lookup_tables {
+        lookup_list.extend_from_slice(t);
+    }
+
+    let mut out = Vec::new();
+    be16(&mut out, 1);
+    be16(&mut out, 0);
+    be16(&mut out, 10);
+    be16(&mut out, (10 + script_list.len()) as i32);
+    be16(&mut out, (10 + script_list.len() + feature_list.len()) as i32);
+    out.extend(script_list);
+    out.extend(feature_list);
+    out.extend(lookup_list);
+    Some(out)
+}
+
 /// Builds the font file for `spec`.
 pub fn build_ttf(spec: &FontSpec) -> Vec<u8> {
     // Glyph 0 is .notdef (a hollow box), glyph 1 is the space; then, per spec glyph, its layer
@@ -443,6 +567,9 @@ pub fn build_ttf(spec: &FontSpec) -> Vec<u8> {
         (*b"name", name_table(&spec.family)),
         (*b"post", post),
     ];
+    if let Some(gsub) = gsub_table(&spec.substitutions, &cmap) {
+        tables.push((*b"GSUB", gsub));
+    }
     if !base_records.is_empty() {
         let mut colr = Vec::new();
         let layer_total: usize = base_records.iter().map(|r| r.1.len()).sum();
@@ -528,6 +655,7 @@ mod tests {
             space_advance: 4,
             em_rows: EM_ROWS,
             baseline_row: BASELINE_ROW,
+            substitutions: vec![],
             glyphs: vec![
                 GlyphSpec { chars: vec!['A'], advance: 5, colour: false, layers: vec![Layer { color: 0, rects: vec![Rect { x0: 0, y0: 2, x1: 3, y1: 10 }] }] },
                 GlyphSpec {

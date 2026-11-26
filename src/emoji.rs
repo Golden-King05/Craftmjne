@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn the_colour_font_builds_and_maps_every_emoji() {
-        let spec = crate::font_gen::FontSpec { family: "Craftmjne Emoji".into(), palette: palette_rgba(), glyphs: glyph_specs(), space_advance: 4, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW };
+        let spec = crate::font_gen::FontSpec { family: "Craftmjne Emoji".into(), palette: palette_rgba(), glyphs: glyph_specs(), space_advance: 4, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW, substitutions: vec![] };
         let bytes = crate::font_gen::build_ttf(&spec);
         let face = ttf_parser::Face::parse(&bytes, 0).expect("a valid font");
         let colr = face.tables().colr.expect("COLR");

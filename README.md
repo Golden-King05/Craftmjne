@@ -1482,12 +1482,35 @@ default font that ships with Bevy is turned off, so there is no other font unles
   about 13 to 17 draws at 12, 18 to 29 at 24, and so on), so a font pixel is always a whole number of
   screen pixels. Vector fonts from packs are *not* snapped.
 - **Characters.** ASCII, the Latin-1 letters with accents (`ç`, `ñ`, `ü`...), common punctuation, `€ £ ¥`.
+- **Other scripts.** Cyrillic (Russian, Ukrainian, Belarusian, Serbian letters), Hebrew, Korean,
+  Arabic and Hindi (Devanagari) are in the same font, so they work everywhere text does, including
+  chat. Details and limits are under *Other scripts* below.
 - **Emoji.** About 340 12x12 colour emoji drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols). They are colour glyphs (COLR/CPAL) in a second built-in font used
   as a fallback, so they work anywhere text does, including chat and signs. In chat, `:name:` becomes
   the emoji (`:heart:`, `:fire:`); anything that is not a known name is left as typed. **No flags** (a
   test enforces it). Not every Unicode emoji exists: skin tones show as colour swatches, and joined
   sequences (family, keycaps) are not combined. Adding one is a row in `src/emoji/`.
+
+### Other scripts
+
+| Script | What is there | Limits |
+|---|---|---|
+| Cyrillic | all of А-я, Ё ё, Ї ї, Є є, Ґ ґ, Ў ў, І і, Ј ј | |
+| Hebrew | the 22 letters and 5 final forms | no vowel points (niqqud); right-to-left layout is the text engine's |
+| Korean | all 11,172 syllables (가-힣) plus the standalone letters (ㄱ-ㅣ) | drawn from strokes (`pixel_hangul.rs`), so they are small and plain |
+| Arabic | the letters with their joining forms (initial, medial, final, isolated), ء أ إ آ ؤ ئ ة, tatweel, ، ؛ ؟ | no lam-alef ligature (ل + ا is two joined letters), no vowel marks, no Persian/Urdu letters, no Arabic-Indic digits; letter bodies are short next to the Latin text |
+| Hindi (Devanagari) | consonants, independent vowels, vowel signs, anusvara/candrabindu/visarga, halant, nukta, danda | **no conjuncts**: क्ष, त्र, ज्ञ and other clusters show the consonants side by side with a halant mark; digits are drawn like 0-9; the letter art is a first pass and crude at this size |
+
+How they work, so a pack author knows what to expect:
+
+- Arabic joining is done by the font's own `GSUB` table (`init`/`medi`/`fina`), which `font_gen.rs`
+  writes. Each joined form is its own glyph, named by a private-use code point (U+E000 onward) that only
+  exists for the substitution.
+- Devanagari's reordering (the *i* sign goes before its consonant) is done by the text engine; the font's
+  marks have no advance and are drawn at negative x over the consonant they follow, so the font needs no
+  positioning table.
+- A pack's `fonts/` can replace or extend any of this, as above.
 
 ### Fonts in packs, and the `font` tag
 

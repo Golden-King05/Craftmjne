@@ -159,6 +159,7 @@ fn accent(kind: char) -> &'static [&'static str] {
         '\u{302}' => &[".#.", "#.#"],        // circumflex
         '\u{303}' => &[".#.#", "#.#."],      // tilde
         '\u{308}' => &["#.#"],               // diaeresis
+        '\u{306}' => &["#.#", ".#."],        // breve
         '\u{30A}' => &[".#.", "#.#", ".#."], // ring (three rows; only over capitals' two-row gap by shifting)
         _ => &[],
     }
@@ -183,21 +184,21 @@ const COMPOSED: &[(char, char, char)] = &[
 ];
 
 /// A glyph's ink: `(top cell row, width, rows of booleans)`.
-type Art = (i32, usize, Vec<Vec<bool>>);
+pub(crate) type Art = (i32, usize, Vec<Vec<bool>>);
 
-fn parse(top: i32, rows: &str) -> Art {
+pub(crate) fn parse(top: i32, rows: &str) -> Art {
     let rows: Vec<Vec<bool>> = rows.split('/').map(|r| r.chars().map(|c| c == '#').collect()).collect();
     let width = rows.iter().map(Vec::len).max().unwrap_or(0);
     (top, width, rows)
 }
 
-fn art_of(c: char) -> Option<Art> {
+pub(crate) fn art_of(c: char) -> Option<Art> {
     BASE.iter().find(|g| g.0 == c).map(|g| parse(g.1, g.2))
 }
 
 /// Puts an accent over `base`: centred over the glyph, in the two rows above its top (rows 0-1 over a
 /// capital, 2-3 over a lowercase letter). The ring is drawn one row shorter so it fits.
-fn compose(base: &Art, mark: char) -> Art {
+pub(crate) fn compose(base: &Art, mark: char) -> Art {
     let (top, width, rows) = base;
     let a = accent(mark);
     let mut out = rows.clone();
@@ -220,7 +221,7 @@ fn compose(base: &Art, mark: char) -> Art {
     (acc_top, *width, grid)
 }
 
-fn to_glyph(c: char, art: &Art) -> GlyphSpec {
+pub(crate) fn to_glyph(c: char, art: &Art) -> GlyphSpec {
     let (top, width, rows) = art;
     GlyphSpec {
         chars: vec![c],
@@ -228,6 +229,11 @@ fn to_glyph(c: char, art: &Art) -> GlyphSpec {
         colour: false,
         layers: vec![Layer { color: 0, rects: rects_from_mask(*width, rows, *top) }],
     }
+}
+
+/// The `GSUB` substitutions of the typeface (Arabic joining forms).
+pub fn substitutions() -> Vec<crate::font_gen::Substitution> {
+    crate::pixel_arabic::substitutions()
 }
 
 /// Every glyph of the typeface (the space is the font's own).
@@ -241,6 +247,7 @@ pub fn glyphs() -> Vec<GlyphSpec> {
             out.push(to_glyph(*c, &compose(&b, *mark)));
         }
     }
+    out.extend(crate::pixel_scripts::glyphs());
     // A non-breaking space is a space.
     out.push(GlyphSpec { chars: vec!['\u{A0}'], advance: SPACE, colour: false, layers: vec![Layer { color: 0, rects: vec![] }] });
     out
@@ -301,7 +308,9 @@ mod tests {
             assert!(!rects.is_empty(), "{:?} is blank", g.chars);
             for r in rects {
                 assert!(r.y0 >= 0 && r.y1 <= crate::font_gen::EM_ROWS, "{:?} leaves the cell: {r:?}", g.chars);
-                assert!(r.x0 >= 0 && r.x1 <= g.advance, "{:?} is wider than its advance: {r:?}", g.chars);
+                // Devanagari marks sit over the letter before them, so they reach left of their own origin.
+                let reach_left = if ('\u{900}'..='\u{97F}').contains(&g.chars[0]) { -6 } else { 0 };
+                assert!(r.x0 >= reach_left && r.x1 <= g.advance, "{:?} is wider than its advance: {r:?}", g.chars);
             }
         }
     }
@@ -339,7 +348,7 @@ mod tests {
 
     #[test]
     fn the_typeface_builds_a_valid_font() {
-        let spec = crate::font_gen::FontSpec { family: "Craftmjne".into(), palette: vec![], glyphs: glyphs(), space_advance: SPACE, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW };
+        let spec = crate::font_gen::FontSpec { family: "Craftmjne".into(), palette: vec![], glyphs: glyphs(), space_advance: SPACE, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW, substitutions: substitutions() };
         let bytes = crate::font_gen::build_ttf(&spec);
         let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
         for c in "Hello, World! 0123456789 àéîõü".chars() {

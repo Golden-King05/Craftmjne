@@ -3492,3 +3492,31 @@ etc.) instead of inventing a new approach:
   - A glyph defined as base + accent (`COMPOSED`) can't have a descender mark; `ç`/`Ç` are drawn by hand in `BASE`.
   - A screenshot of the preview text is the only way to see a glyph problem from here: `{}` first read as `()` until
     looked at at size 24.
+
+- **More scripts went into the one built-in font: tables for the simple ones, a stroke rasteriser for Hangul and
+  Devanagari, and a real `GSUB` for Arabic.** `pixel_scripts.rs` (Cyrillic, Hebrew; Latin lookalikes reuse the Latin
+  drawing and accented ones are letter + mark through `pixel_font::compose`), `pixel_hangul.rs` (11,172 syllables
+  built from jamo strokes in 11x12 boxes chosen by vowel shape and final consonant), `pixel_arabic.rs`,
+  `pixel_devanagari.rs`. The default font is ~3.5 MB and builds in ~65 ms in a debug build. Things that mattered:
+  - **A box too small makes distinct letters identical.** At 11 rows, ㄹ and ㅌ in a 3-row box came out pixel-for-pixel
+    the same; a probe test counting duplicate syllables named the pair. The cell is the full 12-row em
+    (`H = 12`), so the top part of a syllable with a final gets 4+ rows. `syllables_are_almost_all_visibly_
+    different` keeps the duplicate count under 2%; same idea for `consonants_are_distinct_shapes`.
+  - **Arabic needs `GSUB`, and the way to name a form without a code point is a private-use one.** `font_gen::
+    Substitution { script, feature, from, to }` is resolved through the cmap, so callers never see glyph ids;
+    `gsub_table` writes one type-1 lookup per (script, feature). Verified with `rustybuzz` (a dev-dependency,
+    already in the tree through bevy_text): shaping "بيت" must give initial/medial/final glyphs, "باب" must end the
+    connection after a right-joining alef. **Break-tested**: with no substitutions both joining tests go red.
+  - **Don't trust zero-advance marks to be positioned by the font - test what the shaper does.** The Devanagari
+    marks (ु े ं ् ...) are zero-advance glyphs drawn at negative x. `a_mark_takes_no_room_and_stays_where_it_was_
+    drawn` shapes क+mark with rustybuzz and asserts advance 0 and x_offset 0, i.e. the shaper's fallback
+    positioning does not also move them. `the_i_sign_is_put_before_its_consonant` checks the shaper's own reordering.
+    The existing "glyphs stay in the cell" test had to learn that Devanagari marks reach left of their origin.
+  - **Joining strokes live on one row (9) and run to the glyph's edge on every joining side**, so neighbouring forms
+    meet; `joining_letters_meet_in_a_continuous_line` checks every letter's initial/medial/final. Forms that don't
+    join on a side get a blank column there.
+  - **Honest limits, written down in README**: no lam-alef ligature, no tashkeel, no Persian/Urdu, no Devanagari
+    conjuncts (they need a GSUB ligature table), Devanagari digits are Latin-shaped, and the Hebrew, Arabic and
+    Devanagari art is a best-effort first pass - looked at only in a software-rendered screenshot, not by someone
+    who reads those scripts. `CRAFT_SHOT=scripts` draws a sample of every script.
+

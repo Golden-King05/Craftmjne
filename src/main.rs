@@ -242,7 +242,8 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
-                "fonts" => {
+                "fonts" | "scripts" => {
+                    let scripts = name == "scripts";
                     for e in &buttons_roots {
                         commands.entity(e).despawn();
                     }
@@ -251,7 +252,23 @@ fn ui_shot(
                         BackgroundColor(Color::srgb(0.16, 0.12, 0.09)),
                     ))
                     .with_children(|p| {
-                        for (size, line) in [
+                        let sample: &[(f32, &str)] = if scripts {
+                            &[
+                                (24.0, "Привет, мир! Съешь ещё этих мягких булок"),
+                                (24.0, "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"),
+                                (24.0, "абвгдеёжзийклмнопрстуфхцчшщъыьэюя ЇїЄєҐґ"),
+                                (24.0, "שלום עולם אבגדהוזחטיכךלמםנןסעפףצץקרשת"),
+                                (24.0, "안녕하세요 한국어 가나다라마바사 값 닭 읽 꽃"),
+                                (24.0, "ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ ㅏㅑㅓㅕㅗㅛㅜㅠㅡㅣ ㅘㅝㅢ"),
+                                (24.0, "مرحبا بالعالم السلام عليكم كيف حالك"),
+                                (24.0, "ابتثجحخدذرزسشصضطظعغفقكلمنهوي ءأإآؤئة"),
+                                (24.0, "नमस्ते दुनिया। हिन्दी भाषा कितनी सुंदर है"),
+                                (24.0, "कखगघङचछजझञटठडढणतथदधनपफबभमयरलळवशषसह"),
+                                (24.0, "का कि की कु कू कृ के कै को कौ कं कँ कः अआइईउऊऋएऐओऔ ०१२३"),
+                                (12.0, "Привет שלום 안녕하세요 مرحبا नमस्ते (twelve)"),
+                            ]
+                        } else {
+                            &[
                             (24.0, "The quick brown fox jumps over the lazy dog."),
                             (24.0, "THE QUICK BROWN FOX! 0123456789 (){}[]<>+-=*/@#$%&"),
                             (24.0, "àéîõü ÀÉÎÕÜ ñÑ çÇ ¡Hola! ¿Qué? ß æÆ øØ © € £ ~^`|_"),
@@ -259,7 +276,9 @@ fn ui_shot(
                             (24.0, "😀😃😄😁😆😅🤣😂🙂😉😊😇🥰😍🤩😘😋😛🤔😎😴😭😱😡💀👻🤖"),
                             (24.0, "❤🧡💛💚💙💜🖤⭐✨🔥💧☀☁❄⚡🌈🌳🌵🍎🍌🍉🍕🍔🍪☕🍺"),
                             (24.0, "🐶🐱🐭🐰🦊🐻🐼🐷🐸🦁🐢🐝🦋🐙🐳🔑💣🎁🏆👑💎💡🚀🏠🕐🌑🌓🌕⬆➡"),
-                        ] {
+                            ]
+                        };
+                        for (size, line) in sample.iter().copied() {
                             p.spawn((Text::new(line), TextFont { font_size: size, ..default() }, TextColor(Color::WHITE)));
                         }
                     });
