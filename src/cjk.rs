@@ -200,6 +200,16 @@ pub(crate) fn font_from(family: &str, glyphs: Vec<GlyphSpec>) -> Vec<u8> {
 
 /// Like [`font_from`], with `GSUB` single substitutions (joining forms).
 pub(crate) fn font_from_with(family: &str, glyphs: Vec<GlyphSpec>, substitutions: Vec<crate::font_gen::Substitution>) -> Vec<u8> {
+    font_from_all(family, glyphs, substitutions, vec![])
+}
+
+/// Like [`font_from_with`], with `GSUB` ligatures too (conjuncts).
+pub(crate) fn font_from_all(
+    family: &str,
+    glyphs: Vec<GlyphSpec>,
+    substitutions: Vec<crate::font_gen::Substitution>,
+    ligatures: Vec<crate::font_gen::Ligature>,
+) -> Vec<u8> {
     build_ttf(&FontSpec {
         family: family.into(),
         palette: vec![],
@@ -208,7 +218,7 @@ pub(crate) fn font_from_with(family: &str, glyphs: Vec<GlyphSpec>, substitutions
         baseline_row: BASELINE_ROW,
         space_advance: 8,
         substitutions,
-        ligatures: vec![],
+        ligatures,
     })
 }
 

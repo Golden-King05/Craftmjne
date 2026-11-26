@@ -3741,6 +3741,27 @@ etc.) instead of inventing a new approach:
   - **System fonts are a variable this does not control.** Bevy's `CosmicFontSystem` also loads the machine's
     fonts, so on a player's machine a script the game's fonts lack may be drawn by a system font (which
     may join correctly in its own style). The tests deliberately use a database with only the game's fonts.
-  - **Scripts that do not join in-game, said plainly**: Bengali, Tamil, Kannada, Malayalam, Sinhala, Gujarati,
-    Gurmukhi, Telugu, Odia, Khmer, Burmese, Tibetan and the other Unifont Indic-family scripts get letters and
-    mark placement but no conjuncts.
+  - **Scripts that do not join in-game, said plainly**: Tamil and Sinhala (visible pulli / al-lakuna is
+    their normal writing), Sundanese, Batak, Buginese and the Philippine scripts. The rest were done next (see below).
+
+- **"Make the scripts that should fit together fit together": Unifont had nothing to extract, so the forms are
+  derived, and a screenshot corrected the first derivation.** The question was whether Unifont's OTF carried the
+  conjunct rules; dumping it with fontTools showed `GSUB` is *empty* (only `thai` in GPOS), so it could not be
+  translated into `font_gen::Ligature`s. `conjuncts.rs` is a declarative table (`SCRIPTS`: script tags, feature(s),
+  virama, consonant ranges, `Kind::{Half, Below}`, optional `only` list and reph ra) plus one generic `derived()`.
+  - **Half** = consonant + virama -> the ink box squeezed to half width; **Below** = virama + consonant -> a 2x2-merged
+    quarter-size letter, zero advance, centred under the previous 16-wide letter at em row 10; **reph** = ra +
+    virama (`rphf`) -> quarter ra over the line. Registered under both the new and old script tags (`bng2`/`beng`)
+    and, for Khmer, `pref`+`blwf`+`pstf`. Derived glyphs are plane-15 private use from `0xF4000`.
+  - **Squeeze the ink, not the cell.** The first version squeezed the whole 16-pixel cell; Gujarati/Odia/Malayalam
+    letters sit narrow inside it, so the half forms came out two pixels wide. Cropping to the ink box first
+    (`trim_columns`) fixed that. Only a screenshot showed it (and showed that plain Gujarati is just as small in
+    Unifont, i.e. not a regression).
+  - **Tibetan needed no ligatures.** Its subjoined letters are code points; Unifont draws them in the *same cell*,
+    overlapping the letter, so they are only lowered (`TIBETAN_DROP`).
+  - **Tested through cosmic-text**: three characters must shape to two glyphs for every script, the virama's own
+    glyph must be gone, a word-final virama stays visible, Sinhala/Tamil stay three glyphs. Break-tested by
+    emptying `ligatures()`. HarfBuzz's Indic/Khmer/Myanmar/USE shapers all accepted plain type-4 `[C, virama]` /
+    `[virama, C]` ligatures under `half`/`blwf`; no base-finding data was needed.
+  - Not verified: how the stacks look to a reader of each script (software-rendered screenshot only), and line
+    spacing under tall stacks (subscripts reach ~6 rows below the baseline, into the 1.5 line height's slack).

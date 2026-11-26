@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::cjk::{decode, font_from_with, spec_of, specs_from, Glyph, Join};
+use crate::cjk::{decode, font_from_all, spec_of, specs_from, Glyph, Join};
 use crate::font_gen::{rects_from_mask, GlyphSpec, Layer, Substitution, BASELINE_ROW};
 use crate::mongolian::{piece, Form, Piece};
 
@@ -179,7 +179,14 @@ pub fn glyph_specs() -> Vec<GlyphSpec> {
             specs.push(spec_of(*c, g));
         }
     }
+    crate::conjuncts::lower_tibetan_subjoined(&mut specs);
+    specs.extend(crate::conjuncts::derived(&glyphs()).0);
     specs
+}
+
+/// The `GSUB` ligatures that make conjuncts (half forms, subjoined letters, reph).
+pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
+    crate::conjuncts::derived(&glyphs()).1
 }
 
 /// The `GSUB` substitutions that pick a cursive letter's form.
@@ -198,7 +205,7 @@ pub fn substitutions() -> Vec<Substitution> {
 
 /// The font file ("Craftmjne Scripts").
 pub fn font_bytes() -> Vec<u8> {
-    font_from_with("Craftmjne Scripts", glyph_specs(), substitutions())
+    font_from_all("Craftmjne Scripts", glyph_specs(), substitutions(), ligatures())
 }
 
 #[cfg(test)]

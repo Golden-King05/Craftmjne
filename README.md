@@ -1545,11 +1545,18 @@ default font that ships with Bevy is turned off, so there is no other font unles
     **Buginese (Lontara)**, **Balinese, Javanese, Sundanese, Batak**; **Yi**; **Miao (Pollard)** and Lisu;
     **Nushu**; and the zhuyin tone marks (the Bopomofo letters came with the CJK work).
   - **What is and isn't shaped, said plainly.** Letters, marks and reordering of vowel signs are all
-    there, and **Thai and Lao come out as proper clusters**. But the Unifont data has no conjunct,
-    stacked or ligature glyphs, so the Indic scripts, Khmer, Burmese, Tibetan, Javanese, Balinese and
-    the like show a consonant cluster as separate cells (virama visible), not as the joined form a
-    reader of those scripts expects; real conjunct shaping would need every ligature drawn per script
-    (Devanagari has it, hand-built, from an earlier step). Everything was judged only from software-rendered
+    there, and **Thai and Lao come out as proper clusters**. Unifont's data has no conjunct, stacked or
+    ligature glyphs (its OpenType build has no `GSUB` at all), so `conjuncts.rs` *derives* them from the
+    consonant bitmaps: **half forms** (Bengali, Gujarati, Odia, Malayalam), **subjoined letters** under the
+    letter before (Kannada, Telugu, Khmer, Burmese, Javanese, Balinese, and Gurmukhi's ha/ra/va/ya),
+    **reph** (Bengali, Gujarati, Odia, Kannada) and **Tibetan stacks** (its subjoined letters moved under
+    the letter). They are squeezed copies of the plain letters: readable and correctly placed, not the
+    calligraphic ligatures a native reader would see. Not done: Sinhala and Tamil (their visible
+    al-lakuna / pulli is normal writing; Grantha and rakaransaya conjuncts are not made), Sundanese, Batak,
+    Buginese and the Philippine scripts (no conjuncts in normal use), Bengali ya-phala and the special
+    ligature shapes of Indic scripts (e.g. Bengali ক্ষ looks like a half ka + ṣa), vowel signs under a
+    subjoined letter, and Malayalam chillus and post-base forms. `CRAFT_SHOT=conjuncts` renders samples.
+    Everything was judged only from software-rendered
     screenshots, and the sample words in the preview screens are only to exercise the shaping, not to be
     correct prose.
   - **Mongolian, joined, two ways** (`src/scripts.rs`, `src/mongolian.rs`). Mongolian, Todo, Manchu and Sibe are
@@ -1573,7 +1580,7 @@ default font that ships with Bevy is turned off, so there is no other font unles
     Mongolian through cosmic-text (the engine Bevy uses) with the game's own fonts registered, and asserts
     every letter of a word takes its initial / medial / final form rather than its isolated one; others check
     lam-alef, Devanagari conjuncts, and that mixed-script lines stay joined. `CRAFT_SHOT=joined` renders them.
-    The Indic scripts shown from Unifont (Bengali, Tamil ...) are *not* in that list: they do not form conjuncts.
+    The conjunct scripts (Bengali ... Balinese) have their own engine-level tests: three characters, two glyphs.
   - `CRAFT_SHOT=asia1`, `asia2`, `mongol` (before/after) and `joined` render samples.
 - **Emoji.** 12x12 colour emoji (about 700 drawn, the rest generated, see below) drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second

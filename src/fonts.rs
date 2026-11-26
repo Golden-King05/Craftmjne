@@ -500,6 +500,62 @@ mod tests {
         assert_eq!(after_alef[1].1, beh_alone, "beh after alef is isolated");
     }
 
+    /// The number of glyphs the engine draws `text` with.
+    fn count(fs: &mut bevy::text::cosmic_text::FontSystem, text: &str) -> usize {
+        engine_glyphs(fs, text).len()
+    }
+
+    /// (script, consonant, virama, consonant) for every script that makes conjuncts.
+    const CONJUNCT_SAMPLES: &[(&str, &str)] = &[
+        ("Bengali", "\u{995}\u{9CD}\u{9B7}"),
+        ("Gujarati", "\u{A95}\u{ACD}\u{AB7}"),
+        ("Odia", "\u{B15}\u{B4D}\u{B37}"),
+        ("Malayalam", "\u{D15}\u{D4D}\u{D37}"),
+        ("Gurmukhi (ha)", "\u{A15}\u{A4D}\u{A39}"),
+        ("Kannada", "\u{C95}\u{CCD}\u{CB7}"),
+        ("Telugu", "\u{C15}\u{C4D}\u{C37}"),
+        ("Khmer", "\u{1780}\u{17D2}\u{1781}"),
+        ("Khmer (ro)", "\u{1780}\u{17D2}\u{179A}"),
+        ("Burmese", "\u{1000}\u{1039}\u{1001}"),
+        ("Javanese", "\u{A98F}\u{A9C0}\u{A990}"),
+        ("Balinese", "\u{1B13}\u{1B44}\u{1B14}"),
+    ];
+
+    #[test]
+    fn consonant_virama_consonant_forms_one_conjunct_in_the_real_text_engine() {
+        let mut fs = engine();
+        for (name, text) in CONJUNCT_SAMPLES {
+            // Three characters, two glyphs: the virama is absorbed into a half form or a subjoined letter.
+            assert_eq!(count(&mut fs, text), 2, "{name}: {text:?} did not form a conjunct");
+        }
+    }
+
+    #[test]
+    fn a_virama_with_nothing_after_it_stays_visible_and_unjoined_scripts_are_untouched() {
+        let mut fs = engine();
+        // A word-final virama (hasanta, halant) is the sign itself, not a conjunct.
+        assert_eq!(count(&mut fs, "\u{995}\u{9CD}"), 2, "Bengali final hasanta");
+        assert_eq!(count(&mut fs, "\u{C95}\u{CCD}"), 2, "Kannada final halant");
+        // Sinhala and Tamil write their virama visibly: three characters stay three glyphs.
+        assert_eq!(count(&mut fs, "\u{D9A}\u{DCA}\u{DAF}"), 3, "Sinhala");
+        assert_eq!(count(&mut fs, "\u{B95}\u{BCD}\u{BB7}"), 3, "Tamil");
+    }
+
+    #[test]
+    fn a_conjunct_differs_from_the_same_letters_without_a_virama() {
+        let mut fs = engine();
+        for (name, text) in CONJUNCT_SAMPLES {
+            let chars: Vec<char> = text.chars().collect();
+            let joined: Vec<u16> = engine_glyphs(&mut fs, text).iter().map(|g| g.2).collect();
+            let second = engine_glyphs(&mut fs, &chars[2].to_string())[0].2;
+            // One of the two glyphs is the plain second letter (half form) or the whole thing is a new glyph
+            // standing for virama + letter (subjoined): either way the virama's own glyph is gone.
+            let virama = engine_glyphs(&mut fs, &chars[1].to_string())[0].2;
+            assert!(!joined.contains(&virama), "{name}: the virama is still drawn");
+            let _ = second;
+        }
+    }
+
     #[test]
     fn joined_text_stays_joined_when_latin_and_other_scripts_are_mixed_in() {
         let mut fs = engine();

@@ -246,7 +246,7 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
-                "fonts" | "scripts" | "cjk" | "natives" | "world" | "asia1" | "asia2" | "mongol" | "joined" => {
+                "fonts" | "scripts" | "cjk" | "natives" | "world" | "asia1" | "asia2" | "mongol" | "joined" | "conjuncts" => {
                     let scripts = name == "scripts";
                     let cjk = name == "cjk";
                     let natives = name == "natives";
@@ -255,6 +255,7 @@ fn ui_shot(
                     let asia2 = name == "asia2";
                     let mongol = name == "mongol";
                     let joined = name == "joined";
+                    let conjuncts = name == "conjuncts";
                     for e in &buttons_roots {
                         commands.entity(e).despawn();
                     }
@@ -274,6 +275,15 @@ fn ui_shot(
                                 (24.0, "Hindi:   क्षत्रिय ज्ञान श्री प्रेम धर्म कर्म क्या"),
                                 (24.0, "Mixed: hello مرحبا ܣܘܪܝܝܐ world ᠮᠣᠩᠭᠣᠯ 123"),
                                 (12.0, "مرحبا ܣܘܪܝܝܐ ߒߞߏ ࡌࡀࡍ ᠮᠣᠩᠭᠣᠯ क्षत्रिय (twelve)"),
+                            ]
+                        } else if conjuncts {
+                            &[
+                                (24.0, "Bengali: ক্ষ ক্ত স্ত র্ক  Gujarati: ક્ષ ત્ર ર્ક"),
+                                (24.0, "Plain Gujarati: ક ષ ત ર  કષ તર"),
+                                (24.0, "Odia: କ୍ଷ ଷ୍ଟ  Malayalam: ക്ഷ ന്ത  Gurmukhi: ਸ੍ਹ ਪ੍ਰ"),
+                                (24.0, "Kannada: ಕ್ಷ ಸ್ತ ರ್ಕ  Telugu: క్ష స్త ప్ర"),
+                                (24.0, "Khmer: ក្ខ ស្ត ក្រ ស្ថាន  Burmese: က္ခ ပ္ပ ဗုဒ္ဓ"),
+                                (24.0, "Javanese: ꦏ꧀ꦐ  Balinese: ᬓ᭄ᬔ  Tibetan: ཀྐ སྒ བྲ"),
                             ]
                         } else if mongol {
                             &[

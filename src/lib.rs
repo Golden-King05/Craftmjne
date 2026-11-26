@@ -8,6 +8,7 @@ pub mod block_models;
 pub mod blocks;
 pub mod chat;
 pub mod cjk;
+pub mod conjuncts;
 pub mod mongolian;
 pub mod scripts;
 pub mod syllabics;
