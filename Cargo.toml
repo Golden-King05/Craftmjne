@@ -9,9 +9,8 @@ description = "A well-optimized, extensible voxel engine / Minecraft-style game 
 license = "MIT"
 
 [dependencies]
-# Audio (bevy_audio) and native Wayland features are off
-# so the project builds without ALSA/libwayland system headers; add them
-# back when you need them ("bevy_audio", "vorbis", "wayland"). Gamepads (bevy_gilrs) are
+# Audio is on and needs libasound2-dev on Linux. Native Wayland is off
+# so the project builds without libwayland headers; add it back when you need it ("wayland"). Gamepads (bevy_gilrs) are
 # on and need libudev-dev on Linux.
 # The X11 backend also covers Wayland desktops via XWayland.
 bevy = { version = "0.16", default-features = false, features = [
@@ -19,6 +18,9 @@ bevy = { version = "0.16", default-features = false, features = [
   "async_executor",
   "multi_threaded",
   "bevy_asset",
+  "bevy_audio", # sound (sound.rs); needs libasound2-dev to build on Linux
+  "vorbis",     # .ogg files in resource packs
+  "wav",        # .wav files, and the synthesised default sounds
   "bevy_color",
   "bevy_gilrs", # controllers (needs libudev-dev to build on Linux)
   "bevy_core_pipeline",

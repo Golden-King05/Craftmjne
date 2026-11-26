@@ -1,4 +1,5 @@
 {
+  "sound": "wood",
   "id": "crafting_bench",
   "name": "Crafting Bench",
   "hardness": 1.5,

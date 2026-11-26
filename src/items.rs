@@ -474,6 +474,7 @@ fn pick_up_items(
     mut inventory: ResMut<Inventory>,
     players: Query<&Player>,
     mut items: Query<(Entity, &mut DroppedItem)>,
+    mut sounds: EventWriter<crate::sound::SoundEvent>,
 ) {
     let Ok(player) = players.single() else { return };
     if death.open || !player.spawned {
@@ -485,6 +486,9 @@ fn pick_up_items(
         }
         let max = registry.max_stack(item.stack.id);
         let left = give(&mut hotbar.slots, &mut inventory.slots, item.stack, max);
+        if left != item.stack.count {
+            sounds.write(crate::sound::SoundEvent::at("item.pickup", item.pos));
+        }
         if left == 0 {
             commands.entity(entity).despawn();
         } else if left != item.stack.count {
@@ -598,6 +602,7 @@ pub struct ItemsPlugin;
 impl Plugin for ItemsPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<SpawnDrop>()
+            .add_event::<crate::sound::SoundEvent>()
             .add_event::<SpawnProjectile>()
             .add_event::<ProjectileHit>()
             .init_resource::<LoadedItems>()

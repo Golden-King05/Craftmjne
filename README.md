@@ -183,8 +183,8 @@ edit either. Both work at the same time, so you can switch between them mid-game
 - Not done yet: sticks move at full speed (no analog walking), and there's no choice of
   which controller when several are plugged in (they act as one).
 
-Building on Linux needs `libudev-dev` (the controller backend); the release and dev-build
-workflows install it.
+Building on Linux needs `libudev-dev` (the controller backend) and `libasound2-dev` (sound);
+the release and dev-build workflows install them.
 
 ### Rebinding controls
 
@@ -1381,6 +1381,89 @@ On disk, an edit now saves the cell's whole state word (`SAVE_FORMAT` 7); an old
 world's edits, which only had an axis, still load. Fluid levels are still saved by
 the fluid scan.
 
+## Resource packs
+
+A resource pack is a visual and audio layer: textures, block models and sounds. It can change how
+anything *looks and sounds*, never how it *plays*. Two kinds:
+
+- **A player's pack** is a folder in `resourcepacks/` next to the game (an optional `pack.json`
+  gives it a `name` and `description`). Turn packs on, off and reorder them in **Settings > Packs**;
+  the top of the list wins. It can retexture any block, replace any block's model, replace any
+  sound and re-skin the menus.
+- **A mod's pack** is the `resourcepack/` folder at the top of the mod. It belongs to the mod: it
+  loads when the mod is enabled in a world and can't be switched separately. It is now the **only**
+  place a mod keeps textures, models and sounds (the old `textures/`, `models/`, `sounds/` folders
+  at a mod's top level are no longer read, and the Mods screen says so).
+
+```text
+<pack>/
+  textures/blocks/<name>.png   block tiles
+  textures/gui/<element>.png   menus (see textures/gui/README.md)
+  textures/sky/<name>.png      sun and moon
+  models/blocks/<block>.json   how a block is drawn
+  sounds/<event path>.ogg|.wav sounds
+```
+
+**Order.** Lowest to highest: the game, each of the world's mods (load order), then the player's
+packs. The highest layer holding a file wins, so a player's pack can retexture even a mod's art.
+**Names:** in the game's folder and in a player's pack a plain name is the core game's (`dirt`) and
+`<mod id>/<name>` is a mod's; inside a mod's pack a plain name is the mod's own and
+`craftmjne/dirt` re-skins vanilla. Block art, models and sounds change when you next open a world
+(a pack that changed is rebuilt on entry); menu art is read at startup.
+
+### Block models
+
+`models/blocks/<block>.json`:
+
+```json
+{
+  "boxes": [
+    { "from": [0, 0, 0], "to": [16, 8, 16], "textures": { "all": "stone", "top": "stone_top" } },
+    { "from": [6, 8, 6], "to": [10, 14, 10], "textures": { "side": "planks" } }
+  ],
+  "collision": "block"
+}
+```
+
+Boxes are in sixteenths of the block's own cell. A face with no texture isn't drawn. A face's texture
+is `east`/`west`/`top`/`bottom`/`south`/`north`, else `side` (the four sides), else `all`. Each face
+shows the part of its texture matching where it sits in the block (the lower half of a slab shows the
+lower half of the side texture). A model with up to 64 boxes is fine; a broken one is skipped with a
+log line and the block keeps its normal look.
+
+**A model is only a picture.** The block still collides, mines and is targeted as whatever its own
+definition says - make a full block *look* like a half block and you still bump into a full block. One
+exception: a model in a **mod's** pack may say `"collision": "model"`, and then its boxes *are* the
+block's collision and hitbox (you walk over the empty half; the outline and the ray follow the boxes).
+The highest mod pack with a model for the block decides; a player's pack can redraw the block but never
+move its collision. Lighting, what blocks light, and everything else physical stays with the block
+definition. Neighbours still hide faces against a model that fills its whole cell, so a plain
+retextured cube costs nothing.
+
+Limits, on purpose for now: inventory icons and dropped items use the block's textures rather than the
+model, models take no biome tint, thrown items and the climb assist still treat a model block as a full
+cell, and a model always faces the same way (blocks have no yaw).
+
+## Sound
+
+Every sound is an *event*: `block.<group>.break|place|step`, `item.pickup`, `entity.hit`,
+`player.hurt`, `ui.click`. A block picks its group with a `sound` tag (`stone`, `dirt`, `grass`,
+`wood`, `sand`, `gravel`, `glass`, `snow`, `water`; the default is `stone`, and a group nobody has
+sounds for plays `stone`'s). Breaking and placing play at the block; footsteps follow the block under
+your feet every 1.8 blocks; taking damage, picking things up and clicking buttons play their own.
+
+The game ships **no audio files**: every default sound is synthesised at startup (seeded noise shaped
+per group, three variants each) in `sound.rs`. A pack replaces any of them by putting a file at the
+event's path under its `sounds/` folder - `sounds/block/stone/break.ogg` or `.wav`; several variants
+are `break1.ogg`, `break2.ogg` and so on (the highest layer with any file for an event replaces the
+lower layers' completely). Sound paths are not namespaced - the event names are one shared vocabulary -
+so a mod's pack overrides vanilla just by providing the same path, and a player's pack outranks both.
+A file that isn't really WAV or Ogg is skipped with a log line and the default plays.
+
+**Settings > Sound** has four sliders (master, blocks, player and items, menus), saved per launcher
+instance in `sound.json`. A sound at a position fades out between 4 and 32 blocks from you. On a
+machine with no sound device the game runs silently.
+
 ## Mods
 
 A mod is a folder of data in the game's `mods/` folder (next to the executable;
@@ -1397,7 +1480,7 @@ mods/any_folder_name/
   tiers/*.json        tool tiers (material, mining speed, damage)
   rarities/*.json     what a tool's quality is called: id, name, min percent, colour
   keybinds/*.json     controls added to Settings > Controls > Keybinds (see below)
-  textures/blocks/*.png
+  resourcepack/       the mod's textures, models and sounds (see Resource packs above)
 ```
 
 [`docs/example-mod/`](docs/example-mod) is a complete working one (a test keeps it
@@ -1468,8 +1551,10 @@ only ever read, so taking a mod off puts everything back exactly as it was:
   to `null` goes back to its default. A mod can patch another mod's blocks the same
   way (`other_mod:granite`) if it loads after it.
 - **Replace** a recipe with `"replaces": "craftmjne:planks"` in the new recipe file.
-- **Re-skin** a core block with `textures/blocks/craftmjne/dirt.png`. A mod's own
-  textures are plain `textures/blocks/granite.png`.
+- **Re-skin** a core block with `resourcepack/textures/blocks/craftmjne/dirt.png`. A mod's own
+  textures are plain `resourcepack/textures/blocks/granite.png`. **Re-model** one with
+  `resourcepack/models/blocks/craftmjne/dirt.json`; add `"collision": "model"` there to make the
+  new shape the real collision and hitbox.
 
 With several mods, later ones (by folder name) are laid over earlier ones.
 

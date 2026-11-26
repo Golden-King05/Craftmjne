@@ -1,4 +1,5 @@
 {
+  "sound": "grass",
   "id": "leaves",
   "name": "Leaves",
   "transparent": "partial",

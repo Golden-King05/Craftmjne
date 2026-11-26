@@ -4,7 +4,7 @@
 //! **Two kinds.**
 //! - *A player's pack* is a folder in `resourcepacks/` beside the game (`pack.json` optional:
 //!   `{"name": "...", "description": "..."}`). The player turns packs on and off and orders them
-//!   in Settings > Resource Packs; the top of the list wins. It can retexture any block,
+//!   in Settings > Packs; the top of the list wins. It can retexture any block,
 //!   replace any block's model, replace any sound, and re-skin the menus. It *cannot* change a
 //!   block's collision or what you can mine - a model from a player's pack is only a picture.
 //! - *A mod's pack* is the `resourcepack/` folder at the top of a mod. It is part of the mod:
@@ -18,7 +18,7 @@
 //! textures/gui/<element>.png      menus (see textures/gui/README.md); gui/glyphs/ for buttons
 //! textures/sky/<name>.png         sun, moon
 //! models/blocks/<block>.json      a block's look (see models.rs)
-//! sounds/<event path>.ogg|.wav    sounds (see sounds.rs)
+//! sounds/<event path>.ogg|.wav    sounds (see sound.rs)
 //! ```
 //! **Whose name is whose.** In the game's folder and in a player's pack a plain name is the core
 //! game's (`dirt`) and `<ns>/<name>` is a mod's (`granite_pack/granite`). In a mod's pack a

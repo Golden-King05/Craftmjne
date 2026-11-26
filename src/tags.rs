@@ -92,6 +92,7 @@ pub const DEFINITION_TAGS: &[DefinitionTag] = &[
     tag("drops", Block, Mining, "What breaking it yields."),
     tag("tool", Both, Mining, "Blocks: the tool kind that mines it. Items: makes the item a tool ({kind, tier})."),
     tag("requires_tool", Block, Mining, "Without the right tool it drops nothing."),
+    tag("sound", Block, Mining, "Sound group the block makes: stone, dirt, grass, wood, sand, gravel, glass, snow, water (or a mod's own)."),
     tag("tool_response", Block, Mining, "How much of a tool's speed-up this block takes (0..1)."),
     tag("requires_crouch", Block, Mining, "Only mined while crouching."),
     tag("hittable", Block, Combat, "A plain left click hits it instead of mining it."),

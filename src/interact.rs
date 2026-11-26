@@ -435,7 +435,7 @@ fn interact(
     act: Actions,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut map: ResMut<ChunkMap>,
-    content: Content,
+    mut content: Content,
     mode: Res<GameMode>,
     mut hotbar: ResMut<Hotbar>,
     mut target: ResMut<Target>,
@@ -541,6 +541,8 @@ fn interact(
                 if let Some(prev) = map.set_block_keep_level(hit.pos, after) {
                     block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev });
                     break_partner(&mut map, registry, hit.pos, prev, &mut block_events);
+                    let ev = crate::sound::resolve_event(&content.sound_set, &registry.def(aimed).sound, "break");
+                    content.sounds.write(crate::sound::SoundEvent::at(&ev, hit.pos.as_vec3() + Vec3::splat(0.5)));
                 }
             }
             timers.break_t = ACTION_REPEAT;
@@ -559,6 +561,8 @@ fn interact(
             if let Some(prev) = map.set_block_keep_level(hit.pos, after) {
                 block_events.write(BlockSetEvent { pos: hit.pos, id: after, prev });
                 break_partner(&mut map, registry, hit.pos, prev, &mut block_events);
+                let ev = crate::sound::resolve_event(&content.sound_set, &registry.def(aimed).sound, "break");
+                content.sounds.write(crate::sound::SoundEvent::at(&ev, hit.pos.as_vec3() + Vec3::splat(0.5)));
                 timers.breaks = timers.breaks.wrapping_add(1);
                 if harvests(def, in_hand) {
                     if let Some(stack) = content.items.drop_of(registry, prev, drop_roll(hit.pos, timers.breaks)) {
@@ -621,6 +625,8 @@ fn interact(
                         map.set_axis_raw(place_pos, axis_from_normal(hit.normal));
                     }
                     block_events.write(BlockSetEvent { pos: place_pos, id, prev });
+                    let ev = crate::sound::resolve_event(&content.sound_set, &registry.def(id).sound, "place");
+                    content.sounds.write(crate::sound::SoundEvent::at(&ev, place_pos.as_vec3() + Vec3::splat(0.5)));
                     // Survival consumes from the stack (clearing the slot
                     // once it's empty); Creative's stacks never deplete -
                     // its "free items" already come from being able to
@@ -692,6 +698,8 @@ pub struct Content<'w> {
     pub items: Res<'w, ItemRegistry>,
     pub book: Res<'w, RecipeBook>,
     pub tables: Option<Res<'w, BlockTables>>,
+    pub sounds: EventWriter<'w, crate::sound::SoundEvent>,
+    pub sound_set: Res<'w, crate::sound::SoundSet>,
 }
 
 /// A number in `0..1` for a block's drop chance, different for every break
@@ -803,6 +811,8 @@ pub struct InteractPlugin;
 impl Plugin for InteractPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Target>()
+            .add_event::<crate::sound::SoundEvent>()
+            .init_resource::<crate::sound::SoundSet>()
             .init_resource::<Hotbar>()
             .init_resource::<Mining>()
             .init_resource::<CrackOverlay>()

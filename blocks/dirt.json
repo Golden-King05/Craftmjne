@@ -1,4 +1,5 @@
 {
+  "sound": "dirt",
   "id": "dirt",
   "name": "Dirt",
   "hardness": 0.5,

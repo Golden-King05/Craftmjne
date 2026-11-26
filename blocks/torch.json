@@ -1,4 +1,5 @@
 {
+  "sound": "wood",
   "id": "torch",
   "name": "Torch",
   "light": {

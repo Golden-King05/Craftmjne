@@ -830,6 +830,8 @@ pub struct BlockDef {
     /// (dirt, gravel) takes only part, so even a great shovel needs real
     /// time to move a block of it.
     pub tool_response: f32,
+    /// Which sound group this block makes (`stone`, `dirt`, `grass`, ... - see `sound.rs`).
+    pub sound: String,
     /// Only mined while crouching (Shift held): a plain left click does
     /// nothing to it, so that click stays free for something else (hitting
     /// a dummy, later). Applies in Creative too.
@@ -938,6 +940,7 @@ impl Default for BlockDef {
             tool: None,
             requires_tool: false,
             tool_response: 1.0,
+            sound: crate::sound::DEFAULT_GROUP.to_string(),
             requires_crouch: false,
             hittable: false,
             attack_cooldown: DEFAULT_ATTACK_COOLDOWN,
@@ -1038,6 +1041,8 @@ pub(crate) struct BlockFile {
     requires_tool: bool,
     tool_response: Option<f32>,
     #[serde(default)]
+    sound: Option<String>,
+    #[serde(default)]
     requires_crouch: bool,
     #[serde(default)]
     hittable: bool,
@@ -1126,6 +1131,7 @@ impl BlockFile {
             tool: self.tool,
             requires_tool: self.requires_tool,
             tool_response: self.tool_response.unwrap_or(1.0).clamp(0.0, 1.0),
+            sound: self.sound.unwrap_or_else(|| crate::sound::DEFAULT_GROUP.to_string()),
             requires_crouch: self.requires_crouch,
             hittable: self.hittable,
             attack_cooldown: self.attack_cooldown.filter(|c| *c > 0.0).unwrap_or(DEFAULT_ATTACK_COOLDOWN),

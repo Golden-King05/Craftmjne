@@ -103,6 +103,8 @@ pub struct Content {
     pub missing_textures: Vec<String>,
     /// Pack models that couldn't be used (and why), for the log and the pack's author.
     pub model_notes: Vec<String>,
+    /// Every sound, from the defaults and the packs.
+    pub sounds: crate::sound::SoundSet,
 }
 
 /// Builds content from `paths`. Panics, naming the file, on malformed content,
@@ -146,7 +148,9 @@ pub fn build_content(paths: &ContentPaths) -> Content {
     let visual = models.visual.iter().map(|(id, m)| (*id, compile_model(m, &atlas.indices))).collect();
     let collision = models.collision.iter().map(|(id, m)| (*id, collision_boxes(m))).collect();
     Arc::get_mut(&mut tables).expect("the tables aren't shared yet").apply_models(visual, collision);
-    Content { registry, items, recipes, atlas, icons, tables, texture_status, missing_textures, model_notes: models.notes }
+    let groups: Vec<String> = registry.defs.iter().map(|d| d.sound.clone()).collect();
+    let sounds = crate::sound::build_sound_set(&paths.sounds(), &groups);
+    Content { registry, items, recipes, atlas, icons, tables, texture_status, missing_textures, model_notes: models.notes, sounds }
 }
 
 /// [`build_content`], reporting a problem as an `Err` instead of panicking - for

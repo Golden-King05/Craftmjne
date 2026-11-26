@@ -1,4 +1,5 @@
 {
+  "sound": "gravel",
   "id": "gravel",
   "name": "Gravel",
   "hardness": 1.0,

@@ -1,4 +1,5 @@
 {
+  "sound": "water",
   "id": "water",
   "name": "Water",
   "transparent": "full",

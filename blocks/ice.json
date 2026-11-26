@@ -1,4 +1,5 @@
 {
+  "sound": "glass",
   "id": "ice",
   "name": "Ice",
   "transparent": "partial",

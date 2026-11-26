@@ -970,6 +970,10 @@ pub fn install_content(commands: &mut Commands, content: Content, texture_report
     for note in &content.model_notes {
         warn!("Resource pack model skipped: {note}");
     }
+    for note in &content.sounds.notes {
+        warn!("Resource pack sound skipped: {note}");
+    }
+    commands.insert_resource(content.sounds);
     texture_report.extend(content.texture_status);
     texture_report.set_missing(content.missing_textures);
     commands.insert_resource(content.registry);

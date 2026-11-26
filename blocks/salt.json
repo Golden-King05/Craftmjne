@@ -1,4 +1,5 @@
 {
+  "sound": "sand",
   "id": "salt",
   "name": "Salt",
   "hardness": 0.5,

@@ -1,4 +1,5 @@
 {
+  "sound": "snow",
   "id": "snow",
   "name": "Snow",
   "hardness": 0.2,

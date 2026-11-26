@@ -3394,3 +3394,32 @@ etc.) instead of inventing a new approach:
   another mod's) - for the keyboard either; mods only add controls. It would need a priority rule
   between mods and a decision about players who never customised that control (they'd silently get the
   new key), so it was left as a question rather than guessed at.
+
+- **Resource packs are a stack of layers, and "which pack decides" is a different question for looks than for
+  physics.** `packs.rs`: game (bottom) < each mod's `resourcepack/` (load order) < the player's enabled packs
+  (`resourcepacks/`, top of the Settings > Packs list wins). A mod's art lives *only* in its `resourcepack/`
+  (old top-level `textures/ models/ sounds/` aren't read; `legacy_layout_note` warns). Name rule per layer
+  (`KindDir::extends`/`file_in`): game and player packs - plain = core, `ns/name` = a mod's; a mod's pack - plain =
+  its own, `craftmjne/name` = vanilla. Models (`models.rs`) are boxes in sixteenths with auto-UVs pinned to block
+  space (`face_uv`; the first version had the bottom face mirrored and only the planned agreement test with the
+  mesher's corner table caught it). **A model is a picture**: `Tables::collision_boxes` is filled only from a
+  game/mod pack model with `"collision": "model"` (`may_change_collision`), never from a player pack, even when
+  the player's pack draws the block. Culling uses a separate `Tables::occludes` (= opaque, but a model must fill
+  its cell to count) so a half-block model doesn't punch a hole in the wall beside it. Collision consumers: the
+  player (`ChunkMap::collider_at` -> `Collider::{None,Full,Boxes}`, boxes join the entity AABBs in `move_axis`)
+  and targeting (`interact::raycast_voxel_with` + `ray_boxes`; a ray passes a slab's empty half and carries on).
+  Items, projectiles, `surface_y`, climb assist still use cell-level `is_solid` - known gap. Break-tested: ignoring
+  `Boxes` in `move_axis` turns `a_model_collision_box_replaces_the_blocks_full_cell` red ("stood at 0.001").
+  Pack/mod selection is part of what a world's content depends on (`LoadedContent.packs`), so changing it rebuilds
+  on the next world entry; GUI/glyph skins are built once at startup, so those need a restart.
+- **Sound is data plus synthesis; the engine ships no audio files.** `sound.rs`: events are names
+  (`block.<group>.break|place|step`, `item.pickup`, ...); `Block.sound` (the `sound` tag) is the group;
+  `synthesize` makes seeded, deterministic defaults (3 variants) encoded to in-memory WAV, `build_sound_set`
+  replaces an event's clips with the highest pack layer's files (`path.ext`, `path1..9.ext`, .ogg/.wav, magic-byte
+  checked so a mislabelled file is skipped with a note, not handed to the audio thread). `Content.sounds` ->
+  `SoundSet` resource -> `SoundBank` (handles, rebuilt when the set changes). Sound paths are *not* namespaced.
+  Senders write `SoundEvent`; `interact` (break/place, via the `Content` SystemParam - it was at the 16-param
+  limit), `pick_up_items`, and `sound.rs`'s own footsteps/damage/hurt/ui-click systems. Volumes are percent ints
+  (`SoundOptions`, saved `sound.json` per instance) so the struct stays `Eq`. Building on Linux needs
+  `libasound2-dev` (both workflows install it). Not verified from here: actual audible output (no sound device
+  in this environment) - tests cover synthesis, WAV validity, pack lookup/priority and volume maths.

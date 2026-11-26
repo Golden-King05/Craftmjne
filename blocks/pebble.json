@@ -1,4 +1,5 @@
 {
+  "sound": "gravel",
   "id": "pebble",
   "name": "Pebble",
   "shape": "floor",

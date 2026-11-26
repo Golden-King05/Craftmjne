@@ -45,6 +45,7 @@ pub mod shelf;
 pub mod settings;
 pub mod sky;
 pub mod snapshot;
+pub mod sound;
 pub mod state;
 pub mod tags;
 pub mod states;

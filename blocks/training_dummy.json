@@ -1,4 +1,5 @@
 {
+  "sound": "wood",
   "id": "training_dummy",
   "name": "Training Dummy",
   "shape": "model",

@@ -659,6 +659,25 @@ impl SaveStore {
         fs::rename(&temp, path)
     }
 
+    pub fn sound_options_path(&self) -> PathBuf {
+        self.keybinds_path().with_file_name("sound.json")
+    }
+
+    /// Volume sliders, per launcher instance. Missing or unreadable reads as full volume.
+    pub fn load_sound_options(&self) -> crate::sound::SoundOptions {
+        fs::read_to_string(self.sound_options_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    pub fn save_sound_options(&self, options: &crate::sound::SoundOptions) -> io::Result<()> {
+        let path = self.sound_options_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string_pretty(options).map_err(io::Error::other)?)?;
+        fs::rename(&temp, path)
+    }
+
     pub fn pack_selection_path(&self) -> PathBuf {
         self.keybinds_path().with_file_name("resourcepacks.json")
     }
