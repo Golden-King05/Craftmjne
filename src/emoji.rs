@@ -7,9 +7,8 @@
 //! - **generated**: colour circles and squares, clock faces, moon phases and arrows come from rules.
 //!
 //! `fonts.rs` turns the set into a colour font (`font_gen`), and the chat turns `:shortcode:` into the
-//! character. Flags are not included. Sequences that need a ligature (skin tones, joined people, keycaps)
-//! are not drawn either: the font has no substitution tables, so each part shows on its own, and the
-//! joiners themselves take no room.
+//! character. Flags are drawn by `flags.rs`. Sequences (flags, keycaps, toned people) are `GSUB` ligatures,
+//! written by `font_gen`; the joiners themselves take no room.
 //!
 //! The set is data: adding an emoji is one table row.
 
@@ -17,6 +16,7 @@ use crate::font_gen::{rects_from_mask, GlyphSpec, Layer};
 
 mod drawn;
 mod faces;
+mod flags;
 mod generated;
 
 pub const SIZE: usize = 12;
@@ -154,10 +154,12 @@ pub struct Emoji {
     pub name: String,
     pub chars: Vec<char>,
     pub grid: Grid,
+    /// Character sequences that a ligature turns into this glyph (flags, keycaps, toned people ...).
+    pub sequences: Vec<Vec<char>>,
 }
 
 pub(crate) fn emoji(name: &str, chars: &str, grid: Grid) -> Emoji {
-    Emoji { name: name.to_string(), chars: chars.chars().collect(), grid }
+    Emoji { name: name.to_string(), chars: chars.chars().collect(), grid, sequences: Vec::new() }
 }
 
 /// Every emoji, drawn, composed and generated.
@@ -166,6 +168,7 @@ pub fn all() -> Vec<Emoji> {
     out.extend(faces::all());
     out.extend(drawn::all());
     out.extend(generated::all());
+    out.extend(flags::all());
     // The first drawing of a character wins; a name is unique.
     let mut seen_chars = std::collections::HashSet::new();
     let mut seen_names = std::collections::HashSet::new();
@@ -178,6 +181,14 @@ pub fn all() -> Vec<Emoji> {
 
 /// The characters that take no room: variation selectors and the zero-width joiner.
 pub const ZERO_WIDTH: &[char] = &['\u{FE0F}', '\u{FE0E}', '\u{200D}', '\u{20E3}'];
+
+/// Every character that takes no room: the joiners above and the tag letters of subdivision flags
+/// (`U+E0061..=U+E007A`, `U+E007F`). Each gets its own glyph so a ligature can tell them apart.
+pub fn joiners() -> Vec<char> {
+    let mut v: Vec<char> = ZERO_WIDTH.to_vec();
+    v.extend(('\u{E0061}'..='\u{E007A}').chain(['\u{E007F}']));
+    v
+}
 
 /// The font glyphs for the set (colour layers by palette index).
 pub fn glyph_specs() -> Vec<GlyphSpec> {
@@ -195,24 +206,47 @@ pub fn glyph_specs() -> Vec<GlyphSpec> {
             GlyphSpec { chars: e.chars.clone(), advance: ADVANCE, layers, colour: true }
         })
         .collect();
-    specs.push(GlyphSpec { chars: ZERO_WIDTH.to_vec(), advance: 0, layers: vec![Layer { color: 0, rects: vec![] }], colour: false });
+    for c in joiners() {
+        specs.push(GlyphSpec { chars: vec![c], advance: 0, layers: vec![Layer { color: 0, rects: vec![] }], colour: false });
+    }
     specs
+}
+
+/// The `ccmp` ligatures that turn sequences (flags, keycaps, toned people) into their glyphs.
+pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
+    let mut out = Vec::new();
+    for e in all() {
+        for seq in &e.sequences {
+            out.push(crate::font_gen::Ligature { script: *b"DFLT", feature: *b"ccmp", components: seq.clone(), to: e.chars[0] });
+        }
+    }
+    out
 }
 
 pub fn palette_rgba() -> Vec<[u8; 4]> {
     PALETTE.iter().map(|(_, c)| *c).collect()
 }
 
-/// `(shortcode, character)` for every emoji, for `:smile:` in chat.
-pub fn shortcodes() -> Vec<(String, char)> {
-    all().into_iter().filter_map(|e| e.chars.first().map(|c| (e.name, *c))).collect()
+/// `(shortcode, text)` for every emoji, for `:smile:` in chat. A flag's text is its two
+/// regional-indicator letters (or tag sequence); the font turns those into the flag.
+pub fn shortcodes() -> Vec<(String, String)> {
+    all()
+        .into_iter()
+        .filter_map(|e| {
+            let text: String = match e.sequences.first() {
+                Some(seq) => seq.iter().collect(),
+                None => e.chars.first()?.to_string(),
+            };
+            Some((e.name, text))
+        })
+        .collect()
 }
 
 /// Replaces `:name:` with the emoji it names, leaving anything else alone (so `:)` or a lone colon
 /// stay as typed).
 pub fn expand_shortcodes(text: &str) -> String {
     thread_local! {
-        static MAP: std::collections::HashMap<String, char> = shortcodes().into_iter().collect();
+        static MAP: std::collections::HashMap<String, String> = shortcodes().into_iter().collect();
     }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -221,8 +255,8 @@ pub fn expand_shortcodes(text: &str) -> String {
         let after = &rest[start + 1..];
         if let Some(end) = after.find(':') {
             let name = &after[..end];
-            if let Some(c) = MAP.with(|m| m.get(name).copied()) {
-                out.push(c);
+            if let Some(c) = MAP.with(|m| m.get(name).cloned()) {
+                out.push_str(&c);
                 rest = &after[end + 1..];
                 continue;
             }
@@ -293,18 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn flags_are_not_part_of_the_set() {
-        for e in all() {
-            for c in &e.chars {
-                assert!(!('\u{1F1E6}'..='\u{1F1FF}').contains(c), "{} is a regional indicator (flag)", e.name);
-                assert!(*c != '\u{1F3F4}' && *c != '\u{1F3C1}' && *c != '\u{1F6A9}' && *c != '\u{1F38C}', "{} is a flag", e.name);
-            }
+    fn every_flag_is_in_the_set_and_shows_through_a_ligature() {
+        let set = all();
+        let flags: Vec<_> = set.iter().filter(|e| e.name.starts_with("flag_")).collect();
+        assert!(flags.len() >= 258 + 4, "only {} flags", flags.len());
+        for e in &flags {
+            assert!(!e.sequences.is_empty(), "{} has no sequence", e.name);
         }
+        assert!(set.iter().any(|e| e.name == "flag_us"));
+        assert!(set.iter().any(|e| e.name == "flag_texas"));
     }
 
     #[test]
     fn the_colour_font_builds_and_maps_every_emoji() {
-        let spec = crate::font_gen::FontSpec { family: "Craftmjne Emoji".into(), palette: palette_rgba(), glyphs: glyph_specs(), space_advance: 4, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW, substitutions: vec![] };
+        let spec = crate::font_gen::FontSpec { family: "Craftmjne Emoji".into(), palette: palette_rgba(), glyphs: glyph_specs(), space_advance: 4, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW, substitutions: vec![], ligatures: ligatures() };
         let bytes = crate::font_gen::build_ttf(&spec);
         let face = ttf_parser::Face::parse(&bytes, 0).expect("a valid font");
         let colr = face.tables().colr.expect("COLR");
@@ -314,20 +350,67 @@ mod tests {
                 assert!(colr.contains(g), "{} has no colour layers", e.name);
             }
         }
-        for c in ZERO_WIDTH {
-            let g = face.glyph_index(*c).expect("joiners are mapped");
+        for c in joiners() {
+            let g = face.glyph_index(c).expect("joiners are mapped");
             assert_eq!(face.glyph_hor_advance(g), Some(0), "{c:?} takes no room");
         }
     }
 
     #[test]
     fn shortcodes_expand_and_everything_else_is_left_alone() {
-        let first = all().into_iter().next().unwrap();
+        let first = all().into_iter().find(|e| e.sequences.is_empty()).unwrap();
         let c = first.chars[0];
         assert_eq!(expand_shortcodes(&format!("hi :{}: there", first.name)), format!("hi {c} there"));
+        assert_eq!(expand_shortcodes(":flag_us:"), "\u{1F1FA}\u{1F1F8}");
         assert_eq!(expand_shortcodes("a :nosuchemoji: b"), "a :nosuchemoji: b");
         assert_eq!(expand_shortcodes("time 10:30 :) done"), "time 10:30 :) done");
         assert_eq!(expand_shortcodes("lone : colon"), "lone : colon");
+    }
+
+    /// Shapes `text` with the emoji font and returns the glyph ids.
+    fn shape(font: &[u8], text: &str) -> Vec<u32> {
+        let face = rustybuzz::Face::from_slice(font, 0).expect("the font parses");
+        let mut buf = rustybuzz::UnicodeBuffer::new();
+        buf.push_str(text);
+        let out = rustybuzz::shape(&face, &[], buf);
+        out.glyph_infos().iter().map(|i| i.glyph_id).collect()
+    }
+
+    #[test]
+    fn a_pair_of_regional_indicators_becomes_one_flag_glyph() {
+        let font = crate::fonts::emoji_font_bytes();
+        let face = ttf_parser::Face::parse(&font, 0).unwrap();
+        let gid = |c: char| face.glyph_index(c).unwrap().0 as u32;
+        let us = all().into_iter().find(|e| e.name == "flag_us").unwrap();
+        assert_eq!(shape(&font, "\u{1F1FA}\u{1F1F8}"), vec![gid(us.chars[0])]);
+        // A pair that is no country stays two letter tiles.
+        assert_eq!(shape(&font, "\u{1F1FF}\u{1F1FF}").len(), 2);
+    }
+
+    #[test]
+    fn subdivision_and_special_flags_become_one_glyph_too() {
+        let font = crate::fonts::emoji_font_bytes();
+        let face = ttf_parser::Face::parse(&font, 0).unwrap();
+        let gid = |c: char| face.glyph_index(c).unwrap().0 as u32;
+        for (name, text) in [
+            ("flag_texas", "\u{1F3F4}\u{E0075}\u{E0073}\u{E0074}\u{E0078}\u{E007F}"),
+            ("flag_scotland", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}"),
+            ("rainbow_flag", "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}"),
+            ("pirate_flag", "\u{1F3F4}\u{200D}\u{2620}\u{FE0F}"),
+        ] {
+            let e = all().into_iter().find(|e| e.name == name).unwrap();
+            assert_eq!(shape(&font, text), vec![gid(e.chars[0])], "{name}");
+        }
+        // The plain black flag is still just itself.
+        let black = all().into_iter().find(|e| e.name == "black_flag").unwrap();
+        assert_eq!(shape(&font, "\u{1F3F4}"), vec![gid(black.chars[0])]);
+    }
+
+    #[test]
+    fn the_gun_is_a_water_pistol() {
+        let set = all();
+        assert!(set.iter().any(|e| e.name == "water_pistol" && e.chars == vec!['\u{1F52B}']));
+        assert!(!set.iter().any(|e| e.name == "gun" || e.name == "pistol"));
     }
 
     #[test]

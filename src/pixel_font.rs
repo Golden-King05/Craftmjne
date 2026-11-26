@@ -236,6 +236,11 @@ pub fn substitutions() -> Vec<crate::font_gen::Substitution> {
     crate::pixel_arabic::substitutions()
 }
 
+/// The `GSUB` ligatures of the typeface.
+pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
+    Vec::new()
+}
+
 /// Every glyph of the typeface (the space is the font's own).
 pub fn glyphs() -> Vec<GlyphSpec> {
     let mut out = Vec::new();
@@ -348,7 +353,7 @@ mod tests {
 
     #[test]
     fn the_typeface_builds_a_valid_font() {
-        let spec = crate::font_gen::FontSpec { family: "Craftmjne".into(), palette: vec![], glyphs: glyphs(), space_advance: SPACE, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW, substitutions: substitutions() };
+        let spec = crate::font_gen::FontSpec { family: "Craftmjne".into(), palette: vec![], glyphs: glyphs(), space_advance: SPACE, em_rows: crate::font_gen::EM_ROWS, baseline_row: crate::font_gen::BASELINE_ROW, substitutions: substitutions(), ligatures: ligatures() };
         let bytes = crate::font_gen::build_ttf(&spec);
         let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
         for c in "Hello, World! 0123456789 àéîõü".chars() {

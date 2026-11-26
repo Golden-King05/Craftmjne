@@ -196,6 +196,13 @@ pub fn all() -> Vec<Emoji> {
     overlay(&mut sparkle_heart, 0, &["y..........y", "...........y"]);
     extra.push(emoji("sparkling_heart", "💖", sparkle_heart));
 
+    // 🔫 is a water pistol in the current emoji standard (a toy, blue with an orange grip), pointing left.
+    extra.push(emoji("water_pistol", "🔫", parse("............/............/..kkkkkkkk../.kbbbbbbbbk./kcwbbbbbbbbk/.kkkkkkbbbk./......kook../......kook../......kook../.......kk.../............/............")));
+
+    // The two symbols the pirate and transgender flags are written with.
+    extra.push(emoji("skull_and_crossbones", "\u{2620}", parse("............/...kkkkkk.../..kwwwwwwk../..kwkwwkwk../..kwkwwkwk.../...kwwwwk.../....kwwk..../..k.kkkk.k../...kk..kk.../...kk..kk.../..k.k..k.k../............")));
+    extra.push(emoji("transgender_symbol", "\u{26A7}", parse("............/......pppp../.........pp./...cccc..pp./..c....c.p../..c....c..../..c....c..../...cccc...../....pp....../.pppppppp.../....pp....../............")));
+
     // Green apple, red and green pears from the apple.
     let apple = grid_of("apple");
     let mut green = apple;

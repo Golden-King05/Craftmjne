@@ -43,6 +43,7 @@ pub fn default_font_bytes() -> Vec<u8> {
         baseline_row: BASELINE_ROW,
         space_advance: crate::pixel_font::SPACE,
         substitutions: crate::pixel_font::substitutions(),
+        ligatures: crate::pixel_font::ligatures(),
     })
 }
 
@@ -56,6 +57,7 @@ pub fn emoji_font_bytes() -> Vec<u8> {
         baseline_row: BASELINE_ROW,
         space_advance: crate::pixel_font::SPACE,
         substitutions: vec![],
+        ligatures: crate::emoji::ligatures(),
     })
 }
 
@@ -113,7 +115,7 @@ pub fn sheet_to_font(name: &str, img: &image::RgbaImage) -> Result<(Vec<u8>, f32
     if glyphs.is_empty() {
         return Err(format!("{name}.png has no glyphs (every cell is clear)"));
     }
-    let bytes = build_ttf(&FontSpec { family: name.to_string(), palette: vec![], glyphs, em_rows: cell, baseline_row: baseline, space_advance: (cell / 2).max(2), substitutions: vec![] });
+    let bytes = build_ttf(&FontSpec { family: name.to_string(), palette: vec![], glyphs, em_rows: cell, baseline_row: baseline, space_advance: (cell / 2).max(2), substitutions: vec![], ligatures: vec![] });
     Ok((bytes, cell as f32))
 }
 

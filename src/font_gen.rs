@@ -67,6 +67,16 @@ pub struct Substitution {
     pub to: char,
 }
 
+/// A ligature: the characters `components`, in order, are drawn as the one glyph `to` maps to.
+/// Flags (two regional indicators), keycaps, skin-toned people and Arabic lam-alef are these.
+#[derive(Clone, Debug)]
+pub struct Ligature {
+    pub script: [u8; 4],
+    pub feature: [u8; 4],
+    pub components: Vec<char>,
+    pub to: char,
+}
+
 pub struct FontSpec {
     pub family: String,
     /// RGBA palette for colour glyphs.
@@ -80,6 +90,8 @@ pub struct FontSpec {
     pub space_advance: i32,
     /// `GSUB` single substitutions (needs the glyphs both characters map to).
     pub substitutions: Vec<Substitution>,
+    /// `GSUB` ligatures (every component and `to` needs a glyph).
+    pub ligatures: Vec<Ligature>,
 }
 
 /// Merges a pixel grid (`rows[y][x]` = ink) into the fewest rectangles: horizontal runs, then
@@ -287,25 +299,52 @@ fn cmap_table(map: &BTreeMap<u32, u16>) -> Vec<u8> {
     t
 }
 
-/// A `GSUB` table holding single substitutions grouped by script and feature, one lookup per
-/// (script, feature). `gid_of` resolves a character to its glyph id.
-fn gsub_table(subs: &[Substitution], gid_of: &BTreeMap<u32, u16>) -> Option<Vec<u8>> {
-    // (feature tag, script tag, (from gid, to gid) sorted by from)
-    let mut entries: Vec<([u8; 4], [u8; 4], Vec<(u16, u16)>)> = Vec::new();
+/// What one lookup does.
+enum Lookup {
+    /// `(from, to)` glyph pairs, sorted by `from`.
+    Single(Vec<(u16, u16)>),
+    /// `(components, to)`; longer sequences first within one starting glyph.
+    Ligature(Vec<(Vec<u16>, u16)>),
+}
+
+/// A `GSUB` table holding single substitutions and ligatures grouped by script and feature, one
+/// lookup per (script, feature, kind). `gid_of` resolves a character to its glyph id.
+fn gsub_table(subs: &[Substitution], ligs: &[Ligature], gid_of: &BTreeMap<u32, u16>) -> Option<Vec<u8>> {
+    // (feature tag, script tag, lookup)
+    let mut entries: Vec<([u8; 4], [u8; 4], Lookup)> = Vec::new();
     for s in subs {
         let (Some(&from), Some(&to)) = (gid_of.get(&(s.from as u32)), gid_of.get(&(s.to as u32))) else { continue };
-        match entries.iter_mut().find(|e| e.0 == s.feature && e.1 == s.script) {
-            Some(e) => e.2.push((from, to)),
-            None => entries.push((s.feature, s.script, vec![(from, to)])),
+        match entries.iter_mut().find(|e| e.0 == s.feature && e.1 == s.script && matches!(e.2, Lookup::Single(_))) {
+            Some((_, _, Lookup::Single(v))) => v.push((from, to)),
+            _ => entries.push((s.feature, s.script, Lookup::Single(vec![(from, to)]))),
+        }
+    }
+    for l in ligs {
+        let comps: Option<Vec<u16>> = l.components.iter().map(|c| gid_of.get(&(*c as u32)).copied()).collect();
+        let (Some(comps), Some(&to)) = (comps, gid_of.get(&(l.to as u32))) else { continue };
+        if comps.len() < 2 {
+            continue;
+        }
+        match entries.iter_mut().find(|e| e.0 == l.feature && e.1 == l.script && matches!(e.2, Lookup::Ligature(_))) {
+            Some((_, _, Lookup::Ligature(v))) => v.push((comps, to)),
+            _ => entries.push((l.feature, l.script, Lookup::Ligature(vec![(comps, to)]))),
         }
     }
     if entries.is_empty() {
         return None;
     }
-    entries.sort_by_key(|e| (e.0, e.1));
+    entries.sort_by_key(|e| (e.0, e.1, matches!(e.2, Lookup::Ligature(_))));
     for e in &mut entries {
-        e.2.sort();
-        e.2.dedup_by_key(|p| p.0);
+        match &mut e.2 {
+            Lookup::Single(v) => {
+                v.sort();
+                v.dedup_by_key(|p| p.0);
+            }
+            Lookup::Ligature(v) => {
+                v.sort_by(|a, b| a.0[0].cmp(&b.0[0]).then(b.0.len().cmp(&a.0.len())).then(a.0.cmp(&b.0)));
+                v.dedup_by(|a, b| a.0 == b.0);
+            }
+        }
     }
     let mut scripts: Vec<[u8; 4]> = entries.iter().map(|e| e.1).collect();
     scripts.sort();
@@ -353,25 +392,85 @@ fn gsub_table(subs: &[Substitution], gid_of: &BTreeMap<u32, u16>) -> Option<Vec<
         be16(&mut feature_list, i as i32);
     }
 
-    // LookupList: type 1 (single substitution), format 2 (a substitute per covered glyph).
+    // LookupList.
     let mut lookup_tables: Vec<Vec<u8>> = Vec::new();
     for e in &entries {
-        let n = e.2.len();
         let mut t = Vec::new();
-        be16(&mut t, 1); // lookupType
-        be16(&mut t, 0); // lookupFlag
-        be16(&mut t, 1); // subTableCount
-        be16(&mut t, 8); // subtable offset
-        be16(&mut t, 2); // substFormat
-        be16(&mut t, (6 + 2 * n) as i32); // coverage offset
-        be16(&mut t, n as i32);
-        for (_, to) in &e.2 {
-            be16(&mut t, *to as i32);
-        }
-        be16(&mut t, 1); // coverage format 1
-        be16(&mut t, n as i32);
-        for (from, _) in &e.2 {
-            be16(&mut t, *from as i32);
+        match &e.2 {
+            Lookup::Single(v) => {
+                let n = v.len();
+                be16(&mut t, 1); // lookupType: single substitution
+                be16(&mut t, 0); // lookupFlag
+                be16(&mut t, 1); // subTableCount
+                be16(&mut t, 8); // subtable offset
+                be16(&mut t, 2); // substFormat 2: a substitute per covered glyph
+                be16(&mut t, (6 + 2 * n) as i32); // coverage offset
+                be16(&mut t, n as i32);
+                for (_, to) in v {
+                    be16(&mut t, *to as i32);
+                }
+                be16(&mut t, 1); // coverage format 1
+                be16(&mut t, n as i32);
+                for (from, _) in v {
+                    be16(&mut t, *from as i32);
+                }
+            }
+            Lookup::Ligature(v) => {
+                // Group by first glyph (already sorted).
+                let mut firsts: Vec<u16> = v.iter().map(|l| l.0[0]).collect();
+                firsts.dedup();
+                let sets: Vec<Vec<&(Vec<u16>, u16)>> = firsts.iter().map(|f| v.iter().filter(|l| l.0[0] == *f).collect()).collect();
+                // Ligature set tables.
+                let mut set_bytes: Vec<Vec<u8>> = Vec::new();
+                for set in &sets {
+                    let mut tables: Vec<Vec<u8>> = Vec::new();
+                    for (comps, to) in set {
+                        let mut lt = Vec::new();
+                        be16(&mut lt, *to as i32);
+                        be16(&mut lt, comps.len() as i32);
+                        for c in &comps[1..] {
+                            be16(&mut lt, *c as i32);
+                        }
+                        tables.push(lt);
+                    }
+                    let mut sb = Vec::new();
+                    be16(&mut sb, tables.len() as i32);
+                    let mut o = 2 + 2 * tables.len();
+                    for lt in &tables {
+                        be16(&mut sb, o as i32);
+                        o += lt.len();
+                    }
+                    for lt in tables {
+                        sb.extend(lt);
+                    }
+                    set_bytes.push(sb);
+                }
+                let n = firsts.len();
+                let sub_header = 6 + 2 * n;
+                let mut sub = Vec::new();
+                be16(&mut sub, 1); // substFormat 1
+                let sets_total: usize = set_bytes.iter().map(|b| b.len()).sum();
+                be16(&mut sub, (sub_header + sets_total) as i32); // coverage offset
+                be16(&mut sub, n as i32);
+                let mut o = sub_header;
+                for sb in &set_bytes {
+                    be16(&mut sub, o as i32);
+                    o += sb.len();
+                }
+                for sb in &set_bytes {
+                    sub.extend_from_slice(sb);
+                }
+                be16(&mut sub, 1); // coverage format 1
+                be16(&mut sub, n as i32);
+                for f in &firsts {
+                    be16(&mut sub, *f as i32);
+                }
+                be16(&mut t, 4); // lookupType: ligature substitution
+                be16(&mut t, 0);
+                be16(&mut t, 1);
+                be16(&mut t, 8);
+                t.extend(sub);
+            }
         }
         lookup_tables.push(t);
     }
@@ -567,7 +666,7 @@ pub fn build_ttf(spec: &FontSpec) -> Vec<u8> {
         (*b"name", name_table(&spec.family)),
         (*b"post", post),
     ];
-    if let Some(gsub) = gsub_table(&spec.substitutions, &cmap) {
+    if let Some(gsub) = gsub_table(&spec.substitutions, &spec.ligatures, &cmap) {
         tables.push((*b"GSUB", gsub));
     }
     if !base_records.is_empty() {
@@ -656,6 +755,7 @@ mod tests {
             em_rows: EM_ROWS,
             baseline_row: BASELINE_ROW,
             substitutions: vec![],
+            ligatures: vec![],
             glyphs: vec![
                 GlyphSpec { chars: vec!['A'], advance: 5, colour: false, layers: vec![Layer { color: 0, rects: vec![Rect { x0: 0, y0: 2, x1: 3, y1: 10 }] }] },
                 GlyphSpec {
