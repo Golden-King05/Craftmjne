@@ -1532,6 +1532,29 @@ default font that ships with Bevy is turned off, so there is no other font unles
     but are not calligraphy, and Syriac's special final-Alaph forms are not made. Judged from a
     software-rendered screenshot only, not by someone who reads these scripts.
   - Same 16-pixel geometry as Chinese/Japanese; `CRAFT_SHOT=world` renders a sample.
+- **Mongolian (Cyrillic and traditional), Manchu, South and Southeast Asian scripts, Yi, Miao, Nushu,
+  Vietnamese** (`src/scripts.rs`, `src/pixel_vietnamese.rs`, `src/pixel_scripts.rs`):
+  - **Own style:** **Vietnamese** (all 134 letters, with stacked circumflex/breve + tone, the horn, the dot
+    below and the barred d; capitals set the two marks side by side) and the Cyrillic letters Mongolian,
+    Buryat and Kalmyk add (Ө ө Ү ү Ң ң Һ һ).
+  - **Unifont bitmaps, complete for what Unicode encodes:** traditional **Mongolian**, Todo, **Manchu**
+    and Sibe (one block), Mongolian Supplement, **Phags-pa**, Soyombo, Zanabazar Square; **Gujarati,
+    Gurmukhi** (Punjabi), **Bengali** (and Assamese), **Tamil, Kannada, Malayalam, Sinhala**, Telugu and
+    Odia; **Tibetan**; **Thaana**; **Ol Chiki** (Santali); **Burmese** (all three Myanmar blocks);
+    **Thai, Lao, Khmer**; the Philippine scripts (**Baybayin/Tagalog**, **Hanunoo**, Buhid, Tagbanwa);
+    **Buginese (Lontara)**, **Balinese, Javanese, Sundanese, Batak**; **Yi**; **Miao (Pollard)** and Lisu;
+    **Nushu**; and the zhuyin tone marks (the Bopomofo letters came with the CJK work).
+  - **What is and isn't shaped, said plainly.** Letters, marks and reordering of vowel signs are all
+    there, and **Thai and Lao come out as proper clusters**. But the Unifont data has no conjunct,
+    stacked or ligature glyphs, so the Indic scripts, Khmer, Burmese, Tibetan, Javanese, Balinese and
+    the like show a consonant cluster as separate cells (virama visible), not as the joined form a
+    reader of those scripts expects; real conjunct shaping would need every ligature drawn per script
+    (Devanagari has it, hand-built, from an earlier step). **Mongolian, Manchu and Todo are written
+    downward and join by position; here they are separate upright letters set left to right** - no
+    vertical layout, no positional forms. Everything was judged only from software-rendered screenshots,
+    and the sample words in the preview screens are only to exercise the shaping, not to be correct
+    prose.
+  - `CRAFT_SHOT=asia1` and `asia2` render samples.
 - **Emoji.** 12x12 colour emoji (about 700 drawn, the rest generated, see below) drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second
   built-in font used as a fallback, so they work anywhere text does, including chat and signs. In chat,

@@ -164,7 +164,7 @@ const BASE: &[(char, i32, &str)] = &[
 ];
 
 /// Accent marks: rows, drawn above a letter.
-fn accent(kind: char) -> &'static [&'static str] {
+pub(crate) fn accent(kind: char) -> &'static [&'static str] {
     match kind {
         '\u{301}' => &[".#", "#."],          // acute
         '\u{300}' => &["#.", ".#"],          // grave
@@ -172,6 +172,7 @@ fn accent(kind: char) -> &'static [&'static str] {
         '\u{303}' => &[".#.#", "#.#."],      // tilde
         '\u{308}' => &["#.#"],               // diaeresis
         '\u{306}' => &["#.#", ".#."],        // breve
+        '\u{309}' => &["##.", ".#."],        // hook above (Vietnamese)
         '\u{304}' => &["###", "..."],        // macron (pinyin first tone, Hepburn long vowels)
         '\u{30C}' => &["#.#", ".#."],        // caron (pinyin third tone; at this size it is the breve's shape)
         '\u{30A}' => &[".#.", "#.#", ".#."], // ring (three rows; only over capitals' two-row gap by shifting)

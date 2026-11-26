@@ -40,6 +40,7 @@ pub mod pixel_arabic;
 pub mod pixel_devanagari;
 pub mod pixel_font;
 pub mod pixel_greek;
+pub mod pixel_vietnamese;
 pub mod pixel_hangul;
 pub mod pixel_scripts;
 pub mod menu_nav;

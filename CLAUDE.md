@@ -3668,3 +3668,30 @@ etc.) instead of inventing a new approach:
   - Not done / said plainly: "Val" in the request is Vai; Syriac's variant finals and ligatures; Greek
     capital tonos to the left; the joined forms and every Unifont script judged by eye only in a
     software-rendered screenshot. Afaka and Yugtun are still unencoded (see the earlier entry).
+
+- **Thirty-odd more scripts went into the same blob, and the lesson was what Unifont's "complete" does and
+  does not buy.** `scripts.bin` is now 7,050 glyphs (78 KB deflated): measured first (every assigned
+  code point of every block Unifont-covered, `PROMISED` in `scripts.rs` was generated from `unicodedata`),
+  then the new ranges were added to `tools/build_cjk_data.py` and the blobs rebuilt. Things that mattered:
+  - **"Every character has a glyph" is not "the script works".** The screenshot showed it plainly: Thai and
+    Lao shape into real clusters (marks are Mn, zero-advance, drawn where the shaper puts them), but the
+    Indic scripts, Khmer, Burmese and Tibetan show conjuncts as separate cells because Unifont's OTF gets
+    those from its own GSUB/GPOS, which this pipeline does not carry. The README says so per group; the
+    fix would be per-script conjunct drawing (what Devanagari got), not more data.
+  - **Mongolian joins in principle, but its glyphs are upright vertical-script letters**, so deriving a
+    baseline stroke (as for Syriac) would have been nonsense. `forms()` was restricted to Syriac/Mandaic/N'Ko
+    through `is_cursive_script` instead of "anything with a joining type"; before that restriction the blob's
+    joining flags (from `ArabicShaping.txt`) would have given Mongolian forms it cannot use.
+  - **A distinctness test over a generated family caught a real bug.** `no_two_vietnamese_letters_look_alike_
+    and_none_looks_like_its_base` failed for ỵ: the dot-below beside a descender landed on a pixel the "y"
+    tail already inks, so ỵ was identical to y. Fixed by picking the nearest free pixel on the other side.
+    For any family built by composition (accents, marks), test every member against every other and each
+    against its base.
+  - **Vietnamese capitals have two rows above them, and a shape mark plus a tone mark need four**, so
+    capitals set them side by side (`pair_above`) while lowercase stacks (`compose` twice, like ǖ). The
+    dotless i is the base whenever a mark goes above an i.
+  - **Latin Extended was deliberately not added as a Unifont fallback** (it would give Polish/Czech/Turkish
+    letters at the cost of 16-pixel letters among 12-pixel ones, and nobody asked); it is one range list
+    away in `build_cjk_data.py` if wanted.
+  - **The preview window is 1280x720**: asia1/asia2 are two screens for that reason (see the `natives`
+    entry); wrapped lines are normal.
