@@ -3813,3 +3813,44 @@ etc.) instead of inventing a new approach:
     font's new ZWJ; the same sequence on its own is one glyph. It looks like cosmic-text's per-word fallback
     handing the joiner and the emoji to different faces. Worth its own look before relying on emoji ZWJ sequences
     inside chat lines.
+
+- **Translations (`lang.rs`, `lang/*.json`): English text is the key for interface strings, and the helpers translate, so
+  call sites barely changed.** `ui_theme::{button, heading, hint, label, badge, title_block}` and `settings::sbutton`
+  run their text through `lang::tr`, so a literal handed to one is a key without a `tr(..)` at the call site;
+  formatted strings need an explicit `tr_args("... {x}", &[("x", ..)])` (a `format!` result never matches a key).
+  The bulk edit that wrapped every `Text::new("literal")` also wrapped `Text::new("")` - harmless, reverted.
+  - **A literal-text key can't collide with user text only because helpers aren't fed user text.** A world or mod
+    named "Back" would be translated if it went through `theme::button`; world and mod names are spawned directly or
+    inside `[x] name` rows. Keep it that way.
+  - **The active language is a process-wide `RwLock` (`lang::install`)**, like `gui_skin`, so spawn functions don't
+    need a resource. Consequences: `Languages::select` only changes the resource and `apply_language` (PreUpdate,
+    `resource_changed`) installs it, so UI tests that click the picker never touch the global; the only tests that
+    install are in `tests/language.rs` - its own process, and ONE `#[test]` calling the scenarios in order because two
+    tests in one binary would race on it. `Languages::reload` also doesn't install (the system does).
+  - **Plurals take their English forms as arguments** (`tr_n(base, n, one_en, other_en, args)`), so English is right
+    with no language files loaded (every unit test). The first version hid an English fallback inside `tr_n` that was
+    "{n} items" - wrong anywhere it was reached without `en.json`.
+  - **The percentage counts what a player would see**, i.e. through the `fallback` chain, excluding English. Counting a
+    language's own strings would have shown es-MX (a small file of differences) at 14%. Rounded down so 99.9% never
+    reads 100. `SHIPPED_PERCENT` is a ratchet: when English grows ahead of the translations, lower it deliberately.
+  - **Clicking the Language tab reloads the files from disk** (`Languages::reload`), so a settings test that injects its
+    own catalog must open the tab by setting `SettingsView::section`, not by clicking.
+  - **Regional variants share work through `fallback`**: es-MX holds 41 strings and falls back to es-ES; pt-PT holds 81 and
+    falls back to pt-BR. zh-Hant was converted from zh-Hans with OpenCC (`s2twp`) and its vocabulary skimmed, not
+    hand-written - say so if a Taiwanese reader finds odd terms.
+  - **Translating 306 strings by hand is where misalignment bugs live**: translations were written as `N|text` lines
+    against a numbered key list and assembled by a script that fails on a missing line or any placeholder that
+    differs from English (`{n}` vs `{count}` would have shipped otherwise). `a_translation_keeps_every_placeholder_the_english_has`
+    keeps checking the shipped files.
+  - **The key-coverage scan is a text scan, with limits**: `every_key_the_source_uses_is_in_english` finds `tr("..")`
+    calls, `every_literal_given_to_a_ui_helper_is_in_english_too` finds the first literal passed to a known helper
+    (break-tested by deleting keys from `en.json`). It cannot see strings built another way, so a new helper that
+    translates must be added to `HELPERS`.
+  - **Packaging**: `lang/` had to be added to both workflows' `cp -r` lists; the existing data-folder test finds it only
+    because the lookups are literal `find_data_dir("lang")` calls - keep them literal.
+  - **Mods**: `lang/*.json` in a mod's folder, read from the *installed* mods directory (not per world), sorted by folder.
+    A mod can add keys, translate another mod's keys, or add a whole language (`_meta` needed); the first file to name
+    a language keeps the name, so a mod can't rename the game's.
+  - Not done: the launcher (egui, separate crate), the F3 overlay, developer-facing error text, a first-run guess of the
+    OS language (English is the default), right-to-left layout (no RTL language is shipped), and per-language fonts for
+    scripts beyond what the font stack already draws.

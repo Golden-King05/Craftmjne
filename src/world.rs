@@ -1043,7 +1043,7 @@ pub fn refresh_content_live(
         }
         Err(why) => {
             if let Some(mut chat) = chat {
-                chat.push(format!("Resource packs couldn't be applied: {why}"));
+                chat.push(crate::lang::tr_args("Resource packs couldn't be applied: {why}", &[("why", &why.to_string())]));
             }
         }
     }
@@ -1098,7 +1098,7 @@ fn apply_world_mods(
     // A mod made for another game version still loads; the player is just told.
     if let Some(mut chat) = chat {
         for warning in &resolved.warnings {
-            chat.push(format!("Mod warning: {warning}"));
+            chat.push(crate::lang::tr_args("Mod warning: {warning}", &[("warning", &warning.to_string())]));
         }
     }
     // One load order for the world's mods and packs: its saved one, or automatic. The data
@@ -1143,7 +1143,7 @@ fn apply_world_mods(
             hotbar.set_changed();
             ok.0 = true;
         }
-        Err(why) => refuse(format!("A mod for this world couldn't be loaded: {why}"), &mut ok, &mut notice, &mut next_state),
+        Err(why) => refuse(crate::lang::tr_args("A mod for this world couldn't be loaded: {why}", &[("why", &why.to_string())]), &mut ok, &mut notice, &mut next_state),
     }
 }
 

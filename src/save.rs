@@ -733,6 +733,29 @@ impl SaveStore {
         true
     }
 
+    pub fn language_path(&self) -> PathBuf {
+        self.keybinds_path().with_file_name("language.json")
+    }
+
+    /// The chosen language code, per launcher instance. Missing or unreadable reads as English.
+    pub fn load_language(&self) -> String {
+        #[derive(Deserialize)]
+        struct Saved {
+            code: String,
+        }
+        fs::read_to_string(self.language_path()).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok()).map(|s| s.code).unwrap_or_else(|| "en".into())
+    }
+
+    pub fn save_language(&self, code: &str) -> io::Result<()> {
+        let path = self.language_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::json!({ "code": code }).to_string())?;
+        fs::rename(&temp, path)
+    }
+
     pub fn saving_options_path(&self) -> PathBuf {
         self.keybinds_path().with_file_name("saving.json")
     }

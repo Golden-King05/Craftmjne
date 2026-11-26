@@ -221,7 +221,7 @@ pub fn button(parent: &mut ChildSpawnerCommands, action: impl Bundle, label: &st
             if let Some(glyph) = o.glyph {
                 b.spawn((Node { width: Val::Px(24.0), height: Val::Px(24.0), margin: UiRect::right(Val::Px(8.0)), ..default() }, crate::pad_glyphs::PadGlyph(glyph)));
             }
-            b.spawn((Text::new(label), TextFont { font_size: o.font, ..default() }, crate::fonts::FontTag::new("button"), TextColor(o.text), shadow()));
+            b.spawn((Text::new(crate::lang::tr(label)), TextFont { font_size: o.font, ..default() }, crate::fonts::FontTag::new("button"), TextColor(o.text), shadow()));
         });
 }
 
@@ -285,19 +285,19 @@ pub fn heading_with(parent: &mut ChildSpawnerCommands, text: &str, extra: impl B
     parent
         .spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: Val::Px(8.0), margin: UiRect::bottom(Val::Px(8.0)), ..default() })
         .with_children(|h| {
-            h.spawn((Text::new(text), TextFont { font_size: 30.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(TEXT), shadow(), extra));
+            h.spawn((Text::new(crate::lang::tr(text)), TextFont { font_size: 30.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(TEXT), shadow(), extra));
             h.spawn((Node { width: Val::Px(84.0), height: Val::Px(12.0), ..default() }, Skinned::new(Element::Plank)));
         });
 }
 
 /// Small dim helper text.
 pub fn hint(parent: &mut ChildSpawnerCommands, text: impl Into<String>, size: f32) {
-    parent.spawn((Text::new(text.into()), TextFont { font_size: size, ..default() }, TextColor(TEXT_DIM), Node { max_width: Val::Px(640.0), ..default() }));
+    parent.spawn((Text::new(crate::lang::tr(&text.into())), TextFont { font_size: size, ..default() }, TextColor(TEXT_DIM), Node { max_width: Val::Px(640.0), ..default() }));
 }
 
 /// A label above a group of controls ("Game mode").
 pub fn label(parent: &mut ChildSpawnerCommands, text: &str) {
-    parent.spawn((Text::new(text), TextFont { font_size: 14.0, ..default() }, TextColor(TEXT_DIM), Node { margin: UiRect::top(Val::Px(4.0)), ..default() }));
+    parent.spawn((Text::new(crate::lang::tr(text)), TextFont { font_size: 14.0, ..default() }, TextColor(TEXT_DIM), Node { margin: UiRect::top(Val::Px(4.0)), ..default() }));
 }
 
 /// A small pill of coloured text, e.g. a world's game mode.
@@ -309,7 +309,7 @@ pub fn badge(parent: &mut ChildSpawnerCommands, text: &str, color: Color) {
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
         ))
         .with_children(|b| {
-            b.spawn((Text::new(text), TextFont { font_size: 12.0, ..default() }, TextColor(color)));
+            b.spawn((Text::new(crate::lang::tr(text)), TextFont { font_size: 12.0, ..default() }, TextColor(color)));
         });
 }
 
@@ -319,7 +319,7 @@ pub fn title_block(parent: &mut ChildSpawnerCommands, subtitle: &str) {
         t.spawn((Node { padding: UiRect::axes(Val::Px(44.0), Val::Px(26.0)), ..default() }, Skinned::new(Element::Panel))).with_children(|sign| {
             sign.spawn((Text::new("CRAFTMJNE"), TextFont { font_size: 72.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(ACCENT), TextShadow { offset: Vec2::splat(5.0), color: TEXT_SHADOW }));
         });
-        t.spawn((Text::new(subtitle), TextFont { font_size: 17.0, ..default() }, TextColor(TEXT), shadow()));
+        t.spawn((Text::new(crate::lang::tr(subtitle)), TextFont { font_size: 17.0, ..default() }, TextColor(TEXT), shadow()));
     });
 }
 

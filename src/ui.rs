@@ -126,8 +126,8 @@ impl ItemIcons<'_> {
         })
     }
 
-    pub fn name(&self, item: ItemId) -> &str {
-        &self.items.def(item).name
+    pub fn name(&self, item: ItemId) -> String {
+        self.items.def(item).display()
     }
 }
 
@@ -210,7 +210,7 @@ fn setup_hud(mut commands: Commands) {
 
             root.spawn((
                 HintText,
-                Text::new("WASD move  Space jump  F fly (creative)  T chat  E inventory  1-9 blocks  Q drop  F3 debug  Esc pause"),
+                Text::new(crate::lang::tr("WASD move  Space jump  F fly (creative)  T chat  E inventory  1-9 blocks  Q drop  F3 debug  Esc pause")),
                 TextFont { font_size: 14.0, ..default() },
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.9)),
                 Node {
@@ -326,7 +326,7 @@ fn hotbar_label(
             *vis = Visibility::Hidden;
             state.timer = 0.0;
         } else {
-            text.0 = registry.def(stack.id).name.clone();
+            text.0 = registry.def(stack.id).display();
             *vis = Visibility::Visible;
             state.timer = HOTBAR_LABEL_DURATION;
         }

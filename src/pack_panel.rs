@@ -96,10 +96,10 @@ fn spawn_order(body: &mut ChildSpawnerCommands, order: &[Entry], manual: bool, i
         body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
             btn(row, "Up", PackButton::OrderShift(entry.key(), true), ButtonStyle::Normal, 56.0, false);
             btn(row, "Down", PackButton::OrderShift(entry.key(), false), ButtonStyle::Normal, 64.0, false);
-            row.spawn((Text::new(format!("{label}  ({tag})")), TextFont { font_size: 16.0, ..default() }, TextColor(theme::TEXT)));
+            row.spawn((Text::new(format!("{label}  ({})", crate::lang::tr(tag))), TextFont { font_size: 16.0, ..default() }, TextColor(theme::TEXT)));
         });
     }
-    body.spawn((Text::new("Craftmjne (the game) - always at the bottom"), TextFont { font_size: 16.0, ..default() }, TextColor(theme::TEXT_DIM)));
+    body.spawn((Text::new(crate::lang::tr("Craftmjne (the game) - always at the bottom")), TextFont { font_size: 16.0, ..default() }, TextColor(theme::TEXT_DIM)));
     theme::hint(
         body,
         "Higher wins. A pack can retexture a mod and a mod can override a pack, depending on where they sit.\nAuto puts add-ons after the mods they build on and keeps global packs on top.\nPacks reorder at once; a mod's data order applies the next time the world is opened.",
@@ -109,7 +109,7 @@ fn spawn_order(body: &mut ChildSpawnerCommands, order: &[Entry], manual: bool, i
 
 pub fn spawn_pack_panel(body: &mut ChildSpawnerCommands, scope: PackScope, in_world: bool, global: &PackSelection, world: &[String], installed: &InstalledPacks, order: Option<(&[Entry], bool)>) {
     let scope = if in_world { scope } else { PackScope::Global };
-    body.spawn((Text::new("Resource packs"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+    body.spawn((Text::new(crate::lang::tr("Resource packs")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
     if in_world {
         body.spawn(Node { column_gap: Val::Px(6.0), ..default() }).with_children(|row| {
             btn(row, "Global (every world)", PackButton::Scope(PackScope::Global), ButtonStyle::Choice, 220.0, scope == PackScope::Global);
@@ -132,7 +132,7 @@ pub fn spawn_pack_panel(body: &mut ChildSpawnerCommands, scope: PackScope, in_wo
             btn(row, "Off", PackButton::Toggle(folder.clone()), ButtonStyle::Choice, 56.0, true);
             let (label, colour) = match info {
                 Some(p) => (p.name.clone(), theme::TEXT),
-                None => (format!("{folder} (missing)"), theme::ERROR),
+                None => (crate::lang::tr_args("{folder} (missing)", &[("folder", folder)]), theme::ERROR),
             };
             row.spawn((Text::new(label), TextFont { font_size: 16.0, ..default() }, TextColor(colour)));
         });
@@ -151,7 +151,7 @@ pub fn spawn_pack_panel(body: &mut ChildSpawnerCommands, scope: PackScope, in_wo
         PackScope::Global => "Global packs apply to every world and the menus, right away. Packs higher in the list win. A world's Load order tab says where they sit among its mods (on top, by default).",
         PackScope::World | PackScope::Order => "Packs for this world only, applied right away. Where they sit among the mods and global packs is set in Load order.",
     };
-    theme::hint(body, format!("{note}\nA mod's own pack always loads with the mod and can't be switched here."), 13.0);
+    theme::hint(body, format!("{}\n{}", crate::lang::tr(note), crate::lang::tr("A mod's own pack always loads with the mod and can't be switched here.")), 13.0);
 }
 
 /// Applies a click: tab, toggle, reorder or rescan, saving whichever list changed.

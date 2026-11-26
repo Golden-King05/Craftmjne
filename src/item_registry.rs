@@ -100,6 +100,14 @@ pub struct ItemDef {
     pub font: Option<String>,
 }
 
+impl ItemDef {
+    /// The name to show: the active language's `item.<id>` (a block's item falls back to `block.<id>`),
+    /// or the English name from the file.
+    pub fn display(&self) -> String {
+        crate::lang::tr_or(&format!("item.{}", self.id), &crate::lang::name_of("block", &self.id, &self.name))
+    }
+}
+
 #[derive(Deserialize)]
 struct ToolFile {
     kind: ToolKind,

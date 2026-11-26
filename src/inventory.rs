@@ -232,13 +232,13 @@ struct Tip {
 /// its quality (Trash..Legendary - never the number) with both lines drawn
 /// in that quality's colour.
 fn tip_for(registry: &ItemRegistry, id: ItemId, quality: u8) -> Tip {
-    let name = registry.def(id).name.clone();
+    let name = registry.def(id).display();
     let font = registry.def(id).font.clone();
     if registry.tool(id).is_none() {
         return Tip { text: name, color: [1.0; 3], font };
     }
     let r = registry.rarity(quality);
-    Tip { text: format!("{name}\n{}", r.name), color: r.color, font }
+    Tip { text: format!("{name}\n{}", r.display()), color: r.color, font }
 }
 /// A cell in Creative's item list.
 #[derive(Component)]
@@ -557,9 +557,9 @@ fn spawn_crafting_panel(
     inventory: &Inventory,
 ) {
     let where_text = {
-        let mut names: Vec<String> = nearby.0.iter().map(|&b| icons.blocks.def(b).name.clone()).collect();
+        let mut names: Vec<String> = nearby.0.iter().map(|&b| icons.blocks.def(b).display()).collect();
         names.sort();
-        if names.is_empty() { "By hand".to_string() } else { format!("By hand + {}", names.join(", ")) }
+        if names.is_empty() { crate::lang::tr("By hand") } else { crate::lang::tr_args("By hand + {names}", &[("names", &names.join(", "))]) }
     };
     parent
         .spawn((
@@ -573,7 +573,7 @@ fn spawn_crafting_panel(
             Skinned::new(Element::Panel),
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("Crafting"), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
+            panel.spawn((Text::new(crate::lang::tr("Crafting")), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
             panel.spawn((
                 Text::new(where_text),
                 TextFont { font_size: 12.0, ..default() },
@@ -634,7 +634,7 @@ fn spawn_crafting_panel(
             }
             if !any {
                 panel.spawn((
-                    Text::new("Nothing yet - pick things up to discover what you can make."),
+                    Text::new(crate::lang::tr("Nothing yet - pick things up to discover what you can make.")),
                     TextFont { font_size: 13.0, ..default() },
                     TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
                 ));
@@ -714,7 +714,7 @@ fn sync_inventory_screen(
             ))
             .with_children(|panel| match *state.mode {
                 GameMode::Survival => {
-                    panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
+                    panel.spawn((Text::new(crate::lang::tr("Inventory")), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
                     spawn_hotbar_and_storage(panel, &icons, &state.hotbar, &state.inventory);
                 }
                 GameMode::Creative => {
@@ -722,7 +722,7 @@ fn sync_inventory_screen(
                         CreativeTab::Blocks => "Items",
                         CreativeTab::Inventory => "Inventory",
                     };
-                    panel.spawn((Text::new(title), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
+                    panel.spawn((Text::new(crate::lang::tr(title)), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
                     let tab_label = match state.inv.creative_tab {
                         CreativeTab::Blocks => "Show Inventory",
                         CreativeTab::Inventory => "Show Items",
@@ -735,7 +735,7 @@ fn sync_inventory_screen(
                             ThemedButton { style: ButtonStyle::Normal, selected: false, accent: None },
                         ))
                         .with_children(|b| {
-                            b.spawn((Text::new(tab_label), TextFont { font_size: 14.0, ..default() }, TextColor(Color::WHITE)));
+                            b.spawn((Text::new(crate::lang::tr(tab_label)), TextFont { font_size: 14.0, ..default() }, TextColor(Color::WHITE)));
                         });
                     match state.inv.creative_tab {
                         CreativeTab::Blocks => {

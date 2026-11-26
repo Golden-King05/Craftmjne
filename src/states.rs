@@ -596,14 +596,14 @@ fn apply_state_requests(
     for req in requests.read() {
         let p = req.pos;
         let id = map.get_block(p);
-        let name = registry.def(id).name.clone();
+        let name = registry.def(id).display();
         let reply = match (&req.tag, &req.value) {
             (Some(tag), Some(value)) => match set_state(&mut map, &registry, &tables.0, p, tag, value) {
                 Ok(changes) => {
                     for e in changes {
                         events.write(e);
                     }
-                    format!("Set {tag} of {name} at {} {} {} to {}.", p.x, p.y, p.z, value.to_lowercase())
+                    crate::lang::tr_args("Set {tag} of {name} at {x} {y} {z} to {value}.", &[("tag", tag), ("name", &name), ("x", &p.x.to_string()), ("y", &p.y.to_string()), ("z", &p.z.to_string()), ("value", &value.to_lowercase())])
                 }
                 Err(e) => e.message(),
             },
@@ -613,13 +613,13 @@ fn apply_state_requests(
                     states.retain(|s| s.name == *tag);
                 }
                 if states.is_empty() {
-                    format!("{name} at {} {} {} has no state tags.", p.x, p.y, p.z)
+                    crate::lang::tr_args("{name} at {x} {y} {z} has no state tags.", &[("name", &name), ("x", &p.x.to_string()), ("y", &p.y.to_string()), ("z", &p.z.to_string())])
                 } else {
                     let parts: Vec<String> = states
                         .iter()
                         .map(|s| format!("{} = {} ({})", s.name, s.value, s.allowed.join("|")))
                         .collect();
-                    format!("{name} at {} {} {}: {}", p.x, p.y, p.z, parts.join("; "))
+                    crate::lang::tr_args("{name} at {x} {y} {z}: {parts}", &[("name", &name), ("x", &p.x.to_string()), ("y", &p.y.to_string()), ("z", &p.z.to_string()), ("parts", &parts.join("; "))])
                 }
             }
         };

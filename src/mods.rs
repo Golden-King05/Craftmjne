@@ -138,18 +138,17 @@ impl ModInfo {
     /// isn't left guessing which mod goes with which version of the game.
     pub fn warning(&self, game: &str) -> Option<String> {
         if self.target_ver.is_empty() {
-            return Some(format!(
-                "{} doesn't say which game version it's made for (no \"target_ver\"); this is {game}.",
-                self.name
+            return Some(crate::lang::tr_args(
+                "{name} doesn't say which game version it's made for (no \"target_ver\"); this is {game}.",
+                &[("name", &self.name), ("game", game)],
             ));
         }
         if self.target_ver.iter().any(|t| version_matches(t, game)) {
             return None;
         }
-        Some(format!(
-            "{} is made for game version {}, but this is {game}; it may not work.",
-            self.name,
-            self.target_ver.join(" or ")
+        Some(crate::lang::tr_args(
+            "{name} is made for game version {versions}, but this is {game}; it may not work.",
+            &[("name", &self.name), ("versions", &self.target_ver.join(&crate::lang::tr(" or "))), ("game", game)],
         ))
     }
 
@@ -353,18 +352,18 @@ impl ModError {
     /// What to tell the player.
     pub fn message(&self) -> String {
         match self {
-            Self::NotInstalled(ids) => format!(
-                "This world needs mods that aren't installed: {}. Put them back in the game's mods folder.",
-                ids.join(", ")
+            Self::NotInstalled(ids) => crate::lang::tr_args(
+                "This world needs mods that aren't installed: {ids}. Put them back in the game's mods folder.",
+                &[("ids", &ids.join(", "))],
             ),
             Self::HostMissing(host) => {
-                format!("This world shares its mods with the world \"{host}\", which no longer exists.")
+                crate::lang::tr_args("This world shares its mods with the world \"{host}\", which no longer exists.", &[("host", host)])
             }
             Self::HostCannotShare(host) => {
-                format!("The world \"{host}\" can't share its mods (it isn't a world-storage world, or it's a branch itself).")
+                crate::lang::tr_args("The world \"{host}\" can't share its mods (it isn't a world-storage world, or it's a branch itself).", &[("host", host)])
             }
             Self::MissingFromWorld { holder, missing } => {
-                format!("The world \"{holder}\" is missing mods this world needs: {}.", missing.join(", "))
+                crate::lang::tr_args("The world \"{holder}\" is missing mods this world needs: {ids}.", &[("holder", holder), ("ids", &missing.join(", "))])
             }
         }
     }

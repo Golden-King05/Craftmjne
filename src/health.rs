@@ -340,7 +340,7 @@ fn sync_death_screen(mut commands: Commands, death: Res<DeathState>, screens: Qu
         return;
     }
     commands.spawn((DeathScreen, theme::overlay_root())).insert(BackgroundColor(Color::srgba(0.30, 0.0, 0.0, 0.72))).with_children(|screen| {
-        screen.spawn((Text::new("You died!"), TextFont { font_size: 56.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::ERROR)));
+        screen.spawn((Text::new(crate::lang::tr("You died!")), TextFont { font_size: 56.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::ERROR)));
         screen.spawn((Node { width: Val::Px(70.0), height: Val::Px(4.0), ..default() }, BackgroundColor(theme::ERROR)));
         theme::hint(screen, "Everything you were carrying was dropped where you fell.", 17.0);
         theme::button(screen, RespawnButton, "Respawn", theme::ButtonOpts::new(theme::ButtonStyle::Primary).size(260.0, 50.0));

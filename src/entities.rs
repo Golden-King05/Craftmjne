@@ -101,6 +101,11 @@ fn yes() -> bool {
 }
 
 impl EntityDef {
+    /// The name to show: the active language's `entity.<id>`, or the English one from the file.
+    pub fn display(&self) -> String {
+        crate::lang::name_of("entity", &self.id, &self.name)
+    }
+
     /// The box an entity of this kind standing at `feet` collides with.
     pub fn collision_box(&self, feet: Vec3) -> Aabb {
         let s = self.collision_size;

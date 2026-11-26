@@ -34,6 +34,7 @@ pub mod knap_ui;
 pub mod entities;
 pub mod knapping;
 pub mod player_model;
+pub mod lang;
 pub mod light;
 pub mod load_order;
 pub mod menu;

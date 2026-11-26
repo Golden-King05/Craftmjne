@@ -244,7 +244,7 @@ fn edit_candidates(
         .collect();
     for folder in &meta.mods {
         if !found.iter().any(|m| &m.folder == folder) {
-            out.push((folder.clone(), format!("{folder} (missing)"), true));
+            out.push((folder.clone(), crate::lang::tr_args("{folder} (missing)", &[("folder", folder)]), true));
         }
     }
     out
@@ -258,16 +258,16 @@ fn with_warning_mark(label: String, m: &crate::mods::ModInfo) -> String {
 /// What a world's mod setup looks like in the list, e.g. "2 mods in this world".
 fn mods_summary(meta: &WorldMeta) -> Option<String> {
     if let Some(host) = &meta.branch_of {
-        return Some(format!("mods shared from {host}"));
+        return Some(crate::lang::tr_args("mods shared from {host}", &[("host", host)]));
     }
     if meta.mods.is_empty() {
         return None;
     }
     let n = meta.mods.len();
-    let plural = if n == 1 { "mod" } else { "mods" };
+    let count = crate::lang::tr_n("count.mods", n as i64, "{n} mod", "{n} mods", &[]);
     Some(match meta.mod_storage {
-        ModStorage::Instance => format!("{n} {plural} (from the game folder)"),
-        ModStorage::World => format!("{n} {plural} (kept in the world)"),
+        ModStorage::Instance => crate::lang::tr_args("{count} (from the game folder)", &[("count", &count)]),
+        ModStorage::World => crate::lang::tr_args("{count} (kept in the world)", &[("count", &count)]),
     })
 }
 
@@ -312,7 +312,7 @@ fn spawn_world_row(p: &mut ChildSpawnerCommands, slug: &str, meta: &WorldMeta, b
                     TextColor(if blocked.is_some() { theme::TEXT_DIM } else { theme::TEXT }),
                 ));
                 let subtitle = blocked.map(str::to_string).unwrap_or_else(|| {
-                    let mut s = format!("seed {}  -  {}", meta.seed, relative_time(meta.last_played_at));
+                    let mut s = crate::lang::tr_args("seed {seed}  -  {when}", &[("seed", &meta.seed.to_string()), ("when", &relative_time(meta.last_played_at))]);
                     if let Some(m) = mods_summary(meta) {
                         s.push_str("  -  ");
                         s.push_str(&m);
@@ -371,6 +371,7 @@ fn rebuild_worlds_content(
             WorldsScreenMode::Options | WorldsScreenMode::EditMods => "World Options",
         }
         .to_string();
+        heading.0 = crate::lang::tr(&heading.0);
     }
     let Ok(content) = content.single() else { return };
     commands.entity(content).despawn_related::<Children>();
@@ -397,7 +398,7 @@ fn rebuild_worlds_content(
                         // be worse - it would just look like the world had vanished.
                         let too_new = matches!(crate::save::compatibility(meta.format), crate::save::SaveCompatibility::TooNew { .. });
                         let blocked: Option<String> = if too_new {
-                            Some("made by a newer version - update Craftmjne to open it".to_string())
+                            Some(crate::lang::tr("made by a newer version - update Craftmjne to open it"))
                         } else {
                             resolve_world_mods(&store, slug, meta, &installed.0).err().map(|e| e.message())
                         };
@@ -417,7 +418,7 @@ fn rebuild_worlds_content(
             let candidates = meta.as_ref().map(|m| edit_candidates(&store, &editing, m, &installed.0)).unwrap_or_default();
             let storage = meta.as_ref().map_or(ModStorage::Instance, |m| m.mod_storage);
             commands.entity(content).with_children(|p| {
-                p.spawn((Text::new(format!("Mods for {}", meta.as_ref().map_or("this world", |m| m.name.as_str()))), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                p.spawn((Text::new(crate::lang::tr_args("Mods for {name}", &[("name", &meta.as_ref().map_or_else(|| crate::lang::tr("this world"), |m| m.name.clone()))])), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 theme::hint(
                     p,
                     match storage {
@@ -428,7 +429,7 @@ fn rebuild_worlds_content(
                 );
                 theme::hint(p, "Anything made with a mod you turn off stays in the world's save and comes back when you turn it on again.", 13.0);
                 if candidates.is_empty() {
-                    theme::hint(p, format!("No mods installed. Put mod folders in {}", installed.0.display()), 13.0);
+                    theme::hint(p, crate::lang::tr_args("No mods installed. Put mod folders in {path}", &[("path", &installed.0.display().to_string())]), 13.0);
                 }
                 p.spawn(scroll_list()).with_children(|list| {
                     for (folder, label, _) in &candidates {
@@ -486,7 +487,7 @@ fn rebuild_worlds_content(
                 if form.branch_of.is_some() {
                     theme::hint(p, "This world will use that world's mods and keep none of its own.", 13.0);
                 } else if mods.is_empty() {
-                    theme::hint(p, format!("No mods installed. Put mod folders in {}", installed.0.display()), 13.0);
+                    theme::hint(p, crate::lang::tr_args("No mods installed. Put mod folders in {path}", &[("path", &installed.0.display().to_string())]), 13.0);
                 } else {
                     theme::label(p, "Where this world keeps its mods");
                     p.spawn(Node { column_gap: Val::Px(8.0), margin: UiRect::bottom(Val::Px(6.0)), ..default() }).with_children(|row| {
@@ -513,11 +514,11 @@ fn rebuild_worlds_content(
 /// One line saying what the options currently hold, shown on the create form.
 fn options_summary(form: &CreateWorldForm) -> String {
     if let Some(host) = &form.branch_of {
-        return format!("Mods: shared with the world \"{host}\".");
+        return crate::lang::tr_args("Mods: shared with the world \"{host}\".", &[("host", host)]);
     }
     match form.chosen_mods.len() {
-        0 => "Mods: none. Game rules: defaults.".to_string(),
-        n => format!("Mods: {n} selected. Game rules: defaults."),
+        0 => crate::lang::tr("Mods: none. Game rules: defaults."),
+        n => crate::lang::tr_args("Mods: {n} selected. Game rules: defaults.", &[("n", &n.to_string())]),
     }
 }
 
@@ -560,11 +561,11 @@ fn sync_text_inputs(
     }
     for (mut text, disp) in &mut texts {
         let (buf, focused, placeholder) = match disp.0 {
-            TextField::Name => (&form.name, form.focus == TextField::Name, "World name..."),
-            TextField::Seed => (&form.seed_text, form.focus == TextField::Seed, "Random"),
+            TextField::Name => (&form.name, form.focus == TextField::Name, crate::lang::tr("World name...")),
+            TextField::Seed => (&form.seed_text, form.focus == TextField::Seed, crate::lang::tr("Random")),
         };
         text.0 = if buf.is_empty() && !focused {
-            placeholder.to_string()
+            placeholder
         } else if focused {
             format!("{buf}_")
         } else {
@@ -645,13 +646,13 @@ fn relative_time(unix_secs: u64) -> String {
         .unwrap_or(unix_secs);
     let elapsed = now.saturating_sub(unix_secs);
     if elapsed < 60 {
-        "just now".into()
+        crate::lang::tr("just now")
     } else if elapsed < 3600 {
-        format!("{} min ago", elapsed / 60)
+        crate::lang::tr_n("time.minutes_ago", (elapsed / 60) as i64, "{n} min ago", "{n} min ago", &[])
     } else if elapsed < 86400 {
-        format!("{} hr ago", elapsed / 3600)
+        crate::lang::tr_n("time.hours_ago", (elapsed / 3600) as i64, "{n} hr ago", "{n} hr ago", &[])
     } else {
-        format!("{} day(s) ago", elapsed / 86400)
+        crate::lang::tr_n("time.days_ago", (elapsed / 86400) as i64, "{n} day ago", "{n} days ago", &[])
     }
 }
 
@@ -674,7 +675,7 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
         root.spawn(theme::panel(620.0)).with_children(|p| {
             theme::heading(p, "Installed Mods");
             if mods.is_empty() && broken.is_empty() {
-                theme::hint(p, format!("No mods installed. Put mod folders in:\n{}", installed.0.display()), 15.0);
+                theme::hint(p, crate::lang::tr_args("No mods installed. Put mod folders in:\n{path}", &[("path", &installed.0.display().to_string())]), 15.0);
             }
             p.spawn(scroll_list()).with_children(|list| {
                 for m in &mods {
@@ -690,13 +691,13 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
                             theme::hint(c, m.description.clone(), 13.0);
                         }
                         for w in m.notes(crate::mods::GAME_VERSION) {
-                            c.spawn((Text::new(format!("Warning: {w}")), TextFont { font_size: 13.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(540.0), ..default() }));
+                            c.spawn((Text::new(crate::lang::tr_args("Warning: {w}", &[("w", &w.to_string())])), TextFont { font_size: 13.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(540.0), ..default() }));
                         }
                     });
                 }
                 for (_, why) in &broken {
                     list.spawn(card()).with_children(|c| {
-                        c.spawn((Text::new(format!("Won't work: {why}")), TextFont { font_size: 13.0, ..default() }, TextColor(theme::ERROR), Node { max_width: Val::Px(540.0), ..default() }));
+                        c.spawn((Text::new(crate::lang::tr_args("Won't work: {why}", &[("why", &why.to_string())])), TextFont { font_size: 13.0, ..default() }, TextColor(theme::ERROR), Node { max_width: Val::Px(540.0), ..default() }));
                     });
                 }
             });
@@ -850,8 +851,8 @@ fn handle_menu_buttons(
             MenuButton::ApplyEditMods => {
                 if let Some(slug) = form.editing.take() {
                     notice.0 = Some(match set_world_mods(&store, &slug, &installed.0, &form.chosen_mods) {
-                        Ok(_) => "Mods updated.".to_string(),
-                        Err(err) => format!("Couldn't change the mods: {err}"),
+                        Ok(_) => crate::lang::tr("Mods updated."),
+                        Err(err) => crate::lang::tr_args("Couldn't change the mods: {err}", &[("err", &err.to_string())]),
                     });
                 }
                 *mode = WorldsScreenMode::List;
@@ -870,7 +871,7 @@ fn handle_menu_buttons(
                         next_state.set(AppState::InGame);
                     }
                     Err(err) => {
-                        notice.0 = Some(format!("Couldn't create the world: {err}"));
+                        notice.0 = Some(crate::lang::tr_args("Couldn't create the world: {err}", &[("err", &err.to_string())]));
                         *mode = WorldsScreenMode::List;
                     }
                 }

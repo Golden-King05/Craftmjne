@@ -45,13 +45,14 @@ pub enum Section {
     Rendering,
     Sound,
     Saving,
+    Language,
     Controls,
     Packs,
     Mods,
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [Section::Player, Section::Rendering, Section::Sound, Section::Saving, Section::Controls, Section::Packs, Section::Mods];
+    pub const ALL: [Section; 8] = [Section::Player, Section::Rendering, Section::Sound, Section::Saving, Section::Language, Section::Controls, Section::Packs, Section::Mods];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -59,6 +60,7 @@ impl Section {
             Section::Rendering => "Rendering",
             Section::Sound => "Sound",
             Section::Saving => "Saving",
+            Section::Language => "Language",
             Section::Controls => "Controls",
             Section::Packs => "Packs",
             Section::Mods => "Mods",
@@ -84,11 +86,13 @@ pub struct SettingsView {
     pub device: Device,
     /// The keybind list's scroll offset, kept so rebuilding doesn't jump it to the top.
     pub scroll: f32,
+    /// The language group whose regional variants are showing in the Language list.
+    pub lang_open: Option<String>,
 }
 
 impl Default for SettingsView {
     fn default() -> Self {
-        Self { section: Section::Player, controls_tab: ControlsTab::Keybinds, search: String::new(), device: Device::Keyboard, scroll: 0.0 }
+        Self { section: Section::Player, controls_tab: ControlsTab::Keybinds, search: String::new(), device: Device::Keyboard, scroll: 0.0, lang_open: None }
     }
 }
 
@@ -113,6 +117,8 @@ enum SettingsButton {
     ToggleDefaultModStorage,
     ToggleAutosave,
     AutosaveMinutesDelta(i32),
+    LangGroup(String),
+    PickLanguage(String),
     Rebind(String),
     Unbind(String),
     Reset(String),
@@ -125,18 +131,18 @@ enum SettingsButton {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn autosave_label(options: &crate::save::AutosaveOptions) -> String {
-    if options.enabled { "Autosave: On".to_string() } else { "Autosave: Off".to_string() }
+    crate::lang::tr(if options.enabled { "Autosave: On" } else { "Autosave: Off" })
 }
 
 pub(crate) fn autosave_interval_label(options: &crate::save::AutosaveOptions) -> String {
     let m = options.minutes;
-    format!("Every {m} minute{}", if m == 1 { "" } else { "s" })
+    crate::lang::tr_n("autosave.every", m as i64, "Every {n} minute", "Every {n} minutes", &[])
 }
 
 pub(crate) fn mod_storage_label(storage: ModStorage) -> String {
     match storage {
-        ModStorage::Instance => "New worlds keep mods: in the game folder".to_string(),
-        ModStorage::World => "New worlds keep mods: in the world".to_string(),
+        ModStorage::Instance => crate::lang::tr("New worlds keep mods: in the game folder"),
+        ModStorage::World => crate::lang::tr("New worlds keep mods: in the world"),
     }
 }
 
@@ -166,8 +172,8 @@ pub(crate) fn also_used_by(bindings: &Bindings, id: &str) -> Option<String> {
 pub(crate) fn also_used_by_on(bindings: &Bindings, id: &str, device: Device) -> Option<String> {
     let others = bindings.conflicts_on(device, id);
     (!others.is_empty()).then(|| {
-        let names: Vec<&str> = others.iter().map(|o| bindings.def(o).map(|d| d.label.as_str()).unwrap_or(o.as_str())).collect();
-        format!("Also used by: {}", names.join(", "))
+        let names: Vec<String> = others.iter().map(|o| crate::lang::tr(bindings.def(o).map(|d| d.label.as_str()).unwrap_or(o.as_str()))).collect();
+        crate::lang::tr_args("Also used by: {names}", &[("names", &names.join(", "))])
     })
 }
 
@@ -179,8 +185,8 @@ pub(crate) fn conflict_summary(bindings: &Bindings) -> Option<String> {
 pub(crate) fn conflict_summary_on(bindings: &Bindings, device: Device) -> Option<String> {
     let n = bindings.conflicting_on(device).len();
     (n > 0).then(|| match device {
-        Device::Keyboard => format!("{n} controls share a key with another (shown in red)."),
-        Device::Controller => format!("{n} controls share a button with another (shown in red)."),
+        Device::Keyboard => crate::lang::tr_args("{n} controls share a key with another (shown in red).", &[("n", &n.to_string())]),
+        Device::Controller => crate::lang::tr_args("{n} controls share a button with another (shown in red).", &[("n", &n.to_string())]),
     })
 }
 
@@ -193,7 +199,7 @@ pub(crate) fn conflicts_anywhere(bindings: &Bindings) -> usize {
 pub(crate) fn tab_label(section: Section, bindings: &Bindings) -> String {
     let n = conflicts_anywhere(bindings);
     if section == Section::Controls && n > 0 {
-        format!("Controls ({n} in conflict)")
+        crate::lang::tr_args("Controls ({n} in conflict)", &[("n", &n.to_string())])
     } else {
         section.label().to_string()
     }
@@ -250,6 +256,7 @@ fn rebuild_settings(
     options: Res<ControlOptions>,
     sound: Res<crate::sound::SoundOptions>,
     autosave: Res<crate::save::AutosaveOptions>,
+    languages: Res<crate::lang::Languages>,
     pack_selection: Res<crate::packs::PackSelection>,
     installed_packs: Res<crate::packs::InstalledPacks>,
     world_settings: Res<WorldSettings>,
@@ -264,16 +271,20 @@ fn rebuild_settings(
     let pad_state = pad.as_deref().cloned().unwrap_or_default();
     let pad_changed = *pad_was_connected != pad_state.connected;
     *pad_was_connected = pad_state.connected;
-    if !(empty || pad_changed || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || sound.is_changed() || autosave.is_changed() || pack_selection.is_changed() || installed_packs.is_changed() || world_settings.is_changed()) {
+    if !(empty || pad_changed || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || sound.is_changed() || autosave.is_changed() || languages.is_changed() || pack_selection.is_changed() || installed_packs.is_changed() || world_settings.is_changed()) {
         return;
     }
     commands.entity(root).despawn_related::<Children>();
     commands.entity(root).with_children(|p| {
         // Section tabs.
-        p.spawn(Node { column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
+        p.spawn(Node { column_gap: Val::Px(6.0), row_gap: Val::Px(6.0), flex_wrap: FlexWrap::Wrap, justify_content: JustifyContent::Center, ..default() }).with_children(|row| {
             for section in Section::ALL {
                 let clash = section == Section::Controls && !bindings.conflicting().is_empty();
-                let width = if section == Section::Controls { 170.0 } else { 90.0 };
+                let width = match section {
+                    Section::Controls => 140.0,
+                    Section::Packs => 84.0,
+                    _ => 72.0,
+                };
                 sbutton(
                     row,
                     &tab_label(section, &bindings),
@@ -281,7 +292,7 @@ fn rebuild_settings(
                     ButtonStyle::Choice,
                     width,
                     38.0,
-                    16.0,
+                    14.0,
                     section == view.section,
                     if clash { RED } else { theme::TEXT },
                     clash.then_some(RED),
@@ -303,43 +314,94 @@ fn rebuild_settings(
         ))
         .with_children(|body| match view.section {
             Section::Player => {
-                body.spawn((Text::new("Player"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                body.spawn((Text::new(crate::lang::tr("Player")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 dim(body, "Player settings - field of view, mouse sensitivity and the like - will live here.", 15.0);
             }
             Section::Rendering => {
-                body.spawn((Text::new("Video"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                body.spawn((Text::new(crate::lang::tr("Video")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(16.0), margin: UiRect::top(Val::Px(8.0)), ..default() }).with_children(|row| {
                     sbutton(row, "-", SettingsButton::RenderDistanceDelta(-1), ButtonStyle::Normal, 46.0, 46.0, 24.0, false, theme::TEXT, None);
-                    row.spawn((Text::new(format!("Render distance: {}", world_settings.render_distance)), TextFont { font_size: 19.0, ..default() }, TextColor(theme::TEXT)));
+                    row.spawn((Text::new(crate::lang::tr_args("Render distance: {n}", &[("n", &world_settings.render_distance.to_string())])), TextFont { font_size: 19.0, ..default() }, TextColor(theme::TEXT)));
                     sbutton(row, "+", SettingsButton::RenderDistanceDelta(1), ButtonStyle::Normal, 46.0, 46.0, 24.0, false, theme::TEXT, None);
                 });
                 dim(body, "How many chunks around you are drawn. Takes effect after restart.", 13.0);
                 dim(body, "More video options (fullscreen, vsync, brightness) will appear here.", 14.0);
             }
             Section::Sound => {
-                body.spawn((Text::new("Sound"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                body.spawn((Text::new(crate::lang::tr("Sound")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 for slider in crate::sound::Slider::ALL {
-                    stepper(body, &format!("{}: {}%", slider.label(), sound.get(slider)), SettingsButton::VolumeDelta(slider, -10), SettingsButton::VolumeDelta(slider, 10));
+                    stepper(body, &format!("{}: {}%", crate::lang::tr(slider.label()), sound.get(slider)), SettingsButton::VolumeDelta(slider, -10), SettingsButton::VolumeDelta(slider, 10));
                 }
                 dim(body, "Resource packs and mods can replace any sound: see sounds/ in a pack.", 13.0);
             }
             Section::Saving => {
-                body.spawn((Text::new("Saving"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                body.spawn((Text::new(crate::lang::tr("Saving")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 sbutton(body, &autosave_label(&autosave), SettingsButton::ToggleAutosave, ButtonStyle::Choice, 300.0, 42.0, 17.0, autosave.enabled, theme::TEXT, None);
                 if autosave.enabled {
                     stepper(body, &autosave_interval_label(&autosave), SettingsButton::AutosaveMinutesDelta(-1), SettingsButton::AutosaveMinutesDelta(1));
                 }
                 dim(body, "Leaving a world, or closing the game with one open, always saves it.\nAn autosave is an extra snapshot taken in the background while you play, kept only until then: if the game ever crashes, the world is restored from it the next time you open it.", 13.0);
             }
+            Section::Language => spawn_language(body, &languages, &view),
             Section::Packs => crate::pack_panel::spawn_pack_panel(body, crate::pack_panel::PackScope::Global, false, &pack_selection, &[], &installed_packs, None),
             Section::Mods => {
-                body.spawn((Text::new("Mods"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                body.spawn((Text::new(crate::lang::tr("Mods")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 let storage = store.load_graphics_settings().mod_storage;
                 sbutton(body, &mod_storage_label(storage), SettingsButton::ToggleDefaultModStorage, ButtonStyle::Normal, 440.0, 44.0, 16.0, false, theme::TEXT, None);
                 dim(body, "Game folder: one copy of each mod, shared by every world (remove it and worlds using it won't open).\nIn the world: each world gets its own copy, so it can have mods the game doesn't.", 13.0);
             }
             Section::Controls => spawn_controls(body, &view, &bindings, &capture, &notes, &options, &pad_state),
         });
+    });
+}
+
+/// The group containing the language in use, if that group has regional variants (it starts open).
+fn open_group_of(languages: &crate::lang::Languages) -> Option<String> {
+    languages.catalog.groups().into_iter().find(|g| g.members.len() > 1 && g.members.contains(&languages.code)).map(|g| g.name)
+}
+
+/// "Español (México)  -  100%": a language and how much of the game is translated into it.
+pub(crate) fn language_label(languages: &crate::lang::Languages, code: &str) -> String {
+    let name = languages.catalog.language(code).map_or(code.to_string(), |l| l.name.clone());
+    format!("{name}  -  {}%", languages.catalog.percent(code))
+}
+
+fn spawn_language(body: &mut ChildSpawnerCommands, languages: &crate::lang::Languages, view: &SettingsView) {
+    body.spawn((Text::new(crate::lang::tr("Language")), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+    dim(body, "Commands such as /give stay in English in every language. The percentage is how much of the game is translated.", 13.0);
+    body.spawn((
+        KeybindList,
+        ScrollPosition { offset_x: 0.0, offset_y: view.scroll },
+        Node {
+            width: Val::Percent(100.0),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(4.0),
+            overflow: Overflow::scroll_y(),
+            ..default()
+        },
+    ))
+    .with_children(|list| {
+        for group in languages.catalog.groups() {
+            if let [only] = group.members.as_slice() {
+                sbutton(list, &language_label(languages, only), SettingsButton::PickLanguage(only.clone()), ButtonStyle::Choice, 440.0, 36.0, 15.0, *only == languages.code, theme::TEXT, None);
+                continue;
+            }
+            let open = view.lang_open.as_deref() == Some(group.name.as_str());
+            let holds_current = group.members.contains(&languages.code);
+            let label = format!("{} {}", if open { "v" } else { ">" }, group.name);
+            sbutton(list, &label, SettingsButton::LangGroup(group.name.clone()), ButtonStyle::Choice, 440.0, 36.0, 15.0, holds_current && !open, theme::TEXT, None);
+            if open {
+                for code in &group.members {
+                    sbutton(list, &language_label(languages, code), SettingsButton::PickLanguage(code.clone()), ButtonStyle::Choice, 400.0, 34.0, 14.0, *code == languages.code, theme::TEXT, None);
+                }
+            }
+        }
+        for note in &languages.notes {
+            list.spawn((Text::new(format!("{note}")), TextFont { font_size: 12.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(420.0), ..default() }));
+        }
     });
 }
 
@@ -353,16 +415,16 @@ fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
     match view.controls_tab {
         ControlsTab::Keybinds => spawn_keybinds(body, view, bindings, capture, notes, pad),
         ControlsTab::Options => {
-            body.spawn((Text::new("Flight (Creative mode)"), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }));
+            body.spawn((Text::new(crate::lang::tr("Flight (Creative mode)")), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }));
             body.spawn(Node { column_gap: Val::Px(10.0), ..default() }).with_children(|row| {
                 for mode in FlightMode::ALL {
                     sbutton(row, mode.label(), SettingsButton::SetFlightMode(mode), ButtonStyle::Choice, 210.0, 42.0, 16.0, mode == options.flight_mode, theme::TEXT, None);
                 }
             });
             dim(body, options.flight_mode.description(), 14.0);
-            body.spawn((Text::new("Controller sticks"), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(14.0)), ..default() }));
-            stepper(body, &format!("Look speed: {}%", options.look_speed_pct), SettingsButton::LookSpeedDelta(-25), SettingsButton::LookSpeedDelta(25));
-            stepper(body, &format!("Dead zone: {}%", options.deadzone_pct), SettingsButton::DeadzoneDelta(-5), SettingsButton::DeadzoneDelta(5));
+            body.spawn((Text::new(crate::lang::tr("Controller sticks")), TextFont { font_size: 18.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::top(Val::Px(14.0)), ..default() }));
+            stepper(body, &crate::lang::tr_args("Look speed: {n}%", &[("n", &options.look_speed_pct.to_string())]), SettingsButton::LookSpeedDelta(-25), SettingsButton::LookSpeedDelta(25));
+            stepper(body, &crate::lang::tr_args("Dead zone: {n}%", &[("n", &options.deadzone_pct.to_string())]), SettingsButton::DeadzoneDelta(-5), SettingsButton::DeadzoneDelta(5));
             sbutton(body, if options.invert_look_y { "Invert look (Y): On" } else { "Invert look (Y): Off" }, SettingsButton::ToggleInvertLook, ButtonStyle::Choice, 260.0, 38.0, 16.0, options.invert_look_y, theme::TEXT, None);
             dim(body, "Dead zone is how far a stick must move before it counts - raise it if the view drifts on its own.", 13.0);
         }
@@ -392,9 +454,9 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
         ))
         .with_children(|b| {
             let (text, color) = if view.search.is_empty() && capture.active() {
-                ("Search".to_string(), TEXT_DIM)
+                (crate::lang::tr("Search"), TEXT_DIM)
             } else if view.search.is_empty() {
-                (format!("Search...  (try {}:a)_", if device == Device::Keyboard { "key" } else { "btn" }), TEXT_DIM)
+                (crate::lang::tr_args("Search...  (try {prefix}:a)_", &[("prefix", if device == Device::Keyboard { "key" } else { "btn" })]), TEXT_DIM)
             } else if capture.active() {
                 (view.search.clone(), theme::TEXT)
             } else {
@@ -427,8 +489,8 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
         let label = bindings.def(id).map(|d| d.label.as_str()).unwrap_or(id.as_str());
         body.spawn((
             Text::new(match device {
-                Device::Keyboard => format!("Binding \"{label}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels."),
-                Device::Controller => format!("Binding \"{label}\": press a controller button. Esc on the keyboard cancels."),
+                Device::Keyboard => crate::lang::tr_args("Binding \"{label}\": press a key, click, or a combo like Ctrl+Alt+A. Release Ctrl/Alt/Shift alone to bind it by itself. Esc cancels.", &[("label", &crate::lang::tr(label))]),
+                Device::Controller => crate::lang::tr_args("Binding \"{label}\": press a controller button. Esc on the keyboard cancels.", &[("label", &crate::lang::tr(label))]),
             }),
             TextFont { font_size: 14.0, ..default() },
             TextColor(YELLOW),
@@ -457,7 +519,7 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
             dim(list, "No controls match.", 15.0);
         }
         for (category, ids) in rows {
-            list.spawn((Text::new(category), TextFont { font_size: 17.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(4.0)), ..default() }));
+            list.spawn((Text::new(crate::lang::tr(&category)), TextFont { font_size: 17.0, ..default() }, TextColor(theme::ACCENT), Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(4.0)), ..default() }));
             for (n, id) in ids.into_iter().enumerate() {
                 let Some(def) = bindings.def(&id) else { continue };
                 let clash = conflicting.contains(&id);
@@ -468,7 +530,7 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
                 ))
                 .with_children(|entry| {
                     entry.spawn(Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
-                        row.spawn((Text::new(def.label.clone()), TextFont { font_size: 16.0, ..default() }, TextColor(if clash { RED } else { theme::TEXT })));
+                        row.spawn((Text::new(crate::lang::tr(&def.label)), TextFont { font_size: 16.0, ..default() }, TextColor(if clash { RED } else { theme::TEXT })));
                         row.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).with_children(|buttons| {
                             let shown = match device {
                                 Device::Keyboard => bindings.get(&id).map(|c| c.display()),
@@ -484,24 +546,24 @@ fn spawn_keybinds(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings
                             theme::button(buttons, SettingsButton::Rebind(id.clone()), &text, ButtonOpts::new(ButtonStyle::Key).size(200.0, 32.0).font(15.0).text(color).accent(accent).glyph(glyph));
                             let is_default = if device == Device::Keyboard { bindings.is_default(&id) } else { bindings.pad_is_default(&id) };
                             let changed = if is_default { TEXT_DIM } else { theme::TEXT };
-                            sbutton(buttons, "Reset", SettingsButton::Reset(id.clone()), ButtonStyle::Normal, 62.0, 32.0, 13.0, false, changed, None);
+                            sbutton(buttons, "Reset", SettingsButton::Reset(id.clone()), ButtonStyle::Normal, 70.0, 32.0, 13.0, false, changed, None);
                             let is_bound = if device == Device::Keyboard { bindings.get(&id).is_some() } else { bindings.pad_get(&id).is_some() };
                             let bound = if is_bound { theme::TEXT } else { TEXT_DIM };
-                            sbutton(buttons, "Unbind", SettingsButton::Unbind(id.clone()), ButtonStyle::Normal, 72.0, 32.0, 13.0, false, bound, None);
+                            sbutton(buttons, "Unbind", SettingsButton::Unbind(id.clone()), ButtonStyle::Normal, 104.0, 32.0, 13.0, false, bound, None);
                         });
                     });
                     if let Some(note) = also_used_by_on(bindings, &id, device) {
                         entry.spawn((Text::new(note), TextFont { font_size: 12.0, ..default() }, TextColor(RED)));
                     }
                     if let Some(command) = &def.command {
-                        entry.spawn((Text::new(format!("runs {command}")), TextFont { font_size: 12.0, ..default() }, TextColor(TEXT_DIM)));
+                        entry.spawn((Text::new(crate::lang::tr_args("runs {command}", &[("command", command)])), TextFont { font_size: 12.0, ..default() }, TextColor(TEXT_DIM)));
                     }
                 });
             }
         }
     });
     for note in &notes.0 {
-        body.spawn((Text::new(format!("Mod control skipped: {note}")), TextFont { font_size: 12.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(700.0), ..default() }));
+        body.spawn((Text::new(crate::lang::tr_args("Mod control skipped: {note}", &[("note", note)])), TextFont { font_size: 12.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(700.0), ..default() }));
     }
 }
 
@@ -548,6 +610,8 @@ fn handle_settings_buttons(
     mut options: ResMut<ControlOptions>,
     mut sound: ResMut<crate::sound::SoundOptions>,
     mut autosave: ResMut<crate::save::AutosaveOptions>,
+    mut languages: ResMut<crate::lang::Languages>,
+    installed_mods: Res<crate::mods::InstalledMods>,
     mut installed_packs: ResMut<crate::packs::InstalledPacks>,
     pack_folder: Res<crate::packs::PackFolder>,
     store: Res<SaveStore>,
@@ -560,6 +624,11 @@ fn handle_settings_buttons(
             SettingsButton::Section(section) => {
                 if section == Section::Packs {
                     installed_packs.0 = crate::packs::scan_packs(&pack_folder.0);
+                }
+                if section == Section::Language {
+                    // A mod may have been added since the game started.
+                    languages.reload(&crate::blocks::find_data_dir("lang"), &installed_mods.0);
+                    view.lang_open = open_group_of(&languages);
                 }
                 view.section = section;
                 view.scroll = 0.0;
@@ -587,6 +656,14 @@ fn handle_settings_buttons(
             SettingsButton::VolumeDelta(slider, d) => {
                 sound.nudge(slider, d);
                 let _ = store.save_sound_options(&sound);
+            }
+            SettingsButton::LangGroup(name) => {
+                view.lang_open = if view.lang_open.as_deref() == Some(name.as_str()) { None } else { Some(name) };
+            }
+            SettingsButton::PickLanguage(code) => {
+                if languages.select(&code) {
+                    let _ = store.save_language(&code);
+                }
             }
             SettingsButton::ToggleAutosave => {
                 autosave.enabled = !autosave.enabled;
@@ -705,7 +782,7 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<crate::sound::SoundOptions>().init_resource::<crate::save::AutosaveOptions>().init_resource::<crate::packs::PackFolder>();
+        app.init_resource::<crate::sound::SoundOptions>().init_resource::<crate::save::AutosaveOptions>().init_resource::<crate::lang::Languages>().init_resource::<crate::mods::InstalledMods>().init_resource::<crate::packs::PackFolder>();
         if !app.is_plugin_added::<crate::pack_panel::PackPanelPlugin>() {
             app.add_plugins(crate::pack_panel::PackPanelPlugin);
         }
@@ -883,6 +960,43 @@ mod tests {
         let saved = s.app.world().resource::<SaveStore>().load_sound_options();
         assert_eq!(saved.blocks, 70, "saved to disk");
         assert!(s.texts().iter().any(|t| t == "Blocks: 70%"));
+    }
+
+    #[test]
+    fn the_language_list_groups_variants_shows_percentages_and_picks_and_saves() {
+        let mut s = screen();
+        // A small catalog: English, a two-variant group and a lone language, one of them half translated.
+        let files = |code: &str, json: &str| crate::lang::parse_file(code, json).unwrap().0;
+        let catalog = crate::lang::Catalog::build(vec![
+            files("en", r#"{"A": "a", "B": "b"}"#),
+            files("es-ES", r#"{"_meta": {"name": "Español (España)", "group": "Español"}, "A": "x", "B": "y"}"#),
+            files("es-MX", r#"{"_meta": {"name": "Español (México)", "group": "Español", "fallback": "es-ES"}}"#),
+            files("hi", r#"{"_meta": {"name": "Hindi"}, "A": "x"}"#),
+        ]);
+        s.app.world_mut().resource_mut::<crate::lang::Languages>().catalog = std::sync::Arc::new(catalog);
+        // Opening the tab by clicking re-reads the real files; open it directly so the test's catalog stays.
+        s.app.world_mut().resource_mut::<SettingsView>().section = Section::Language;
+        s.app.update();
+        s.app.update();
+        let texts = s.texts();
+        assert!(texts.iter().any(|t| t == "English  -  100%"), "English is listed directly: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Hindi  -  50%"), "a lone language shows its own percentage");
+        assert!(texts.iter().any(|t| t == "> Español"), "variants sit under one heading");
+        assert!(!texts.iter().any(|t| t.starts_with("Español (")), "collapsed: the variants are not listed yet");
+        // Opening the heading lists both variants, with what they inherit counted.
+        s.click(SettingsButton::LangGroup("Español".into()));
+        let texts = s.texts();
+        assert!(texts.iter().any(|t| t == "v Español"));
+        assert!(texts.iter().any(|t| t == "Español (España)  -  100%"));
+        assert!(texts.iter().any(|t| t == "Español (México)  -  100%"), "inherits from España");
+        // Clicking it again closes it.
+        s.click(SettingsButton::LangGroup("Español".into()));
+        assert!(!s.texts().iter().any(|t| t.starts_with("Español (")));
+        // Picking a language chooses it and saves it.
+        s.click(SettingsButton::LangGroup("Español".into()));
+        s.click(SettingsButton::PickLanguage("es-ES".into()));
+        assert_eq!(s.app.world().resource::<crate::lang::Languages>().code, "es-ES");
+        assert_eq!(s.app.world().resource::<SaveStore>().load_language(), "es-ES");
     }
 
     #[test]
@@ -1214,7 +1328,7 @@ mod tests {
     #[test]
     fn the_sections_are_the_ones_asked_for() {
         let labels: Vec<_> = Section::ALL.iter().map(|s| s.label()).collect();
-        assert_eq!(labels, ["Player", "Rendering", "Sound", "Saving", "Controls", "Packs", "Mods"]);
+        assert_eq!(labels, ["Player", "Rendering", "Sound", "Saving", "Language", "Controls", "Packs", "Mods"]);
     }
 
     #[test]

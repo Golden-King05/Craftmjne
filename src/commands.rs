@@ -76,17 +76,20 @@ fn texture_report_message(report: &TextureReport) -> String {
     let (working, placeholder, missing) = report.counts();
     let (placeholder_names, missing_names) = report.broken_names();
 
-    let mut lines = vec![format!(
-        "Textures: {}  {}  {}",
-        colorize(&format!("{working} working"), "00ff00"),
-        colorize(&format!("{placeholder} broken but functioning"), "ffff00"),
-        colorize(&format!("{missing} completely broken"), "ff0000"),
+    let n = |v: usize| v.to_string();
+    let mut lines = vec![crate::lang::tr_args(
+        "Textures: {working}  {placeholder}  {missing}",
+        &[
+            ("working", &colorize(&crate::lang::tr_args("{n} working", &[("n", &n(working))]), "00ff00")),
+            ("placeholder", &colorize(&crate::lang::tr_args("{n} broken but functioning", &[("n", &n(placeholder))]), "ffff00")),
+            ("missing", &colorize(&crate::lang::tr_args("{n} completely broken", &[("n", &n(missing))]), "ff0000")),
+        ],
     )];
     if !placeholder_names.is_empty() {
-        lines.push(colorize(&format!("Broken but functioning: {}", placeholder_names.join(", ")), "ffff00"));
+        lines.push(colorize(&crate::lang::tr_args("Broken but functioning: {names}", &[("names", &placeholder_names.join(", "))]), "ffff00"));
     }
     if !missing_names.is_empty() {
-        lines.push(colorize(&format!("Completely broken: {}", missing_names.join(", ")), "ff0000"));
+        lines.push(colorize(&crate::lang::tr_args("Completely broken: {names}", &[("names", &missing_names.join(", "))]), "ff0000"));
     }
     lines.join("\n")
 }
@@ -98,18 +101,20 @@ const EMOJI_REPORT_NAMES: usize = 30;
 /// that are still labelled tiles rather than pictures.
 fn emoji_report_message(s: &crate::emoji::standard::Summary) -> String {
     let n = s.placeholder_count();
-    let mut lines = vec![format!(
-        "Emoji: {} in the standard  {}  {}  {}",
-        s.total,
-        colorize(&format!("{} drawn or made by rule", s.existing + s.generated), "00ff00"),
-        colorize(&format!("{n} labelled tiles"), "ffff00"),
-        colorize("0 missing", "ff0000"),
+    let mut lines = vec![crate::lang::tr_args(
+        "Emoji: {total} in the standard  {drawn}  {tiles}  {missing}",
+        &[
+            ("total", &s.total.to_string()),
+            ("drawn", &colorize(&crate::lang::tr_args("{n} drawn or made by rule", &[("n", &(s.existing + s.generated).to_string())]), "00ff00")),
+            ("tiles", &colorize(&crate::lang::tr_args("{n} labelled tiles", &[("n", &n.to_string())]), "ffff00")),
+            ("missing", &colorize(&crate::lang::tr("0 missing"), "ff0000")),
+        ],
     )];
     if n > 0 {
         let shown: Vec<&str> = s.placeholders.iter().take(EMOJI_REPORT_NAMES).map(String::as_str).collect();
         let more = n.saturating_sub(EMOJI_REPORT_NAMES);
-        let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
-        lines.push(colorize(&format!("Tiles to replace with art: {}{tail}", shown.join(", ")), "ffff00"));
+        let tail = if more > 0 { crate::lang::tr_args(", and {n} more", &[("n", &more.to_string())]) } else { String::new() };
+        lines.push(colorize(&format!("{}{tail}", crate::lang::tr_args("Tiles to replace with art: {names}", &[("names", &shown.join(", "))])), "ffff00"));
     }
     lines.join("\n")
 }
@@ -195,7 +200,7 @@ fn locate_result_message(ctx: &CommandContext, label: &str, found: (i32, i32), o
     let dx = f64::from(x - origin.0);
     let dz = f64::from(z - origin.1);
     let distance = (dx * dx + dz * dz).sqrt().round() as i64;
-    format!("Nearest {label}: ({x}, {y}, {z}) - {distance} blocks away")
+    crate::lang::tr_args("Nearest {label}: ({x}, {y}, {z}) - {distance} blocks away", &[("label", label), ("x", &x.to_string()), ("y", &y.to_string()), ("z", &z.to_string()), ("distance", &distance.to_string())])
 }
 
 /// `/locate`'s handler: dispatches on the qualifier, then (for `biome`/
@@ -203,23 +208,23 @@ fn locate_result_message(ctx: &CommandContext, label: &str, found: (i32, i32), o
 /// `TerrainGenerator::locate_biome`/`locate_feature` are the actual
 /// searches; this just validates input and formats the result.
 fn locate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
-    const USAGE: &str = "Usage: /locate <biome|feature|structure> <name>";
+    let usage_text = usage_of("/locate <biome|feature|structure> <name>");
     let Some(qualifier) = args.first().and_then(|a| LocateQualifier::parse(a)) else {
-        return CommandOutcome::Usage(USAGE.to_string());
+        return CommandOutcome::Usage(usage_text);
     };
 
     if qualifier == LocateQualifier::Structure {
-        return CommandOutcome::Usage("Structures aren't implemented yet.".to_string());
+        return CommandOutcome::Usage(crate::lang::tr("Structures aren't implemented yet."));
     }
 
-    let Some(name) = args.get(1) else { return CommandOutcome::Usage(USAGE.to_string()) };
+    let Some(name) = args.get(1) else { return CommandOutcome::Usage(usage_text.clone()) };
     let origin = (ctx.player_pos.x.floor() as i32, ctx.player_pos.z.floor() as i32);
 
     match qualifier {
         LocateQualifier::Biome => {
             let Some(biome) = Biome::parse(name) else {
                 let valid: Vec<&str> = Biome::ALL.iter().map(|b| b.name()).collect();
-                return CommandOutcome::Usage(format!("Unknown biome {name:?}. Try: {}", valid.join(", ")));
+                return CommandOutcome::Usage(crate::lang::tr_args("Unknown biome {name}. Try: {list}", &[("name", &format!("{name:?}")), ("list", &valid.join(", "))]));
             };
             match ctx.world_gen.locate_biome(biome, origin.0, origin.1) {
                 Some(found) => CommandOutcome::Ok(locate_result_message(
@@ -229,20 +234,20 @@ fn locate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
                     origin,
                     false,
                 )),
-                None => CommandOutcome::Ok(format!("Couldn't find a nearby {} biome.", biome.name())),
+                None => CommandOutcome::Ok(crate::lang::tr_args("Couldn't find a nearby {what}.", &[("what", &format!("{} biome", biome.name()))])),
             }
         }
         LocateQualifier::Feature => {
             let Some(feature) = Feature::parse(name) else {
                 let valid: Vec<&str> = Feature::ALL.iter().map(|f| f.name()).collect();
-                return CommandOutcome::Usage(format!("Unknown feature {name:?}. Try: {}", valid.join(", ")));
+                return CommandOutcome::Usage(crate::lang::tr_args("Unknown feature {name}. Try: {list}", &[("name", &format!("{name:?}")), ("list", &valid.join(", "))]));
             };
             let is_water = matches!(feature, Feature::Ocean | Feature::River);
             match ctx.world_gen.locate_feature(feature, origin.0, origin.1) {
                 Some(found) => {
                     CommandOutcome::Ok(locate_result_message(ctx, feature.name(), found, origin, is_water))
                 }
-                None => CommandOutcome::Ok(format!("Couldn't find a nearby {}.", feature.name())),
+                None => CommandOutcome::Ok(crate::lang::tr_args("Couldn't find a nearby {what}.", &[("what", feature.name())])),
             }
         }
         LocateQualifier::Structure => unreachable!("handled above"),
@@ -292,7 +297,7 @@ pub fn parse_coord(token: &str, player: f32) -> Option<i32> {
 }
 
 fn blockstate_handler(args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
-    let usage = || CommandOutcome::Usage("Usage: /blockstate <x> <y> <z> [tag] [value]  (~ is your position)".to_string());
+    let usage = || CommandOutcome::Usage(usage_of("/blockstate <x> <y> <z> [tag] [value]  (~ is your position)"));
     if args.len() < 3 || args.len() > 5 {
         return usage();
     }
@@ -332,14 +337,14 @@ pub fn summon_position(player_pos: Vec3, yaw: f32) -> (Vec3, f32) {
 }
 
 fn summon_handler(registry: &EntityRegistry, args: &[&str], ctx: &mut CommandContext) -> CommandOutcome {
-    let usage = || CommandOutcome::Usage(format!("Usage: /summon <{}>", registry.ids().join("|")));
+    let usage = || CommandOutcome::Usage(usage_of(&format!("/summon <{}>", registry.ids().join("|"))));
     let Some(name) = args.first() else { return usage() };
     let Some(kind) = registry.by_name(&name.to_lowercase()) else {
-        return CommandOutcome::Usage(format!("Unknown entity \"{name}\". Try: {}", registry.ids().join(", ")));
+        return CommandOutcome::Usage(crate::lang::tr_args("Unknown entity \"{name}\". Try: {list}", &[("name", name), ("list", &registry.ids().join(", "))]));
     };
     let (pos, yaw) = summon_position(ctx.player_pos, ctx.player_yaw);
     ctx.requests.spawns.push(SpawnEntity::at(kind, pos, yaw));
-    CommandOutcome::Ok(format!("Summoned {}.", registry.defs[kind].name))
+    CommandOutcome::Ok(crate::lang::tr_args("Summoned {name}.", &[("name", &registry.defs[kind].display())]))
 }
 
 /// One registered command: the metadata that drives both dispatch and the
@@ -469,9 +474,9 @@ impl CommandRegistry {
                     Some(new_mode) => {
                         *ctx.mode = new_mode;
                         ctx.active.meta.mode = new_mode;
-                        CommandOutcome::Ok(format!("Game mode set to {}", mode_label(new_mode)))
+                        CommandOutcome::Ok(crate::lang::tr_args("Game mode set to {mode}", &[("mode", &crate::lang::tr(mode_label(new_mode)))]))
                     }
-                    None => CommandOutcome::Usage("Usage: /mode <survival|creative|s|c|1|2>".to_string()),
+                    None => CommandOutcome::Usage(usage_of("/mode <survival|creative|s|c|1|2>")),
                 },
             )
             .alias("gamemode"),
@@ -514,7 +519,7 @@ impl CommandRegistry {
             "Remove every entity from the world.",
             |_args, ctx| {
                 ctx.requests.clear_entities = true;
-                CommandOutcome::Ok("Removed all entities.".to_string())
+                CommandOutcome::Ok(crate::lang::tr("Removed all entities."))
             },
         ));
         reg.register(
@@ -561,7 +566,7 @@ impl CommandRegistry {
 
         let outcome = match self.commands.iter().find(|c| c.matches(name)) {
             Some(spec) => (spec.handler)(&args, ctx),
-            None => CommandOutcome::Unknown(format!("Unknown command: /{name}")),
+            None => CommandOutcome::Unknown(crate::lang::tr_args("Unknown command: /{name}", &[("name", name)])),
         };
 
         if outcome.counts_as_command_use() {
@@ -586,7 +591,7 @@ impl CommandRegistry {
                     out.push(CommandSuggestion {
                         text: name.to_string(),
                         usage: spec.usage.clone(),
-                        description: spec.description.clone(),
+                        description: crate::lang::tr(&spec.description),
                     });
                 }
             }
@@ -620,7 +625,7 @@ impl CommandRegistry {
                 CommandSuggestion {
                     text: tokens.join(" "),
                     usage: spec.usage.clone(),
-                    description: c.description,
+                    description: crate::lang::tr(&c.description),
                 }
             })
             .collect();
@@ -639,6 +644,11 @@ impl bevy::prelude::Plugin for CommandsPlugin {
     }
 }
 
+
+/// "Usage: /cmd <args>": the sentence is translated, the command syntax never is.
+fn usage_of(syntax: &str) -> String {
+    crate::lang::tr_args("Usage: {syntax}", &[("syntax", syntax)])
+}
 #[cfg(test)]
 mod tests {
     use super::*;

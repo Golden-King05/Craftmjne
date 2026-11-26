@@ -292,7 +292,7 @@ fn reload_on_key(
     installed.0 = scan_packs(&folder.0);
     reload.0 += 1;
     if let Some(mut log) = log {
-        log.push("Resource packs reloaded.".to_string());
+        log.push(crate::lang::tr("Resource packs reloaded."));
     }
 }
 

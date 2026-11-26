@@ -175,7 +175,7 @@ pub(crate) fn knap_input(
                         }
                         knap.active = None;
                     }
-                    None => active.message = "You no longer have the haft and binding.".into(),
+                    None => active.message = crate::lang::tr("You no longer have the haft and binding."),
                 }
                 return;
             }
@@ -200,7 +200,7 @@ pub(crate) fn knap_input(
     }
     if !active.started {
         if !consume_knap_stone(recipe, &mut hotbar.slots, &mut inventory.slots) {
-            active.message = "You no longer have the stone.".into();
+            active.message = crate::lang::tr("You no longer have the stone.");
             return;
         }
         active.started = true;
@@ -213,13 +213,13 @@ pub(crate) fn knap_input(
 
 fn describe(outcome: Outcome) -> String {
     if outcome.broken > 0 {
-        "The stone cracks through!".into()
+        crate::lang::tr("The stone cracks through!")
     } else if outcome.arrested {
-        "A crack runs into the stone and stops, leaving a flaw.".into()
+        crate::lang::tr("A crack runs into the stone and stops, leaving a flaw.")
     } else if outcome.cracked {
-        "A crack starts to run...".into()
+        crate::lang::tr("A crack starts to run...")
     } else if outcome.fallen > 0 {
-        "A piece falls away.".into()
+        crate::lang::tr("A piece falls away.")
     } else {
         String::new()
     }
@@ -243,7 +243,7 @@ pub(crate) fn sync_knap_screen(
     let session = &active.session;
     let rarity = registry.rarity(session.quality());
     let [r, g, b] = rarity.color;
-    let tool = registry.def(recipe.output.id).name.clone();
+    let tool = registry.def(recipe.output.id).display();
 
     commands
         .spawn((
@@ -274,11 +274,11 @@ pub(crate) fn sync_knap_screen(
             ))
             .with_children(|panel| {
                 let text = |s: String, size: f32, color: Color| {
-                    (Text::new(s), TextFont { font_size: size, ..default() }, TextColor(color))
+                    (Text::new(crate::lang::tr(&s)), TextFont { font_size: size, ..default() }, TextColor(color))
                 };
-                panel.spawn(text(format!("Knapping: {tool}"), 24.0, Color::WHITE));
+                panel.spawn(text(crate::lang::tr_args("Knapping: {tool}", &[("tool", &tool)]), 24.0, Color::WHITE));
                 panel.spawn(text(
-                    "Left click strikes (deep hits can crack). Right click taps one cell.".into(),
+                    crate::lang::tr("Left click strikes (deep hits can crack). Right click taps one cell."),
                     13.0,
                     Color::srgb(0.7, 0.7, 0.75),
                 ));
@@ -315,21 +315,21 @@ pub(crate) fn sync_knap_screen(
                         }
                     });
                 panel.spawn(text(
-                    format!("Quality: {}", rarity.name),
+                    crate::lang::tr_args("Quality: {rarity}", &[("rarity", &rarity.display())]),
                     20.0,
                     Color::srgb(r, g, b),
                 ));
                 panel.spawn(text(
-                    format!("Taps left: {} of {MAX_TAPS}", session.taps_left()),
+                    crate::lang::tr_args("Taps left: {n} of {max}", &[("n", &session.taps_left().to_string()), ("max", &MAX_TAPS.to_string())]),
                     14.0,
                     Color::WHITE,
                 ));
                 let hint = if !active.message.is_empty() {
                     active.message.clone()
                 } else if active.started {
-                    "Closing now loses the stone.".into()
+                    crate::lang::tr("Closing now loses the stone.")
                 } else {
-                    "The stone is used up by your first strike.".into()
+                    crate::lang::tr("The stone is used up by your first strike.")
                 };
                 panel.spawn(text(hint, 14.0, Color::srgb(0.9, 0.8, 0.5)));
                 panel.spawn(Node { column_gap: Val::Px(12.0), ..default() }).with_children(|row| {

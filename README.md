@@ -1099,6 +1099,55 @@ on disk. Not covered: the OS killing the process or a power cut *during* the
 emergency save, and a crash between a world's creation and its first snapshot
 (the world then reopens as new).
 
+## Translations
+
+Settings > **Language** picks the language. Shipped: English, Español (España), Español (México), Português
+(Portugal), Português (Brasil), Français (France), हिन्दी, 繁體中文 (台灣) and 简体中文 (中国). Languages with regional
+variants are one heading in the list (Español, Português, 中文) that opens to show its variants; each language
+shows **how much of the game is translated**, as a percentage. The choice is saved per launcher instance
+(`language.json`). `CRAFT_LANG=<code>` overrides it for one run.
+
+**Everything is translated except commands**: `/give`, its arguments and its syntax stay English in every
+language (their descriptions and results are translated). Left in English on purpose: the F3 debug overlay,
+developer-facing errors (a broken mod or recipe file, `mod.json` problems), key names in a chord (Ctrl+A), search
+syntax (`key:a`), and the launcher (a separate program). A translation of *your own* world or mod names is up to you.
+
+**How it works.** A language is `lang/<code>.json`: a flat `"key": "text"` object and an optional `_meta`:
+
+```json
+{ "_meta": { "name": "Español (México)", "group": "Español", "fallback": "es-ES" },
+  "Settings": "Configuración",
+  "block.stone": "Piedra" }
+```
+
+* `name` is how it's listed, `group` the heading variants share, `fallback` the language to try for a missing
+  string (before English), `cjk` (`zh-Hans`, `zh-Hant`, `ja`) the ideograph set to draw.
+* **Keys.** Interface text uses its English text as the key (`"Worlds"`); named things use `block.<id>`,
+  `item.<id>`, `entity.<id>`, `rarity.<id>`. `{name}` is a placeholder. Counts are `key.one` / `key.other`, picked by
+  the language's own plural rule (French and Hindi count 0 as singular, Portugal's Portuguese doesn't, Chinese has
+  none). An empty string means "not translated yet".
+* **`lang/en.json` is the reference** - it lists every key. A language's percentage is the share of those keys it
+  has text for (counting what it inherits through `fallback`, since that is what a player sees), so it **drops by
+  itself when keys are added and rises as they are translated**; nothing is stored. Today every shipped language is at
+  100%. When strings are added without being translated, lower `SHIPPED_PERCENT` in `src/lang.rs` on purpose and say so.
+* **Adding strings in code**: wrap them in `lang::tr("English text")` (or `tr_args` / `tr_n`), add the key to
+  `lang/en.json`. A test fails if code uses a key `en.json` lacks, including text handed to the UI helpers
+  (`theme::button`, `hint`, ...), which translate their text themselves.
+
+**Mods** add `lang/<code>.json` to their folder:
+
+* A file for a language the game has adds to it - a mod translating its own content (`block.mymod:granite`), or
+  **another mod's** (an add-on that only ships `lang/fr-FR.json` with that mod's keys).
+* A file for a code the game doesn't know, with a `_meta`, **adds a new language to the list** (it can join an
+  existing group, e.g. `"group": "Español"` for `es-AR`).
+* Ship `lang/en.json` with your own keys so the percentages count them. Mods load after the game, in folder-name
+  order, each overriding what came before; the game's names for a language can't be changed by a mod.
+* Files are read from the installed mods folder when the game starts and whenever the Language tab opens.
+
+Notes on the translations themselves: they were written for this project, not by native-speaking reviewers - treat
+them as a solid first pass and correct them freely (they are plain JSON). Hindi is drawn with the game's own
+Devanagari, which is still a first pass.
+
 ## Fluid flow
 
 Any block with `fluid: true` (water today) spreads and dries up

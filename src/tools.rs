@@ -236,6 +236,13 @@ pub struct Rarity {
     pub color: [f32; 3],
 }
 
+impl Rarity {
+    /// The name to show: the active language's `rarity.<id>`, or the English one from the file.
+    pub fn display(&self) -> String {
+        crate::lang::name_of("rarity", &self.id, &self.name)
+    }
+}
+
 #[derive(Deserialize)]
 struct RarityFile {
     id: String,

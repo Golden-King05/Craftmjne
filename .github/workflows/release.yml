@@ -86,6 +86,7 @@ jobs:
           cp -r recipes "$stage/recipes"
           cp -r tiers "$stage/tiers"
           cp -r rarities "$stage/rarities"
+          cp -r lang "$stage/lang"
           cp -r entities "$stage/entities"
           cp -r third_party "$stage/third_party"
           # The whole directories, not just their READMEs - a past version of

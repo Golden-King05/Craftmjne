@@ -890,6 +890,11 @@ pub struct BlockDef {
 }
 
 impl BlockDef {
+    /// The name to show: the active language's `block.<id>`, or the English one from the file.
+    pub fn display(&self) -> String {
+        crate::lang::name_of("block", &self.id, &self.name)
+    }
+
     /// The texture name this block's `face` (0..6, see the face-order doc
     /// above `FaceTextures`) resolves to: an explicit `textures` override
     /// if this block's file set one for that face, otherwise whatever
