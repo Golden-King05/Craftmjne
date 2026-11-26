@@ -3765,3 +3765,27 @@ etc.) instead of inventing a new approach:
     `[virama, C]` ligatures under `half`/`blwf`; no base-finding data was needed.
   - Not verified: how the stacks look to a reader of each script (software-rendered screenshot only), and line
     spacing under tall stacks (subscripts reach ~6 rows below the baseline, into the 1.5 line height's slack).
+
+- **Autosave is a second file, not a second save of the same one.** The old autosave rewrote `data.json`
+  every 30 s, so a crash mid-session left whatever the last write was and a clean close and a crash were
+  indistinguishable on disk. Now `SaveKind::Real` (`data.json`: leaving the world, and `emergency_save` on
+  `AppExit`, a `Last` system gated on being in-game with content ok) and `SaveKind::Autosave`
+  (`autosave.json`, background, every `AutosaveOptions::interval_secs()`, default 5 minutes, 1-60,
+  `saving.json` per instance). Recovery is `SaveStore::recover_autosave`: a snapshot whose mtime is
+  *strictly newer* than `data.json`'s (or with no `data.json`) is promoted to the real save and deleted;
+  older or unparseable is deleted. It runs in `open_world` (before migration reads the save) and again in
+  `enter_world`, because the headless tests and any other entry skip the menu.
+  - **The race that matters is a stale background write landing after a real save.** It would be newer than
+    `data.json` and a later "recovery" would silently roll the world back. `persist` numbers every write;
+    only real saves advance `LAST_REAL`, a snapshot older than the last real save is dropped, and a real
+    save deletes the snapshot while it holds the same lock. (A real save can't be reordered by a snapshot:
+    snapshots don't bump the counter.) Not tested at the race level - timing-dependent; the headless test
+    only checks the end state after a real save with a write possibly in flight.
+  - **`OnExit(InGame)` doesn't run on app exit** - that is why the window close needed its own system.
+    `AppExit` is written in `Update` (window-close -> `exit_on_all_closed`) and read in `Last` the same frame.
+  - **Bevy clamps a frame's delta to 0.25 s**, so a test can't "wait five minutes" by setting a big
+    `ManualDuration`: `jump_clock` also raises `Time<Virtual>`'s `max_delta`, runs one update and restores
+    `TimeUpdateStrategy::Automatic`.
+  - Break-tested: removing the `emergency_save` registration, the real save's `delete_autosave`, or the
+    recovery call in `enter_world` each turn their own test red. Settings tabs were narrowed (90/170 px)
+    so seven fit the panel; checked in a screenshot.

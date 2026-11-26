@@ -37,7 +37,7 @@ use crate::item_registry::ItemStack;
 use crate::items::{give, DroppedItem, LoadedItems};
 use crate::player::Player;
 use crate::render::ChunkMaterials;
-use crate::save::{BlockEdit, DroppedItemSave, EntitySave, FluidCell, GameMode, InventorySave, PlayerSave, SaveStore, WorldData};
+use crate::save::{AutosaveOptions, BlockEdit, DroppedItemSave, EntitySave, FluidCell, GameMode, InventorySave, PlayerSave, SaveStore, WorldData};
 use crate::sky::{DayNightClock, NEW_WORLD_START_TIME};
 use crate::state::{ActiveWorld, AppState};
 use crate::snapshot::ChunkStore;
@@ -49,7 +49,6 @@ const MAX_MESH_TASKS: usize = 8;
 /// How long `collect_gen_tasks` may spend taking in finished chunks in one
 /// frame.
 const COLLECT_TIME_BUDGET: std::time::Duration = std::time::Duration::from_micros(2500);
-const AUTOSAVE_INTERVAL: f32 = 30.0;
 
 #[derive(Resource, Clone)]
 pub struct WorldGen(pub Arc<TerrainGenerator>);
@@ -1198,6 +1197,8 @@ fn enter_world(
     // still resumes at literal dawn through `WorldData::default()`
     // unchanged - `world_data_exists` is what tells the two cases apart,
     // since both currently reach the same fallback value otherwise.
+    // Normally already done when the world was opened from the menu; cheap and harmless to repeat.
+    store.recover_autosave(&active.slug);
     let is_new_world = !store.world_data_exists(&active.slug);
     let mut data = store.load_data(&active.slug);
     // Entries naming things this world's mods don't define right now are set aside
@@ -1415,7 +1416,7 @@ fn write_save(
     clock: &DayNightClock,
     carried: &CarriedState,
     cache: &mut FluidSaveCache,
-    background: bool,
+    kind: SaveKind,
 ) {
     let edits = log
         .0
@@ -1480,7 +1481,7 @@ fn write_save(
     // back into the file untouched.
     let mut data = data;
     crate::shelf::merge_into(&mut data, &carried.shelf);
-    persist(store.clone(), active.slug.clone(), data, background);
+    persist(store.clone(), active.slug.clone(), data, kind);
 }
 
 /// What the player is carrying and what's lying on the ground - the parts of
@@ -1580,29 +1581,48 @@ fn chunk_fluid_cells(
 #[derive(Resource, Default)]
 struct FluidSaveCache(HashMap<IVec2, (u32, Vec<FluidCell>)>);
 
-/// Writes a world's data, on a background thread if `background`. Writes
-/// are numbered in the order their data was taken and serialized behind
-/// one lock, and a write older than the last one to land is dropped - so a
-/// slow autosave still in flight can never land after, and overwrite, the
-/// newer save made on leaving the world.
-fn persist(store: SaveStore, slug: String, data: WorldData, background: bool) {
+/// Which file a save goes to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SaveKind {
+    /// The world's real save (`data.json`): leaving the world, or the emergency save when the game
+    /// is closed. Written before returning, and it deletes the recovery snapshot, which it outdates.
+    Real,
+    /// The crash-recovery snapshot (`autosave.json`), written on a background thread.
+    Autosave,
+}
+
+/// Writes a world's data. Writes are numbered in the order their data was taken and serialized
+/// behind one lock. A snapshot older than a real save that has already landed is dropped, so a
+/// slow background autosave can never land after a real save and be mistaken for a crash's
+/// leftovers (it would be newer than `data.json` and bring back older state); a real save also
+/// removes the snapshot while it still holds the lock, so one that landed first is cleaned up.
+fn persist(store: SaveStore, slug: String, data: WorldData, kind: SaveKind) {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    static LAST_WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    static LAST_REAL: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
     let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let write = move || {
-        let mut last = LAST_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST_REAL.lock().unwrap_or_else(|e| e.into_inner());
         if seq < *last {
             return;
         }
-        if let Err(e) = store.save_data(&slug, &data) {
-            warn!("couldn't save world {slug}: {e}");
+        match kind {
+            SaveKind::Real => {
+                match store.save_data(&slug, &data) {
+                    Ok(()) => store.delete_autosave(&slug),
+                    Err(e) => warn!("couldn't save world {slug}: {e}"),
+                }
+                *last = seq;
+            }
+            SaveKind::Autosave => {
+                if let Err(e) = store.save_autosave(&slug, &data) {
+                    warn!("couldn't write the autosave for {slug}: {e}");
+                }
+            }
         }
-        *last = seq;
     };
-    if background {
-        bevy::tasks::IoTaskPool::get().spawn(async move { write() }).detach();
-    } else {
-        write();
+    match kind {
+        SaveKind::Autosave => bevy::tasks::IoTaskPool::get().spawn(async move { write() }).detach(),
+        SaveKind::Real => write(),
     }
 }
 
@@ -1610,6 +1630,7 @@ fn persist(store: SaveStore, slug: String, data: WorldData, background: bool) {
 fn autosave(
     time: Res<Time>,
     mut timer: ResMut<AutosaveTimer>,
+    options: Res<AutosaveOptions>,
     store: Res<SaveStore>,
     active: Res<ActiveWorld>,
     log: Res<EditLog>,
@@ -1622,8 +1643,12 @@ fn autosave(
     carried: CarriedState,
     mut cache: ResMut<FluidSaveCache>,
 ) {
+    if !options.enabled {
+        timer.0 = 0.0;
+        return;
+    }
     timer.0 += time.delta_secs();
-    if timer.0 < AUTOSAVE_INTERVAL {
+    if timer.0 < options.interval_secs() {
         return;
     }
     timer.0 = 0.0;
@@ -1639,7 +1664,44 @@ fn autosave(
         &clock,
         &carried,
         &mut cache,
-        true,
+        SaveKind::Autosave,
+    );
+}
+
+/// The game is closing (the window's close button, or anything else that ends the app) while a
+/// world is still open, so `OnExit(InGame)` will never run: save the world for real, right now.
+/// Without this the only thing that survived was whatever the last autosave caught.
+#[allow(clippy::too_many_arguments)]
+fn emergency_save(
+    mut exits: EventReader<AppExit>,
+    store: Res<SaveStore>,
+    active: Res<ActiveWorld>,
+    log: Res<EditLog>,
+    registry: Res<BlockRegistry>,
+    tables: Res<BlockTables>,
+    map: Res<ChunkMap>,
+    original_fluids: Res<OriginalFluids>,
+    players: Query<&Player>,
+    clock: Res<DayNightClock>,
+    carried: CarriedState,
+    mut cache: ResMut<FluidSaveCache>,
+) {
+    if exits.read().next().is_none() {
+        return;
+    }
+    write_save(
+        &store,
+        &active,
+        &log,
+        &registry,
+        &tables.0,
+        &map,
+        &original_fluids,
+        players.single().ok(),
+        &clock,
+        &carried,
+        &mut cache,
+        SaveKind::Real,
     );
 }
 
@@ -1679,7 +1741,7 @@ fn exit_world(
         &clock,
         &carried,
         &mut cache,
-        false,
+        SaveKind::Real,
     );
     cache.0.clear();
 
@@ -2036,6 +2098,7 @@ impl Plugin for WorldPlugin {
         if !app.world().contains_resource::<GameMode>() {
             app.insert_resource(GameMode::default());
         }
+        let autosave_options = autosave_options_for(app);
         app.insert_resource(BlockRegistry::with_defaults())
             .insert_resource(default_painters())
             .insert_resource(ChunkMap { needs_scan: true, ..ChunkMap::default() })
@@ -2050,6 +2113,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<OriginalFluids>()
             .init_resource::<FluidSaveCache>()
             .init_resource::<AutosaveTimer>()
+            .insert_resource(autosave_options)
             .init_resource::<FluidQueue>()
             // `LightPlugin` owns the light systems, but `collect_gen_tasks`
             // (here) seeds the queue, so the resource has to exist even in a
@@ -2106,6 +2170,12 @@ impl Plugin for WorldPlugin {
                     .after(stream_chunks)
                     .after(record_edits)
                     .run_if(resource_exists::<ChunkMaterials>.and(in_state(AppState::InGame))),
+            )
+            .add_systems(
+                Last,
+                emergency_save.run_if(
+                    in_state(AppState::InGame).and(world_content_ok).and(resource_exists::<WorldGen>).and(resource_exists::<ActiveWorld>),
+                ),
             )
             .add_systems(
                 Update,
@@ -2479,4 +2549,9 @@ mod tests {
         assert_eq!(prev, None);
         assert_eq!(map.get_block(pos), water);
     }
+}
+
+/// The saved autosave settings, or the defaults when there is no store (a bare test app).
+fn autosave_options_for(app: &App) -> AutosaveOptions {
+    app.world().get_resource::<SaveStore>().map(|s| s.load_autosave_options()).unwrap_or_default()
 }

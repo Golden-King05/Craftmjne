@@ -1848,3 +1848,132 @@ fn the_reload_key_rereads_pack_files_from_disk_in_game() {
     app.update();
     assert_eq!(model_height_of_dirt(&app), Some(0.25), "Ctrl+R picked up the edited file");
 }
+
+// ---------------------------------------------------------------------------
+// Autosave snapshots, the emergency save, and crash recovery
+// ---------------------------------------------------------------------------
+
+/// Makes the next `app.update()` last `secs` of game time (Bevy otherwise clamps a frame to a quarter second),
+/// then puts the clock back to normal. Used to reach an autosave without waiting minutes.
+fn jump_clock(app: &mut App, secs: u64) {
+    app.world_mut().resource_mut::<Time<Virtual>>().set_max_delta(Duration::from_secs(secs + 1));
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(Duration::from_secs(secs)));
+    app.update();
+    app.insert_resource(bevy::time::TimeUpdateStrategy::Automatic);
+}
+
+fn only_world(temp: &TempSaves) -> String {
+    SaveStore::at(temp.0.clone()).list_worlds().into_iter().next().expect("a world").0
+}
+
+/// Plays a short while, digs one block out of the ground and returns where.
+fn dig_something(app: &mut App) -> IVec3 {
+    assert!(run_until(app, |app| app.world().resource::<ChunkMap>().stats().1 >= 9, 2000));
+    let map = app.world().resource::<ChunkMap>();
+    let tables = app.world().resource::<craftmjne::blocks::BlockTables>().clone();
+    let pos = IVec3::new(8, map.surface_y(&tables.0, 8, 8).unwrap(), 8);
+    let prev = app.world_mut().resource_mut::<ChunkMap>().set_block(pos, 0).expect("chunk loaded");
+    app.world_mut().send_event(BlockSetEvent { pos, id: 0, prev });
+    app.update(); // record_edits
+    pos
+}
+
+#[test]
+fn an_autosave_goes_to_its_own_file_and_a_crash_after_it_is_recovered() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    app.world_mut().resource_mut::<craftmjne::save::AutosaveOptions>().minutes = 1;
+    let pos = dig_something(&mut app);
+    let store = SaveStore::at(temp.0.clone());
+    let slug = only_world(&temp);
+
+    jump_clock(&mut app, 70);
+    assert!(run_until(&mut app, |_| store.autosave_path(&slug).is_file(), 500), "no autosave was written");
+    assert!(!store.world_data_exists(&slug), "an autosave must not touch the real save");
+
+    // The game dies here: no exit, no save. Nothing but the snapshot is on disk.
+    drop(app);
+    let mut app2 = reload_app(&temp);
+    assert!(store.world_data_exists(&slug), "the snapshot was folded into the save");
+    assert!(!store.autosave_path(&slug).exists(), "and removed");
+    assert!(run_until(&mut app2, |app| app.world().resource::<ChunkMap>().get_block(pos) == 0, 2000), "the dug block came back after the crash");
+}
+
+#[test]
+fn leaving_a_world_normally_throws_the_autosave_away() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    app.world_mut().resource_mut::<craftmjne::save::AutosaveOptions>().minutes = 1;
+    dig_something(&mut app);
+    let store = SaveStore::at(temp.0.clone());
+    let slug = only_world(&temp);
+    jump_clock(&mut app, 70);
+    assert!(run_until(&mut app, |_| store.autosave_path(&slug).is_file(), 500));
+
+    app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    app.update();
+    assert!(store.world_data_exists(&slug));
+    assert!(!store.autosave_path(&slug).exists(), "the real save outdates the autosave");
+    // Even a background write that was still in flight must not bring it back.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!store.autosave_path(&slug).exists());
+}
+
+#[test]
+fn closing_the_game_with_a_world_open_saves_it_for_real() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    let pos = dig_something(&mut app);
+    {
+        let mut players = app.world_mut().query::<&mut Player>();
+        let mut player = players.single_mut(app.world_mut()).unwrap();
+        player.pos = Vec3::new(100.5, 40.0, 100.5);
+        player.spawned = true;
+    }
+    let store = SaveStore::at(temp.0.clone());
+    let slug = only_world(&temp);
+    assert!(!store.world_data_exists(&slug));
+
+    // The window's close button ends the app with the world still open; `OnExit(InGame)` never runs.
+    app.world_mut().send_event(AppExit::Success);
+    app.update();
+
+    let data = store.load_data(&slug);
+    assert!(data.edits.iter().any(|e| (e.x, e.y, e.z) == (pos.x, pos.y, pos.z)), "the edit was saved on close");
+    assert_eq!(data.player.map(|p| (p.x, p.z)), Some((100.5, 100.5)), "so was where the player stood");
+    assert!(!store.autosave_path(&slug).exists());
+}
+
+#[test]
+fn turning_autosave_off_stops_the_snapshots() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    *app.world_mut().resource_mut::<craftmjne::save::AutosaveOptions>() = craftmjne::save::AutosaveOptions { enabled: false, minutes: 1 };
+    dig_something(&mut app);
+    let store = SaveStore::at(temp.0.clone());
+    let slug = only_world(&temp);
+    jump_clock(&mut app, 200);
+    for _ in 0..30 {
+        app.update();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!store.autosave_path(&slug).exists(), "autosave is off");
+}
+
+#[test]
+fn the_autosave_interval_is_respected() {
+    let temp = temp_saves();
+    let mut app = headless_app(&temp);
+    app.world_mut().resource_mut::<craftmjne::save::AutosaveOptions>().minutes = 3;
+    dig_something(&mut app);
+    let store = SaveStore::at(temp.0.clone());
+    let slug = only_world(&temp);
+    jump_clock(&mut app, 120); // two minutes of a three-minute wait
+    for _ in 0..30 {
+        app.update();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!store.autosave_path(&slug).exists(), "too early");
+    jump_clock(&mut app, 70); // now past three minutes
+    assert!(run_until(&mut app, |_| store.autosave_path(&slug).is_file(), 500), "on time");
+}

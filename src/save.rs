@@ -438,6 +438,47 @@ pub fn instance_folder_name(id: &str) -> String {
     if cleaned.is_empty() { "_".to_string() } else { cleaned }
 }
 
+/// The player's autosave settings. An autosave is a crash-recovery snapshot written in the
+/// background every `minutes`; it never replaces the real save and is deleted when one lands.
+#[derive(bevy::prelude::Resource, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AutosaveOptions {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_minutes")]
+    pub minutes: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_minutes() -> u32 {
+    AutosaveOptions::DEFAULT_MINUTES
+}
+
+impl Default for AutosaveOptions {
+    fn default() -> Self {
+        Self { enabled: true, minutes: Self::DEFAULT_MINUTES }
+    }
+}
+
+impl AutosaveOptions {
+    pub const DEFAULT_MINUTES: u32 = 5;
+    pub const MIN_MINUTES: u32 = 1;
+    pub const MAX_MINUTES: u32 = 60;
+
+    /// Seconds between autosaves, with a hand-edited file's value kept in range.
+    pub fn interval_secs(&self) -> f32 {
+        (self.minutes.clamp(Self::MIN_MINUTES, Self::MAX_MINUTES) * 60) as f32
+    }
+
+    /// Changes the interval by `delta` minutes, staying within the allowed range.
+    pub fn nudge_minutes(&mut self, delta: i32) {
+        self.minutes = (self.minutes as i32 + delta).clamp(Self::MIN_MINUTES as i32, Self::MAX_MINUTES as i32) as u32;
+    }
+}
+
+
 /// Injected as a `Resource` (real per-user dir in production, a throwaway
 /// temp dir in tests and smoke mode) so nothing in the engine hardcodes
 /// where saves live — see `main.rs` and `tests/headless.rs`.
@@ -591,6 +632,8 @@ impl SaveStore {
     /// sitting there claiming to be the old format.
     pub fn open_world(&self, slug: &str) -> Result<WorldMeta, OpenError> {
         let mut meta = self.load_meta(slug).map_err(|_| OpenError::Missing)?;
+        // A crash leaves a newer snapshot behind; fold it in before anything reads the save.
+        self.recover_autosave(slug);
         match compatibility(meta.format) {
             SaveCompatibility::TooNew { written_by } => {
                 return Err(OpenError::TooNew { written_by })
@@ -632,6 +675,81 @@ impl SaveStore {
         let temp = path.with_extension("json.tmp");
         fs::write(&temp, serde_json::to_string(data).map_err(io::Error::other)?)?;
         fs::rename(&temp, &path)
+    }
+
+    /// Where a world's crash-recovery snapshot lives, beside its `data.json`.
+    pub fn autosave_path(&self, slug: &str) -> PathBuf {
+        self.data_path(slug).with_file_name("autosave.json")
+    }
+
+    /// Writes the recovery snapshot (temp file + rename, so a crash mid-write leaves the
+    /// previous snapshot or none, never half of one).
+    pub fn save_autosave(&self, slug: &str, data: &WorldData) -> io::Result<()> {
+        fs::create_dir_all(self.saves_dir().join(slug))?;
+        let path = self.autosave_path(slug);
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string(data).map_err(io::Error::other)?)?;
+        fs::rename(&temp, &path)
+    }
+
+    /// Removes the recovery snapshot, if any. Called once a normal save has landed: that save is
+    /// newer than the snapshot, so the snapshot has nothing left to offer.
+    pub fn delete_autosave(&self, slug: &str) {
+        let _ = fs::remove_file(self.autosave_path(slug));
+    }
+
+    /// Whether a recovery snapshot exists that was written *after* the world's last real save -
+    /// which only happens when the game ended without saving (a crash or a killed process).
+    pub fn autosave_is_newer(&self, slug: &str) -> bool {
+        let modified = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
+        match (modified(self.autosave_path(slug)), modified(self.data_path(slug))) {
+            (Some(auto), Some(real)) => auto > real,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    /// Picks up after a crash: if a newer snapshot exists and reads, it becomes the world's real
+    /// save and the snapshot is removed. A stale or unreadable snapshot is just deleted. Returns
+    /// whether anything was recovered. Safe to call on every open - it does nothing when there is
+    /// no snapshot.
+    pub fn recover_autosave(&self, slug: &str) -> bool {
+        if !self.autosave_path(slug).is_file() {
+            return false;
+        }
+        if !self.autosave_is_newer(slug) {
+            self.delete_autosave(slug);
+            return false;
+        }
+        let parsed: Option<WorldData> = fs::read_to_string(self.autosave_path(slug)).ok().and_then(|t| serde_json::from_str(&t).ok());
+        let Some(data) = parsed else {
+            self.delete_autosave(slug);
+            return false;
+        };
+        if self.save_data(slug, &data).is_err() {
+            return false;
+        }
+        self.delete_autosave(slug);
+        true
+    }
+
+    pub fn saving_options_path(&self) -> PathBuf {
+        self.keybinds_path().with_file_name("saving.json")
+    }
+
+    /// Autosave settings, per launcher instance. Missing or unreadable reads as the defaults.
+    pub fn load_autosave_options(&self) -> AutosaveOptions {
+        fs::read_to_string(self.saving_options_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    pub fn save_autosave_options(&self, options: &AutosaveOptions) -> io::Result<()> {
+        let path = self.saving_options_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string_pretty(options).map_err(io::Error::other)?)?;
+        fs::rename(&temp, path)
     }
 
     /// Where this player's controls are saved. Started by the launcher, that is
@@ -1108,6 +1226,102 @@ mod tests {
         assert_eq!(alone.load_control_options(), Default::default());
         assert_eq!(a.controls_path(), root.join("instances").join("iaaa").join("controls.json"));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A world's data with a recognisable marker (the saved day count).
+    fn marked(day: u32) -> WorldData {
+        WorldData { day_count: day, ..WorldData::default() }
+    }
+
+    /// Sets a file's modified time to `secs` seconds from the epoch, so tests don't depend on the clock.
+    fn stamp(path: PathBuf, secs: u64) {
+        let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    }
+
+    #[test]
+    fn a_snapshot_newer_than_the_save_is_what_a_crash_recovers() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("W", 1, GameMode::Survival).unwrap();
+        store.save_data(&slug, &marked(1)).unwrap();
+        store.save_autosave(&slug, &marked(2)).unwrap();
+        stamp(store.data_path(&slug), 1000);
+        stamp(store.autosave_path(&slug), 2000);
+        assert!(store.autosave_is_newer(&slug));
+        assert!(store.recover_autosave(&slug));
+        assert_eq!(store.load_data(&slug).day_count, 2, "the snapshot became the save");
+        assert!(!store.autosave_path(&slug).exists(), "and is gone once folded in");
+        assert!(!store.recover_autosave(&slug), "nothing left to recover");
+    }
+
+    #[test]
+    fn a_snapshot_older_than_the_save_is_ignored_and_cleaned_up() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("W", 1, GameMode::Survival).unwrap();
+        store.save_autosave(&slug, &marked(2)).unwrap();
+        store.save_data(&slug, &marked(3)).unwrap();
+        stamp(store.autosave_path(&slug), 1000);
+        stamp(store.data_path(&slug), 2000);
+        assert!(!store.autosave_is_newer(&slug));
+        assert!(!store.recover_autosave(&slug));
+        assert_eq!(store.load_data(&slug).day_count, 3, "the real save is untouched");
+        assert!(!store.autosave_path(&slug).exists());
+    }
+
+    #[test]
+    fn a_world_that_only_ever_autosaved_recovers_from_it() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("W", 1, GameMode::Survival).unwrap();
+        store.save_autosave(&slug, &marked(4)).unwrap();
+        assert!(!store.world_data_exists(&slug));
+        assert!(store.recover_autosave(&slug));
+        assert_eq!(store.load_data(&slug).day_count, 4);
+    }
+
+    #[test]
+    fn an_unreadable_snapshot_is_dropped_and_never_replaces_the_save() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("W", 1, GameMode::Survival).unwrap();
+        store.save_data(&slug, &marked(5)).unwrap();
+        fs::write(store.autosave_path(&slug), "{ cut off mid-wri").unwrap();
+        stamp(store.data_path(&slug), 1000);
+        stamp(store.autosave_path(&slug), 2000);
+        assert!(!store.recover_autosave(&slug));
+        assert_eq!(store.load_data(&slug).day_count, 5);
+        assert!(!store.autosave_path(&slug).exists());
+    }
+
+    #[test]
+    fn opening_a_world_recovers_before_anything_reads_it() {
+        let store = temp_store();
+        let (slug, _) = store.create_world("W", 1, GameMode::Survival).unwrap();
+        store.save_data(&slug, &marked(1)).unwrap();
+        store.save_autosave(&slug, &marked(9)).unwrap();
+        stamp(store.data_path(&slug), 1000);
+        stamp(store.autosave_path(&slug), 2000);
+        store.open_world(&slug).unwrap();
+        assert_eq!(store.load_data(&slug).day_count, 9);
+    }
+
+    #[test]
+    fn autosave_options_default_to_five_minutes_clamp_and_persist() {
+        let store = temp_store();
+        let d = store.load_autosave_options();
+        assert!(d.enabled);
+        assert_eq!(d.minutes, 5);
+        assert_eq!(d.interval_secs(), 300.0);
+        let mut o = AutosaveOptions { enabled: false, minutes: 15 };
+        store.save_autosave_options(&o).unwrap();
+        assert_eq!(store.load_autosave_options(), o);
+        o.nudge_minutes(-100);
+        assert_eq!(o.minutes, AutosaveOptions::MIN_MINUTES);
+        o.nudge_minutes(1000);
+        assert_eq!(o.minutes, AutosaveOptions::MAX_MINUTES);
+        // A hand-edited zero or huge value still gives a sane interval; a partial file keeps the defaults.
+        assert_eq!(AutosaveOptions { enabled: true, minutes: 0 }.interval_secs(), 60.0);
+        assert_eq!(AutosaveOptions { enabled: true, minutes: 9999 }.interval_secs(), 3600.0);
+        let partial: AutosaveOptions = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert_eq!(partial, AutosaveOptions { enabled: false, minutes: 5 });
     }
 
     #[test]

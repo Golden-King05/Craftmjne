@@ -44,19 +44,21 @@ pub enum Section {
     Player,
     Rendering,
     Sound,
+    Saving,
     Controls,
     Packs,
     Mods,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [Section::Player, Section::Rendering, Section::Sound, Section::Controls, Section::Packs, Section::Mods];
+    pub const ALL: [Section; 7] = [Section::Player, Section::Rendering, Section::Sound, Section::Saving, Section::Controls, Section::Packs, Section::Mods];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::Player => "Player",
             Section::Rendering => "Rendering",
             Section::Sound => "Sound",
+            Section::Saving => "Saving",
             Section::Controls => "Controls",
             Section::Packs => "Packs",
             Section::Mods => "Mods",
@@ -109,6 +111,8 @@ enum SettingsButton {
     VolumeDelta(crate::sound::Slider, i32),
     RenderDistanceDelta(i32),
     ToggleDefaultModStorage,
+    ToggleAutosave,
+    AutosaveMinutesDelta(i32),
     Rebind(String),
     Unbind(String),
     Reset(String),
@@ -119,6 +123,15 @@ enum SettingsButton {
 // ---------------------------------------------------------------------------
 // Pure helpers (tested)
 // ---------------------------------------------------------------------------
+
+pub(crate) fn autosave_label(options: &crate::save::AutosaveOptions) -> String {
+    if options.enabled { "Autosave: On".to_string() } else { "Autosave: Off".to_string() }
+}
+
+pub(crate) fn autosave_interval_label(options: &crate::save::AutosaveOptions) -> String {
+    let m = options.minutes;
+    format!("Every {m} minute{}", if m == 1 { "" } else { "s" })
+}
 
 pub(crate) fn mod_storage_label(storage: ModStorage) -> String {
     match storage {
@@ -236,6 +249,7 @@ fn rebuild_settings(
     notes: Res<ControlNotes>,
     options: Res<ControlOptions>,
     sound: Res<crate::sound::SoundOptions>,
+    autosave: Res<crate::save::AutosaveOptions>,
     pack_selection: Res<crate::packs::PackSelection>,
     installed_packs: Res<crate::packs::InstalledPacks>,
     world_settings: Res<WorldSettings>,
@@ -250,7 +264,7 @@ fn rebuild_settings(
     let pad_state = pad.as_deref().cloned().unwrap_or_default();
     let pad_changed = *pad_was_connected != pad_state.connected;
     *pad_was_connected = pad_state.connected;
-    if !(empty || pad_changed || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || sound.is_changed() || pack_selection.is_changed() || installed_packs.is_changed() || world_settings.is_changed()) {
+    if !(empty || pad_changed || view.is_changed() || bindings.is_changed() || capture.is_changed() || notes.is_changed() || options.is_changed() || sound.is_changed() || autosave.is_changed() || pack_selection.is_changed() || installed_packs.is_changed() || world_settings.is_changed()) {
         return;
     }
     commands.entity(root).despawn_related::<Children>();
@@ -259,7 +273,7 @@ fn rebuild_settings(
         p.spawn(Node { column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
             for section in Section::ALL {
                 let clash = section == Section::Controls && !bindings.conflicting().is_empty();
-                let width = if section == Section::Controls { 210.0 } else { 112.0 };
+                let width = if section == Section::Controls { 170.0 } else { 90.0 };
                 sbutton(
                     row,
                     &tab_label(section, &bindings),
@@ -308,6 +322,14 @@ fn rebuild_settings(
                     stepper(body, &format!("{}: {}%", slider.label(), sound.get(slider)), SettingsButton::VolumeDelta(slider, -10), SettingsButton::VolumeDelta(slider, 10));
                 }
                 dim(body, "Resource packs and mods can replace any sound: see sounds/ in a pack.", 13.0);
+            }
+            Section::Saving => {
+                body.spawn((Text::new("Saving"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
+                sbutton(body, &autosave_label(&autosave), SettingsButton::ToggleAutosave, ButtonStyle::Choice, 300.0, 42.0, 17.0, autosave.enabled, theme::TEXT, None);
+                if autosave.enabled {
+                    stepper(body, &autosave_interval_label(&autosave), SettingsButton::AutosaveMinutesDelta(-1), SettingsButton::AutosaveMinutesDelta(1));
+                }
+                dim(body, "Leaving a world, or closing the game with one open, always saves it.\nAn autosave is an extra snapshot taken in the background while you play, kept only until then: if the game ever crashes, the world is restored from it the next time you open it.", 13.0);
             }
             Section::Packs => crate::pack_panel::spawn_pack_panel(body, crate::pack_panel::PackScope::Global, false, &pack_selection, &[], &installed_packs, None),
             Section::Mods => {
@@ -525,6 +547,7 @@ fn handle_settings_buttons(
     mut world_settings: ResMut<WorldSettings>,
     mut options: ResMut<ControlOptions>,
     mut sound: ResMut<crate::sound::SoundOptions>,
+    mut autosave: ResMut<crate::save::AutosaveOptions>,
     mut installed_packs: ResMut<crate::packs::InstalledPacks>,
     pack_folder: Res<crate::packs::PackFolder>,
     store: Res<SaveStore>,
@@ -564,6 +587,14 @@ fn handle_settings_buttons(
             SettingsButton::VolumeDelta(slider, d) => {
                 sound.nudge(slider, d);
                 let _ = store.save_sound_options(&sound);
+            }
+            SettingsButton::ToggleAutosave => {
+                autosave.enabled = !autosave.enabled;
+                let _ = store.save_autosave_options(&autosave);
+            }
+            SettingsButton::AutosaveMinutesDelta(d) => {
+                autosave.nudge_minutes(d);
+                let _ = store.save_autosave_options(&autosave);
             }
             SettingsButton::ToggleInvertLook => {
                 options.invert_look_y = !options.invert_look_y;
@@ -674,7 +705,7 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<crate::sound::SoundOptions>().init_resource::<crate::packs::PackFolder>();
+        app.init_resource::<crate::sound::SoundOptions>().init_resource::<crate::save::AutosaveOptions>().init_resource::<crate::packs::PackFolder>();
         if !app.is_plugin_added::<crate::pack_panel::PackPanelPlugin>() {
             app.add_plugins(crate::pack_panel::PackPanelPlugin);
         }
@@ -852,6 +883,28 @@ mod tests {
         let saved = s.app.world().resource::<SaveStore>().load_sound_options();
         assert_eq!(saved.blocks, 70, "saved to disk");
         assert!(s.texts().iter().any(|t| t == "Blocks: 70%"));
+    }
+
+    #[test]
+    fn the_saving_section_toggles_autosave_and_sets_the_interval_and_saves_both() {
+        let mut s = screen();
+        s.click(SettingsButton::Section(Section::Saving));
+        assert!(s.texts().iter().any(|t| t == "Autosave: On"));
+        assert!(s.texts().iter().any(|t| t == "Every 5 minutes"));
+        for _ in 0..2 {
+            s.click(SettingsButton::AutosaveMinutesDelta(1));
+        }
+        assert!(s.texts().iter().any(|t| t == "Every 7 minutes"));
+        for _ in 0..9 {
+            s.click(SettingsButton::AutosaveMinutesDelta(-1));
+        }
+        assert_eq!(s.app.world().resource::<crate::save::AutosaveOptions>().minutes, 1);
+        assert!(s.texts().iter().any(|t| t == "Every 1 minute"));
+        s.click(SettingsButton::ToggleAutosave);
+        let saved = s.app.world().resource::<SaveStore>().load_autosave_options();
+        assert_eq!(saved, crate::save::AutosaveOptions { enabled: false, minutes: 1 }, "saved to disk");
+        assert!(s.texts().iter().any(|t| t == "Autosave: Off"));
+        assert!(!s.texts().iter().any(|t| t.starts_with("Every ")), "no interval to set while it is off");
     }
 
     #[test]
@@ -1161,7 +1214,7 @@ mod tests {
     #[test]
     fn the_sections_are_the_ones_asked_for() {
         let labels: Vec<_> = Section::ALL.iter().map(|s| s.label()).collect();
-        assert_eq!(labels, ["Player", "Rendering", "Sound", "Controls", "Packs", "Mods"]);
+        assert_eq!(labels, ["Player", "Rendering", "Sound", "Saving", "Controls", "Packs", "Mods"]);
     }
 
     #[test]

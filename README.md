@@ -252,8 +252,9 @@ unexplored chunks use the new generator, and where they meet old ones they
 blend in over about a chunk's width. Height eases from the old ground to the
 new terrain, and a river heading into old land runs dry a few blocks short
 of it. A world from before snapshots existed regenerates once with the
-current generator, then is protected the same way. Autosaves every 30s and
-on returning to the menu.
+current generator, then is protected the same way. A world is saved on returning
+to the menu and when the game is closed with it open; see **Autosave and crash
+recovery** below.
 
 ### Game modes
 
@@ -1062,8 +1063,41 @@ builds a fresh `TerrainGenerator` for that world's seed, resets `ChunkMap`
 (despawning any previous world's chunk entities), loads its save data, and
 restores the player's saved position — or leaves them unspawned so the usual
 `try_spawn` logic places them, for a brand new world. Leaving
-(`world::exit_world`, on `OnExit`) and the periodic autosave both write the
-session's accumulated block edits and current player pose back out.
+(`world::exit_world`, on `OnExit`) writes the session's accumulated block edits
+and current player pose back out.
+
+### Autosave and crash recovery
+
+Saving a world has three triggers, and only one of them writes the world's real
+save (`data.json`) to a file the crash path could damage:
+
+- **Leaving the world** (back to the menu): a real save, as before.
+- **Closing the game with a world open** (the window's close button): an
+  *emergency save*, also real (`world::emergency_save`, on `AppExit`).
+  `OnExit(InGame)` never runs when the app ends, so without it only the last
+  autosave would have survived.
+- **Every N minutes while playing** (default 5): an *autosave*, a snapshot
+  written on a background thread to `saves/<world>/autosave.json`. It never
+  touches `data.json`, so it cannot corrupt the real save, and it is written to
+  a temp file and renamed so a crash mid-write leaves nothing half-done.
+
+A real save deletes the snapshot - it is newer, so the snapshot has nothing
+left to offer. If the game *crashes*, the snapshot is left behind. The next time
+the world is opened (`SaveStore::open_world`, and again in `enter_world`) a
+snapshot **newer than `data.json`** (file modification time) becomes the real
+save and is removed; an older one, or one that doesn't parse, is just deleted.
+The player is never asked anything. A background write that is still in flight
+when a real save lands is dropped (`world::persist` numbers writes), so a slow
+autosave can't land afterwards and masquerade as crash leftovers.
+
+Settings > **Saving** turns autosave off and sets the interval (1-60 minutes);
+stored per launcher instance in `saving.json` (`save::AutosaveOptions`).
+Turning it off still leaves the emergency save. What a crash loses is whatever
+happened since the last snapshot. Chunk terrain is separate: chunk snapshots
+(`snapshot.rs`) are written when a chunk is first generated, so they are already
+on disk. Not covered: the OS killing the process or a power cut *during* the
+emergency save, and a crash between a world's creation and its first snapshot
+(the world then reopens as new).
 
 ## Fluid flow
 
