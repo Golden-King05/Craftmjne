@@ -112,6 +112,46 @@ const HEBREW: &[(char, i32, &str)] = &[
     ('ת', 3, "#####./#...#./#...#./#...#./#...#./#...#./#...##"),
 ];
 
+
+/// Hebrew points (niqqud), dagesh and the shin/sin dots: zero-advance marks. The shaper centres
+/// them over the letter they follow, so only their own shape matters. `(code point, pixels)`.
+const HEBREW_POINTS: &[(char, &[(i32, i32)])] = &[
+    ('\u{5B0}', &[(-3, 10), (-3, 11)]),                               // sheva
+    ('\u{5B1}', &[(-5, 11), (-4, 10), (-2, 10), (-3, 11)]),          // hataf segol
+    ('\u{5B2}', &[(-5, 11), (-4, 10), (-3, 10), (-2, 10)]),          // hataf patah
+    ('\u{5B3}', &[(-5, 11), (-4, 10), (-3, 10), (-2, 10), (-3, 11)]), // hataf qamats
+    ('\u{5B4}', &[(-3, 10)]),                                         // hiriq
+    ('\u{5B5}', &[(-4, 10), (-2, 10)]),                               // tsere
+    ('\u{5B6}', &[(-4, 10), (-2, 10), (-3, 11)]),                     // segol
+    ('\u{5B7}', &[(-4, 10), (-3, 10), (-2, 10)]),                     // patah
+    ('\u{5B8}', &[(-4, 10), (-3, 10), (-2, 10), (-3, 11)]),           // qamats
+    ('\u{5B9}', &[(-3, 1)]),                                          // holam
+    ('\u{5BA}', &[(-3, 1)]),                                          // holam haser for vav
+    ('\u{5BB}', &[(-4, 9), (-3, 10), (-2, 11)]),                      // qubuts
+    ('\u{5BC}', &[(-3, 6)]),                                          // dagesh
+    ('\u{5BD}', &[(-3, 10), (-3, 11)]),                               // meteg
+    ('\u{5BF}', &[(-4, 1), (-3, 1), (-2, 1)]),                        // rafe
+    ('\u{5C1}', &[(-2, 1)]),                                          // shin dot
+    ('\u{5C2}', &[(-4, 1)]),                                          // sin dot
+];
+
+fn point_glyph(c: char, pixels: &[(i32, i32)]) -> GlyphSpec {
+    let left = pixels.iter().map(|(x, _)| -x).max().unwrap_or(0).max(0) as usize;
+    let mut g = vec![vec![false; left + 1]; 12];
+    for (x, y) in pixels {
+        g[*y as usize][(left as i32 + x) as usize] = true;
+    }
+    let rects = crate::font_gen::rects_from_mask(left + 1, &g, 0)
+        .into_iter()
+        .map(|mut r| {
+            r.x0 -= left as i32;
+            r.x1 -= left as i32;
+            r
+        })
+        .collect();
+    GlyphSpec { chars: vec![c], advance: 0, colour: false, layers: vec![crate::font_gen::Layer { color: 0, rects }] }
+}
+
 /// The art for a letter wherever it lives: this module's tables, a Latin lookalike, or Latin itself.
 fn art_for(c: char) -> Option<Art> {
     if let Some(g) = CYRILLIC.iter().chain(HEBREW).find(|g| g.0 == c) {
@@ -138,6 +178,9 @@ pub fn glyphs() -> Vec<GlyphSpec> {
         if let Some(b) = art_for(*base) {
             out.push(to_glyph(*c, &compose(&b, *mark)));
         }
+    }
+    for (c, px) in HEBREW_POINTS {
+        out.push(point_glyph(*c, px));
     }
     out.extend(crate::pixel_hangul::glyphs());
     out.extend(crate::pixel_arabic::glyphs());
@@ -187,6 +230,24 @@ mod tests {
                     assert!(r.y0 >= 0 && r.y1 <= 12, "{:?} leaves rows 0-11", g.chars);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn hebrew_points_take_no_room_and_stay_with_their_letter() {
+        let font = crate::fonts::default_font_bytes();
+        let face = rustybuzz::Face::from_slice(&font, 0).unwrap();
+        let tt = ttf_parser::Face::parse(&font, 0).unwrap();
+        for (mark, _) in HEBREW_POINTS {
+            let mut buf = rustybuzz::UnicodeBuffer::new();
+            buf.push_str(&format!("ב{mark}"));
+            buf.set_direction(rustybuzz::Direction::RightToLeft);
+            buf.set_script(rustybuzz::script::HEBREW);
+            let out = rustybuzz::shape(&face, &[], buf);
+            assert_eq!(out.len(), 2, "U+{:04X}", *mark as u32);
+            let gid = tt.glyph_index(*mark).unwrap().0 as u32;
+            let at = out.glyph_infos().iter().position(|i| i.glyph_id == gid).expect("the point is drawn");
+            assert_eq!(out.glyph_positions()[at].x_advance, 0, "U+{:04X} takes room", *mark as u32);
         }
     }
 }

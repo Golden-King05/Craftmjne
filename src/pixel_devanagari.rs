@@ -184,6 +184,52 @@ fn mark(c: char, pixels: &[(i32, i32)]) -> GlyphSpec {
     glyph(c, &g, 0, left as i32)
 }
 
+
+const VIRAMA: char = '\u{94D}';
+/// Private-use code points naming the conjunct glyphs: the half forms, then reph and the below-base ra.
+const HALF_BASE: u32 = 0xE900;
+const REPH: char = '\u{E9F0}';
+const RAKAR: char = '\u{E9F1}';
+
+fn has_stem(strokes: &[Stroke]) -> bool {
+    strokes.iter().any(|s| *s == ST)
+}
+
+/// The consonants that have a half form: the ones with a stem, which is what the half form drops.
+fn stemmed() -> impl Iterator<Item = (usize, char, &'static [Stroke])> {
+    CONSONANTS.iter().filter(|(_, s)| has_stem(s)).enumerate().map(|(i, (c, s))| (i, *c, *s))
+}
+
+fn half_char(index: usize) -> char {
+    char::from_u32(HALF_BASE + index as u32).unwrap()
+}
+
+/// A consonant's half form: its strokes without the stem, in a narrower letter with the headline
+/// running on, so it hangs from the word's line and the next consonant starts where the stem was.
+fn half_glyph(index: usize, strokes: &[Stroke]) -> GlyphSpec {
+    let mut g = blank(5);
+    headline(&mut g, 0, 5);
+    let rest: Vec<Stroke> = strokes.iter().copied().filter(|s| *s != ST).collect();
+    draw(&mut g, &rest, (0, 3, 4, 7));
+    glyph(half_char(index), &g, 5, 0)
+}
+
+/// `half`, `rphf` and `blwf`: a consonant + halant is its half form, ra + halant at the start of a
+/// syllable is a reph over the base, and halant + ra after a consonant is the ra stroke below it.
+/// Written for both script tags the shaper may ask for.
+pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
+    let mut out = Vec::new();
+    for script in [*b"dev2", *b"deva"] {
+        let lig = |feature: &[u8; 4], components: Vec<char>, to: char| crate::font_gen::Ligature { script, feature: *feature, components, to };
+        for (i, c, _) in stemmed() {
+            out.push(lig(b"half", vec![c, VIRAMA], half_char(i)));
+        }
+        out.push(lig(b"rphf", vec!['र', VIRAMA], REPH));
+        out.push(lig(b"blwf", vec![VIRAMA, 'र'], RAKAR));
+    }
+    out
+}
+
 /// Every Devanagari glyph.
 pub fn glyphs() -> Vec<GlyphSpec> {
     let mut out = Vec::new();
@@ -193,6 +239,11 @@ pub fn glyphs() -> Vec<GlyphSpec> {
     for (c, s) in VOWELS {
         out.push(vowel(*c, s));
     }
+    for (i, _, strokes) in stemmed() {
+        out.push(half_glyph(i, strokes));
+    }
+    out.push(mark(REPH, &[(-6, 1), (-5, 0), (-4, 0), (-3, 1)]));
+    out.push(mark(RAKAR, &[(-3, 7), (-4, 8), (-5, 9), (-5, 10)]));
     // Spacing signs (headline joined).
     out.push(spacing_sign('ा', 2, "##/.#/.#/.#/.#/.#/.#/.#", &[]));
     out.push(spacing_sign('ि', 2, "###/#../#../#../#../#../#../#..", &[]));
@@ -305,5 +356,34 @@ mod tests {
             assert_eq!(g[1].1, 0, "{text}: the mark should have no advance");
             assert_eq!(g[1].2, 0, "{text}: the shaper moved the mark ({}); the art assumes it doesn't", g[1].2);
         }
+    }
+
+    #[test]
+    fn a_stemmed_consonant_before_a_halant_takes_its_half_form() {
+        let f = font();
+        // क्ष: half ka then ssa, not ka, halant, ssa.
+        let g = run(&f, "क्ष");
+        assert_eq!(g.len(), 2, "{g:?}");
+        assert_eq!(g[1].0, gid(&f, 'ष'));
+        assert_ne!(g[0].0, gid(&f, 'क'));
+        // ज्ञ the same.
+        assert_eq!(run(&f, "ज्ञ").len(), 2);
+        // A consonant with no stem (ट) keeps its halant.
+        let g = run(&f, "ट्ट");
+        assert_eq!(g.len(), 3, "{g:?}");
+    }
+
+    #[test]
+    fn ra_with_a_halant_is_a_reph_before_a_consonant_and_a_stroke_below_after_one() {
+        let f = font();
+        // र्क: the reph goes over ka (it is moved after it).
+        let g = run(&f, "र्क");
+        assert_eq!(g.len(), 2, "{g:?}");
+        assert_eq!(g.iter().filter(|x| x.1 == 0).count(), 1, "the reph takes no room");
+        // क्र: ka with ra below it.
+        let g = run(&f, "क्र");
+        assert_eq!(g.len(), 2, "{g:?}");
+        assert_eq!(g[0].0, gid(&f, 'क'));
+        assert_eq!(g[1].1, 0);
     }
 }

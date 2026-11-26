@@ -238,7 +238,9 @@ pub fn substitutions() -> Vec<crate::font_gen::Substitution> {
 
 /// The `GSUB` ligatures of the typeface.
 pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
-    Vec::new()
+    let mut v = crate::pixel_arabic::ligatures();
+    v.extend(crate::pixel_devanagari::ligatures());
+    v
 }
 
 /// Every glyph of the typeface (the space is the font's own).

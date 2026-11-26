@@ -1485,22 +1485,32 @@ default font that ships with Bevy is turned off, so there is no other font unles
 - **Other scripts.** Cyrillic (Russian, Ukrainian, Belarusian, Serbian letters), Hebrew, Korean,
   Arabic and Hindi (Devanagari) are in the same font, so they work everywhere text does, including
   chat. Details and limits are under *Other scripts* below.
-- **Emoji.** About 340 12x12 colour emoji drawn in the game's style (faces, hearts, animals, food,
-  weather, objects, arrows, symbols). They are colour glyphs (COLR/CPAL) in a second built-in font used
-  as a fallback, so they work anywhere text does, including chat and signs. In chat, `:name:` becomes
-  the emoji (`:heart:`, `:fire:`); anything that is not a known name is left as typed. **No flags** (a
-  test enforces it). Not every Unicode emoji exists: skin tones show as colour swatches, and joined
-  sequences (family, keycaps) are not combined. Adding one is a row in `src/emoji/`.
+- **Emoji.** About 700 12x12 colour emoji drawn in the game's style (faces, hearts, animals, food,
+  weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second
+  built-in font used as a fallback, so they work anywhere text does, including chat and signs. In chat,
+  `:name:` becomes the emoji (`:heart:`, `:fire:`, `:flag_us:`); anything that is not a known name is
+  left as typed. Following the current emoji standard, 🔫 is a **water pistol** (`:water_pistol:`).
+  - **Flags.** All 258 country and territory flags (two regional-indicator letters), England, Scotland
+    and Wales, the flag-on-a-pole emoji (white, black, triangular, checkered, crossed) and the rainbow,
+    transgender and pirate flags. **Texas**: the Lone Star flag of the Republic of Texas has no Unicode
+    emoji, so it is written the way Unicode would write the US-TX subdivision flag (🏴 followed by the
+    tag letters `u s t x` and the cancel tag) and has the shortcode `:flag_texas:`. A pair of
+    regional-indicator letters that is not a country shows as two letter tiles.
+  - **Sequences.** Flags, skin-toned hands (👍🏻 ... 👍🏿 for fifteen hand and gesture emoji), keycaps
+    (`1️⃣`, `#️⃣`, `*️⃣`) and the ZWJ flags are ligatures in the font, so they work anywhere.
+  - **Not every Unicode emoji exists.** Family and couple sequences, most person/profession emoji and many
+    objects are not drawn yet; adding one is a row in `src/emoji/`, and a new sequence is a `sequences`
+    entry on the emoji it produces.
 
 ### Other scripts
 
 | Script | What is there | Limits |
 |---|---|---|
 | Cyrillic | all of А-я, Ё ё, Ї ї, Є є, Ґ ґ, Ў ў, І і, Ј ј | |
-| Hebrew | the 22 letters and 5 final forms | no vowel points (niqqud); right-to-left layout is the text engine's |
+| Hebrew | the 22 letters, 5 final forms, vowel points (niqqud), dagesh, shin and sin dots | right-to-left layout is the text engine's |
 | Korean | all 11,172 syllables (가-힣) plus the standalone letters (ㄱ-ㅣ) | drawn from strokes (`pixel_hangul.rs`), so they are small and plain |
-| Arabic | the letters with their joining forms (initial, medial, final, isolated), ء أ إ آ ؤ ئ ة, tatweel, ، ؛ ؟ | no lam-alef ligature (ل + ا is two joined letters), no vowel marks, no Persian/Urdu letters, no Arabic-Indic digits; letter bodies are short next to the Latin text |
-| Hindi (Devanagari) | consonants, independent vowels, vowel signs, anusvara/candrabindu/visarga, halant, nukta, danda | **no conjuncts**: क्ष, त्र, ज्ञ and other clusters show the consonants side by side with a halant mark; digits are drawn like 0-9; the letter art is a first pass and crude at this size |
+| Arabic | the letters with their joining forms (initial, medial, final, isolated), ء أ إ آ ؤ ئ ة, tatweel, ، ؛ ؟, the lam-alef ligature (ل + ا أ إ آ), vowel marks (tashkeel), Persian and Urdu letters (پ چ ژ گ ک ی ٹ ڈ ڑ ں ھ ہ ے), Arabic-Indic and Persian digits | letter bodies are short next to the Latin text; some Urdu letters (ٹ ڈ ڑ) use a simplified mark; the digits ٢ ٣ ٤ ٥ ٦ are best-effort shapes |
+| Hindi (Devanagari) | consonants, independent vowels, vowel signs, anusvara/candrabindu/visarga, halant, nukta, danda, **half forms** (क्ष, ज्ञ, त्त, प्र... are the half-form letter + the next one), reph (र् over a consonant) and the below-base ra (क्र) | consonants with no stem (ङ छ ट ठ ड ढ द ह र) have no half form, so their clusters keep a visible halant; conjuncts are *composed*, not the special ligature shapes (क्ष and ज्ञ look like half + full letter); digits are drawn like 0-9; the letter art is a first pass and crude at this size |
 
 How they work, so a pack author knows what to expect:
 
@@ -1509,7 +1519,8 @@ How they work, so a pack author knows what to expect:
   exists for the substitution.
 - Devanagari's reordering (the *i* sign goes before its consonant) is done by the text engine; the font's
   marks have no advance and are drawn at negative x over the consonant they follow, so the font needs no
-  positioning table.
+  positioning table. Conjuncts are `half`/`rphf`/`blwf` ligatures. Arabic and Hebrew marks are centred
+  over their letter by the shaper's own fallback positioning.
 - A pack's `fonts/` can replace or extend any of this, as above.
 
 ### Fonts in packs, and the `font` tag

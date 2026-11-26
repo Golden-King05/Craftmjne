@@ -3485,8 +3485,7 @@ etc.) instead of inventing a new approach:
     are not snapped. A `FontTag(String)` (role or name; unknown -> default) is read there; spawn sites only add the
     tag, never a font handle. Roles map through `fonts/fonts.json`; block/item files take a `font` definition tag
     used by the tooltip (`Tip::font`).
-  - **No GSUB**: ZWJ/VS16/keycap marks are zero-width and sequences are not combined; skin-tone modifiers draw as
-    swatches. Flags are deliberately excluded. Colour emoji take a text colour tint only as far as the renderer
+  - **(Superseded below: the font now has GSUB ligatures, so flags, skin tones, keycaps and ZWJ sequences work.)** Colour emoji take a text colour tint only as far as the renderer
     does it (not verified beyond the screenshot).
   - **Chat** expands `:name:` through `emoji::expand_shortcodes` only for plain messages, not `/commands`.
   - A glyph defined as base + accent (`COMPOSED`) can't have a descender mark; `ç`/`Ç` are drawn by hand in `BASE`.
@@ -3519,4 +3518,36 @@ etc.) instead of inventing a new approach:
     conjuncts (they need a GSUB ligature table), Devanagari digits are Latin-shaped, and the Hebrew, Arabic and
     Devanagari art is a best-effort first pass - looked at only in a software-rendered screenshot, not by someone
     who reads those scripts. `CRAFT_SHOT=scripts` draws a sample of every script.
+
+- **GSUB ligatures were the one enabler behind flags, skin tones, keycaps, lam-alef and Devanagari conjuncts.**
+  `font_gen::Ligature { script, feature, components, to }` (alongside `Substitution`) writes type-4 lookups,
+  longest sequence first per starting glyph; components and `to` are characters, resolved through the cmap, so
+  callers never see glyph ids. `emoji::Emoji::sequences` is the list of sequences that produce a glyph; the glyph's
+  own `chars` is a private-use code point (flags `0xF0000+`, tones/keycaps `0xF1000+`). Things that bit:
+  - **Joiners need a glyph each, not one shared glyph.** `ZERO_WIDTH` used to be one glyph for ZWJ, VS16 and
+    U+20E3; ligature components are glyph ids, so a keycap pattern `[digit, 20E3]` would also have matched
+    `digit + VS16`. `emoji::joiners()` now yields one zero-advance glyph per character (plus the tag letters
+    `U+E0061..=E007A`, `E007F` that subdivision flags are spelled with). `keycaps_and_skin_tones_are_ligatures`
+    asserts a stray VS16 is *not* a keycap.
+  - **A single-character "sequence" is not a ligature** (needs 2+ components): `flags::flag` maps those characters
+    straight to the glyph. Found because Texas shaped as `[notdef, ...]`: U+1F3F4 itself had no glyph.
+  - **A glyph's character list must not include a joiner.** The first skull drawing listed `U+2620 U+FE0F` and
+    silently took U+FE0F from the joiner glyph (first drawing of a character wins).
+  - **Flags are a drawing DSL, not 258 grids.** `flags.rs`: `F::h("rwb")`, `.d(..)` disc, `.cross(..)`, `.tri(..)`,
+    `diag(..)`, `quad(..)`, `uj(w,h)` Union Jack; `design(code)` is one match arm per code. A test requires every one
+    of the 258 codes to have a design and that no two *different* countries look identical (a short allow-list of
+    flags that really are identical, e.g. the French territories, Norway/Svalbard, Indonesia/Monaco). That test caught
+    nine British territories sharing one ensign. Emblems are marks, not coats of arms.
+  - **The Texas flag has no emoji.** It uses the tag sequence its subdivision code would have (U+1F3F4, tags `ustx`,
+    cancel tag) and the shortcode `:flag_texas:`. It is drawn as the Lone Star flag (blue bar with a white star, white
+    over red), which was also the Republic's national flag; say so if the Burnet or another historical design is meant.
+  - **Shaper behaviour worth testing instead of assuming (rustybuzz):** Arabic and Hebrew marks (ccc != 0) are
+    centred over their base by *fallback positioning*, so their art doesn't need to be placed; Devanagari marks with
+    ccc 0 are *not* moved (x_offset 0). `rlig` lam-alef matches the *joined form* glyphs (`[lam_initial, alef_final]`),
+    not the base letters. With `dev2`/`deva` in the GSUB, `half` ligatures on `[consonant, virama]` produce half forms
+    and `rphf`/`blwf` give reph and the below-base ra, without any other lookup. All of this is in tests that shape
+    real text.
+  - **The gun is a water pistol** (`water_pistol`, U+1F52B), following the current standard; there is no `gun` emoji.
+  - Not done: family/couple/profession ZWJ sequences, most objects and people emoji, Devanagari digits, the special
+    क्ष/ज्ञ ligature shapes, stackable conjuncts for stemless consonants, Arabic `calt` variants.
 

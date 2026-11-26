@@ -47,6 +47,10 @@ enum Marks {
     Inside,
     /// A hamza above (ئ ؤ).
     Hamza,
+    /// Two dots below in the initial and medial forms only (Persian ی).
+    YehInitMedi,
+    /// A small square above (the Urdu retroflex letters ٹ ڈ ڑ).
+    Square,
 }
 
 const TOOTH: Family = Family {
@@ -176,6 +180,16 @@ const DUAL: &[(char, &Family, Marks)] = &[
     ('م', &MEEM, Marks::None),
     ('ه', &HEH, Marks::None),
     ('\u{640}', &TATWEEL, Marks::None),
+    // Persian and Urdu.
+    ('\u{67E}', &TOOTH, Marks::Below(3)), // پ
+    ('\u{686}', &JEEM, Marks::Below(3)),  // چ
+    ('\u{6A9}', &KAF, Marks::None),       // ک
+    ('\u{6AF}', &KAF, Marks::Above(2)),   // گ
+    ('\u{6CC}', &TOOTH, Marks::YehInitMedi), // ی
+    ('\u{679}', &TOOTH, Marks::Square),   // ٹ
+    ('\u{6BA}', &TOOTH, Marks::None),     // ں
+    ('\u{6BE}', &HEH, Marks::None),       // ھ
+    ('\u{6C1}', &HEH, Marks::None),       // ہ
 ];
 
 /// Letters that join only to the letter before them (isolated and final forms).
@@ -188,6 +202,10 @@ const RIGHT: &[(char, &Family, Marks)] = &[
     ('و', &WAW, Marks::None),
     ('ؤ', &WAW, Marks::Hamza),
     ('ة', &TEH_MARBUTA, Marks::Above(2)),
+    ('\u{698}', &REH, Marks::Above(3)), // ژ
+    ('\u{688}', &DAL, Marks::Square),  // ڈ
+    ('\u{691}', &REH, Marks::Square),  // ڑ
+    ('\u{6D2}', &TOOTH, Marks::None),  // ے
 ];
 
 /// An alef with a mark: `(letter, first cell row, rows)`; the same drawing serves both its shapes.
@@ -245,6 +263,17 @@ fn render(top: i32, rows: &str, marks: Marks, form: Form) -> Pixels {
             dot(&mut g, cx + 1, 11);
         }
         Marks::Inside => dot(&mut g, cx, top + 2),
+        Marks::YehInitMedi => {
+            if matches!(form, Form::Initial | Form::Medial) {
+                dot(&mut g, cx - 1, 11);
+                dot(&mut g, cx + 1, 11);
+            }
+        }
+        Marks::Square => {
+            for (dx, dy) in [(0, -3), (1, -3), (0, -2), (1, -2)] {
+                dot(&mut g, cx + dx, top + dy);
+            }
+        }
         Marks::Hamza => {
             for (dx, dy) in [(0, -3), (1, -3), (0, -2)] {
                 dot(&mut g, cx + dx, top + dy);
@@ -312,6 +341,139 @@ pub fn glyphs() -> Vec<GlyphSpec> {
                 row.push(false);
             }
             out.push(glyph(vec![c], &px));
+        }
+    }
+    extra_glyphs(&mut out);
+    out
+}
+
+
+/// The four alefs that can follow a lam in a ligature.
+const LAM_ALEFS: [char; 4] = ['ا', 'أ', 'إ', 'آ'];
+
+/// Where the lam-alef glyphs' private-use code points start (after the form code points).
+const LIGATURE_BASE: u32 = 0xE800;
+
+/// A lam-alef ligature's code point: `variant` is the index in [`LAM_ALEFS`], `joined` whether it
+/// is the form that joins the letter before it.
+fn lam_alef_char(variant: usize, joined: bool) -> char {
+    char::from_u32(LIGATURE_BASE + variant as u32 * 2 + joined as u32).unwrap()
+}
+
+/// The drawing of a lam-alef: `(first cell row, rows)`. A lam leaning into an alef, with the
+/// alef's own mark.
+fn lam_alef_art(variant: usize, joined: bool) -> (i32, String) {
+    let base: [&str; 8] = if joined {
+        [".#..#..", ".#..#..", "..#.#..", "..#.#..", "..#.#..", "...##..", "...###.", "....###"]
+    } else {
+        [".#..#.", ".#..#.", "..#.#.", "..#.#.", "..#.#.", "...##.", "...##.", "....#."]
+    };
+    let w = base[0].len();
+    let pad = |s: &str| format!("{s:.<w$}");
+    let mut rows: Vec<String> = Vec::new();
+    let mut top = 2;
+    match variant {
+        1 => {
+            top = 0;
+            rows.extend(["....##", "....#."].map(pad));
+        }
+        3 => {
+            top = 0;
+            rows.extend(["...##.", "....##"].map(pad));
+        }
+        _ => {}
+    }
+    rows.extend(base.iter().map(|r| r.to_string()));
+    if variant == 2 {
+        rows.extend(["....#.", "....##"].map(pad));
+    }
+    (top, rows.join("/"))
+}
+
+/// Tashkeel (vowel marks): zero advance, drawn at negative x so they land over (or under) the letter
+/// before them. `(code point, pixels)`; x counts from the end of that letter.
+const TASHKEEL: &[(char, &[(i32, i32)])] = &[
+    ('\u{64B}', &[(-5, 1), (-4, 0), (-3, 1), (-2, 0)]),       // fathatan
+    ('\u{64C}', &[(-5, 1), (-4, 0), (-3, 0), (-3, 1), (-2, 1)]), // dammatan
+    ('\u{64D}', &[(-5, 10), (-4, 11), (-3, 10), (-2, 11)]),   // kasratan
+    ('\u{64E}', &[(-4, 1), (-3, 0), (-2, 0)]),                // fatha
+    ('\u{64F}', &[(-4, 1), (-3, 0), (-2, 0), (-2, 1)]),       // damma
+    ('\u{650}', &[(-4, 11), (-3, 10), (-2, 10)]),             // kasra
+    ('\u{651}', &[(-4, 1), (-3, 0), (-3, 1), (-2, 1)]),       // shadda
+    ('\u{652}', &[(-4, 0), (-3, 0), (-4, 1), (-3, 1)]),       // sukun
+    ('\u{670}', &[(-3, 0), (-3, 1)]),                         // superscript alef
+];
+
+/// Arabic-Indic digits (U+0660..) as `(first cell row, rows)`; the Persian set (U+06F0..) differs
+/// in 4, 5 and 6.
+const DIGITS: [(i32, &str); 10] = [
+    (6, ".#./###/.#."),
+    (3, "#/#/#/#/#/#/#"),
+    (3, ".##/#../#../#../#../#../#.."),
+    (3, "#.#.#/#.#.#/#.#.#/#.###/#...."),
+    (3, ".##./#..#/#..#/.#.#/#.#./.#.."),
+    (4, ".##./#..#/#..#/.##."),
+    (3, "####/...#/..#./.#../.#../.#../.#.."),
+    (3, "#...#/#...#/.#.#./.#.#./..#.."),
+    (3, "..#../.#.#./.#.#./#...#/#...#"),
+    (3, ".##./#..#/#..#/.###/...#/...#/..#."),
+];
+const PERSIAN_DIGITS: [(i32, &str); 3] = [(3, "#..#./.#.#./#...#/#...#/.###."), (4, ".##./#..#/#..#/.##."), (3, ".##./#..#/#..#/.###/...#/...#/.##.")];
+
+fn extra_glyphs(out: &mut Vec<GlyphSpec>) {
+    // Lam-alef.
+    for variant in 0..LAM_ALEFS.len() {
+        for joined in [false, true] {
+            let (top, rows) = lam_alef_art(variant, joined);
+            let form = if joined { Form::Final } else { Form::Isolated };
+            out.push(glyph(vec![lam_alef_char(variant, joined)], &render(top, &rows, Marks::None, form)));
+        }
+    }
+    // Tashkeel.
+    for (c, pixels) in TASHKEEL {
+        let left = pixels.iter().map(|(x, _)| -x).max().unwrap_or(0) as usize;
+        let mut px = vec![vec![false; left + 1]; ROWS];
+        for (x, y) in *pixels {
+            px[*y as usize][(left as i32 + x) as usize] = true;
+        }
+        let rects = rects_from_mask(left + 1, &px, 0).into_iter().map(|mut r| {
+            r.x0 -= left as i32;
+            r.x1 -= left as i32;
+            r
+        }).collect();
+        out.push(GlyphSpec { chars: vec![*c], advance: 0, colour: false, layers: vec![Layer { color: 0, rects }] });
+    }
+    // Digits.
+    for (set, base) in [(0u32, 0x660u32), (1, 0x6F0)] {
+        for (i, (top, rows)) in DIGITS.iter().enumerate() {
+            let (top, rows) = if set == 1 && (4..=6).contains(&i) { PERSIAN_DIGITS[i - 4] } else { (*top, *rows) };
+            let art: Vec<&str> = rows.split('/').collect();
+            let w = art.iter().map(|r| r.len()).max().unwrap_or(1);
+            let mut px = vec![vec![false; w + 1]; ROWS];
+            for (y, r) in art.iter().enumerate() {
+                for (x, ch) in r.chars().enumerate() {
+                    if ch == '#' {
+                        px[top as usize + y][x] = true;
+                    }
+                }
+            }
+            out.push(glyph(vec![char::from_u32(base + i as u32).unwrap()], &px));
+        }
+    }
+}
+
+/// The `rlig` ligatures: a lam joined to what follows (initial or medial form) and a final alef
+/// become one lam-alef glyph.
+pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
+    let mut out = Vec::new();
+    for (variant, alef) in LAM_ALEFS.iter().enumerate() {
+        for (lam_form, joined) in [(Form::Initial, false), (Form::Medial, true)] {
+            out.push(crate::font_gen::Ligature {
+                script: *b"arab",
+                feature: *b"rlig",
+                components: vec![form_char('ل', lam_form), form_char(*alef, Form::Final)],
+                to: lam_alef_char(variant, joined),
+            });
         }
     }
     out
@@ -431,6 +593,62 @@ mod tests {
                     assert!(px[9][w - 1], "{letter} {:?}: no joining stroke at the right edge", form as u8);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn lam_followed_by_alef_is_one_ligature() {
+        let f = font();
+        assert_eq!(shape(&f, "لا"), vec![gid(&f, lam_alef_char(0, false))]);
+        assert_eq!(shape(&f, "لأ"), vec![gid(&f, lam_alef_char(1, false))]);
+        assert_eq!(shape(&f, "لإ"), vec![gid(&f, lam_alef_char(2, false))]);
+        assert_eq!(shape(&f, "لآ"), vec![gid(&f, lam_alef_char(3, false))]);
+        // After a letter that joins it, the ligature takes the joined shape and the meem its final one.
+        assert_eq!(shape(&f, "ملا"), vec![gid(&f, form_char('م', Form::Initial)), gid(&f, lam_alef_char(0, true))]);
+        // A lam on its own, or before a different letter, is not a ligature.
+        assert_eq!(shape(&f, "لب"), vec![gid(&f, form_char('ل', Form::Initial)), gid(&f, form_char('ب', Form::Final))]);
+    }
+
+    #[test]
+    fn vowel_marks_take_no_room_and_follow_their_letter() {
+        let f = font();
+        let face = rustybuzz::Face::from_slice(&f, 0).unwrap();
+        for mark in ['\u{64B}', '\u{64C}', '\u{64D}', '\u{64E}', '\u{64F}', '\u{650}', '\u{651}', '\u{652}', '\u{670}'] {
+            let mut buf = rustybuzz::UnicodeBuffer::new();
+            buf.push_str(&format!("ب{mark}"));
+            buf.set_direction(rustybuzz::Direction::RightToLeft);
+            buf.set_script(rustybuzz::script::ARABIC);
+            let out = rustybuzz::shape(&face, &[], buf);
+            assert_eq!(out.len(), 2, "U+{:04X}", mark as u32);
+            let infos = out.glyph_infos();
+            let pos = out.glyph_positions();
+            let at = infos.iter().position(|i| i.glyph_id == gid(&f, mark)).expect("the mark is drawn");
+            assert_eq!(pos[at].x_advance, 0, "U+{:04X} takes room", mark as u32);
+        }
+    }
+
+    #[test]
+    fn persian_and_urdu_letters_join_like_the_arabic_ones() {
+        let f = font();
+        // Persian peh: initial, final.
+        assert_eq!(shape(&f, "\u{67E}\u{67E}"), vec![gid(&f, form_char('\u{67E}', Form::Initial)), gid(&f, form_char('\u{67E}', Form::Final))]);
+        for c in ['\u{686}', '\u{698}', '\u{6A9}', '\u{6AF}', '\u{6CC}', '\u{679}', '\u{688}', '\u{691}', '\u{6BA}', '\u{6BE}', '\u{6C1}', '\u{6D2}'] {
+            assert!(glyphs().iter().any(|g| g.chars.contains(&c)), "missing U+{:04X}", c as u32);
+        }
+        // Persian yeh has its dots only where it joins forward.
+        let yeh = |form| {
+            let (top, rows) = TOOTH.forms[form as usize];
+            render(top, rows, Marks::YehInitMedi, form)
+        };
+        assert!(yeh(Form::Initial)[11].iter().any(|&p| p));
+        assert!(!yeh(Form::Final)[11].iter().any(|&p| p));
+    }
+
+    #[test]
+    fn both_sets_of_digits_are_there() {
+        let have: HashSet<char> = glyphs().iter().flat_map(|g| g.chars.clone()).collect();
+        for c in ('\u{660}'..='\u{669}').chain('\u{6F0}'..='\u{6F9}') {
+            assert!(have.contains(&c), "missing digit U+{:04X}", c as u32);
         }
     }
 }
