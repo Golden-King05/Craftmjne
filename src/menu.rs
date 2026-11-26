@@ -93,7 +93,7 @@ struct TextInputDisplay(TextField);
 struct GameModeOption(GameMode);
 
 #[derive(Component)]
-struct MainMenuRoot;
+pub struct MainMenuRoot;
 #[derive(Component)]
 struct WorldsRoot;
 #[derive(Component)]

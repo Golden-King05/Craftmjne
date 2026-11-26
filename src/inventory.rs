@@ -224,6 +224,8 @@ struct SlotItem(ItemId, u8);
 struct Tip {
     text: String,
     color: [f32; 3],
+    /// The item's own `font` tag, if it has one.
+    font: Option<String>,
 }
 
 /// The tooltip for an item: its name, and for a tool a second line naming
@@ -231,11 +233,12 @@ struct Tip {
 /// in that quality's colour.
 fn tip_for(registry: &ItemRegistry, id: ItemId, quality: u8) -> Tip {
     let name = registry.def(id).name.clone();
+    let font = registry.def(id).font.clone();
     if registry.tool(id).is_none() {
-        return Tip { text: name, color: [1.0; 3] };
+        return Tip { text: name, color: [1.0; 3], font };
     }
     let r = registry.rarity(quality);
-    Tip { text: format!("{name}\n{}", r.name), color: r.color }
+    Tip { text: format!("{name}\n{}", r.name), color: r.color, font }
 }
 /// A cell in Creative's item list.
 #[derive(Component)]
@@ -570,7 +573,7 @@ fn spawn_crafting_panel(
             Skinned::new(Element::Panel),
         ))
         .with_children(|panel| {
-            panel.spawn((Text::new("Crafting"), TextFont { font_size: 24.0, ..default() }, TextColor(theme::TEXT), theme::shadow()));
+            panel.spawn((Text::new("Crafting"), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
             panel.spawn((
                 Text::new(where_text),
                 TextFont { font_size: 12.0, ..default() },
@@ -711,7 +714,7 @@ fn sync_inventory_screen(
             ))
             .with_children(|panel| match *state.mode {
                 GameMode::Survival => {
-                    panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, TextColor(theme::TEXT), theme::shadow()));
+                    panel.spawn((Text::new("Inventory"), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
                     spawn_hotbar_and_storage(panel, &icons, &state.hotbar, &state.inventory);
                 }
                 GameMode::Creative => {
@@ -719,7 +722,7 @@ fn sync_inventory_screen(
                         CreativeTab::Blocks => "Items",
                         CreativeTab::Inventory => "Inventory",
                     };
-                    panel.spawn((Text::new(title), TextFont { font_size: 24.0, ..default() }, TextColor(theme::TEXT), theme::shadow()));
+                    panel.spawn((Text::new(title), TextFont { font_size: 24.0, ..default() }, crate::fonts::FontTag::new("title"), TextColor(theme::TEXT), theme::shadow()));
                     let tab_label = match state.inv.creative_tab {
                         CreativeTab::Blocks => "Show Inventory",
                         CreativeTab::Inventory => "Show Items",
@@ -784,6 +787,7 @@ fn sync_inventory_screen(
 
             root.spawn((
                 TooltipText,
+                crate::fonts::FontTag::new("tooltip"),
                 Text::new(""),
                 TextFont { font_size: 14.0, ..default() },
                 TextColor(Color::WHITE),
@@ -819,7 +823,7 @@ fn sync_cursor_ui(
     windows: Query<&Window, With<PrimaryWindow>>,
     focus: Option<Res<crate::menu_nav::MenuFocus>>,
     spots: Query<(&GlobalTransform, &ComputedNode)>,
-    mut tooltips: Query<(&mut Text, &mut Node, &mut Visibility, &mut TextColor), (With<TooltipText>, Without<HeldIcon>)>,
+    mut tooltips: Query<(&mut Text, &mut Node, &mut Visibility, &mut TextColor, &mut crate::fonts::FontTag), (With<TooltipText>, Without<HeldIcon>)>,
     mut held_icons: Query<&mut Node, (With<HeldIcon>, Without<TooltipText>)>,
 ) {
     // With a controller (or the keyboard) driving the highlight there is no pointer: the held
@@ -830,7 +834,7 @@ fn sync_cursor_ui(
         node.left = Val::Px(cursor.x - 20.0);
         node.top = Val::Px(cursor.y - 20.0);
     }
-    let Ok((mut text, mut node, mut vis, mut color)) = tooltips.single_mut() else { return };
+    let Ok((mut text, mut node, mut vis, mut color, mut tag)) = tooltips.single_mut() else { return };
     let Some(tip) = &inv.tooltip else {
         *vis = Visibility::Hidden;
         return;
@@ -838,6 +842,10 @@ fn sync_cursor_ui(
     *vis = Visibility::Visible;
     if text.0 != tip.text {
         text.0 = tip.text.clone();
+    }
+    let want = tip.font.as_deref().unwrap_or("tooltip");
+    if tag.0 != want {
+        tag.0 = want.to_string();
     }
     let [r, g, b] = tip.color;
     color.0 = Color::srgb(r, g, b);

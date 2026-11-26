@@ -33,7 +33,6 @@ bevy = { version = "0.16", default-features = false, features = [
   "bevy_ui",
   "bevy_window",
   "bevy_winit",
-  "default_font",
   "tonemapping_luts",
   "x11",
   "png", # the CRAFT_SMOKE=1 screenshot, and decoding hand-supplied textures/blocks/*.png (see atlas.rs)
@@ -55,6 +54,10 @@ flate2 = "1"
 # tree via winit/wgpu, so this adds nothing to the download.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+# Reads the fonts font_gen.rs writes, to check them (already in the tree via bevy_text).
+ttf-parser = "0.25"
 
 # Fast iteration: light optimization for our code, full for dependencies.
 [profile.dev]

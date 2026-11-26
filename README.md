@@ -1470,6 +1470,39 @@ Limits, on purpose for now: inventory icons and dropped items use the block's te
 model, models take no biome tint, thrown items and the climb assist still treat a model block as a full
 cell, and a model always faces the same way (blocks have no yaw).
 
+## Typeface and emoji
+
+Every piece of text in the game - menus, HUD, chat, tooltips - uses one built-in pixel typeface
+(`font_gen.rs` writes a real TrueType file in memory; `pixel_font.rs` holds the drawings). The
+default font that ships with Bevy is turned off, so there is no other font unless you add one.
+
+- **Grid.** The font is 12 pixels tall (caps 8 rows, lowercase 6, descenders below the baseline,
+  accents above), a little larger than the 8x8 convention and independent of the 16x16 block textures.
+- **Sharp pixels.** Text is drawn without smoothing, and sizes snap to a multiple of 12 (a size from
+  about 13 to 17 draws at 12, 18 to 29 at 24, and so on), so a font pixel is always a whole number of
+  screen pixels. Vector fonts from packs are *not* snapped.
+- **Characters.** ASCII, the Latin-1 letters with accents (`ç`, `ñ`, `ü`...), common punctuation, `€ £ ¥`.
+- **Emoji.** About 340 12x12 colour emoji drawn in the game's style (faces, hearts, animals, food,
+  weather, objects, arrows, symbols). They are colour glyphs (COLR/CPAL) in a second built-in font used
+  as a fallback, so they work anywhere text does, including chat and signs. In chat, `:name:` becomes
+  the emoji (`:heart:`, `:fire:`); anything that is not a known name is left as typed. **No flags** (a
+  test enforces it). Not every Unicode emoji exists: skin tones show as colour swatches, and joined
+  sequences (family, keycaps) are not combined. Adding one is a row in `src/emoji/`.
+
+### Fonts in packs, and the `font` tag
+
+Any text carries a **font tag**: a *role* or a *font name*. Roles: `default`, `title`, `button`,
+`chat`, `tooltip`, `hud`. A resource pack (or the game folder) can supply fonts in `fonts/`:
+
+- `fonts/<name>.ttf` / `.otf` - a vector font.
+- `fonts/<name>.png` - a bitmap sheet of 16x16 cells (cell size = image width / 16; ink = alpha >= 128).
+- `fonts/fonts.json` - `{"title": "myfont", "chat": "other"}` points a role at a font name. `default`
+  replaces the font for everything that has no role of its own.
+
+A block or item file can say `"font": "myfont"` (a role or a name); its name is then drawn in that font
+in tooltips. A tag that names nothing falls back to the default font, never to a missing one. Fonts
+reload with the rest of a pack (Ctrl+R).
+
 ## Sound
 
 Every sound is an *event*: `block.<group>.break|place|step`, `item.pickup`, `entity.hit`,

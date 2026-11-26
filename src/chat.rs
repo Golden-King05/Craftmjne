@@ -140,6 +140,7 @@ fn setup_chat(mut commands: Commands) {
                 ChatLogText,
                 Text::new(""),
                 TextFont { font_size: 14.0, ..default() },
+                crate::fonts::FontTag::new("chat"),
                 TextColor(Color::WHITE),
             ));
             // Sits between the log and the input row, so the dropdown reads
@@ -161,6 +162,7 @@ fn setup_chat(mut commands: Commands) {
                     ChatInputText,
                     Text::new(""),
                     TextFont { font_size: 14.0, ..default() },
+                    crate::fonts::FontTag::new("chat"),
                     TextColor(Color::WHITE),
                 ));
             });
@@ -376,7 +378,7 @@ fn chat_text_input(
                     if let Some(rest) = text.strip_prefix('/') {
                         env.run(rest);
                     } else {
-                        env.log.push(text);
+                        env.log.push(crate::emoji::expand_shortcodes(&text));
                     }
                 }
                 chat.open = false;
@@ -522,6 +524,7 @@ fn sync_chat_ui(
             parent.spawn((
                 TextSpan::new(seg.text.clone()),
                 TextFont { font_size: 14.0, ..default() },
+                crate::fonts::FontTag::new("chat"),
                 TextColor(seg.color.unwrap_or(Color::WHITE)),
             ));
         }
@@ -608,6 +611,7 @@ fn spawn_suggestion_entry(parent: &mut ChildSpawnerCommands, suggestion: &Comman
             row.spawn((
                 Text::new(format!("/{}  {}", suggestion.text, suggestion.usage)),
                 TextFont { font_size: 13.0, ..default() },
+                crate::fonts::FontTag::new("chat"),
                 TextColor(Color::WHITE),
             ));
         });

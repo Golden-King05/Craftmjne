@@ -139,7 +139,7 @@ fn main() {
             menu::MenuPlugin,
         ))
         .add_plugins((entities::EntitiesPlugin, block_models::BlockModelsPlugin, particles::ParticlesPlugin, damage::DamagePlugin, states::StatesPlugin))
-        .add_plugins((craftmjne::packs::PackPlugin, craftmjne::pack_panel::PackPanelPlugin, craftmjne::keybinds::KeybindPlugin, craftmjne::mod_controls::ModControlsPlugin, craftmjne::settings::SettingsPlugin, craftmjne::sound::SoundPlugin));
+        .add_plugins((craftmjne::packs::PackPlugin, craftmjne::pack_panel::PackPanelPlugin, craftmjne::fonts::FontPlugin, craftmjne::keybinds::KeybindPlugin, craftmjne::mod_controls::ModControlsPlugin, craftmjne::settings::SettingsPlugin, craftmjne::sound::SoundPlugin));
 
     // CI / smoke mode: skip the menu, drop straight into a throwaway world,
     // let it stream in, save a screenshot, and exit. Run with:
@@ -219,6 +219,7 @@ fn ui_shot(
     mut inventory: ResMut<craftmjne::inventory::InventoryState>,
     mut focus: ResMut<craftmjne::menu_nav::MenuFocus>,
     buttons: Query<(Entity, &GlobalTransform), With<Button>>,
+    buttons_roots: Query<Entity, With<craftmjne::menu::MainMenuRoot>>,
     mut exit: EventWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
@@ -241,6 +242,28 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
+                "fonts" => {
+                    for e in &buttons_roots {
+                        commands.entity(e).despawn();
+                    }
+                    commands.spawn((
+                        Node { width: Val::Percent(100.0), height: Val::Percent(100.0), flex_direction: FlexDirection::Column, padding: UiRect::all(Val::Px(24.0)), row_gap: Val::Px(6.0), ..default() },
+                        BackgroundColor(Color::srgb(0.16, 0.12, 0.09)),
+                    ))
+                    .with_children(|p| {
+                        for (size, line) in [
+                            (24.0, "The quick brown fox jumps over the lazy dog."),
+                            (24.0, "THE QUICK BROWN FOX! 0123456789 (){}[]<>+-=*/@#$%&"),
+                            (24.0, "àéîõü ÀÉÎÕÜ ñÑ çÇ ¡Hola! ¿Qué? ß æÆ øØ © € £ ~^`|_"),
+                            (12.0, "The quick brown fox jumps over the lazy dog. (twelve)"),
+                            (24.0, "😀😃😄😁😆😅🤣😂🙂😉😊😇🥰😍🤩😘😋😛🤔😎😴😭😱😡💀👻🤖"),
+                            (24.0, "❤🧡💛💚💙💜🖤⭐✨🔥💧☀☁❄⚡🌈🌳🌵🍎🍌🍉🍕🍔🍪☕🍺"),
+                            (24.0, "🐶🐱🐭🐰🦊🐻🐼🐷🐸🦁🐢🐝🦋🐙🐳🔑💣🎁🏆👑💎💡🚀🏠🕐🌑🌓🌕⬆➡"),
+                        ] {
+                            p.spawn((Text::new(line), TextFont { font_size: size, ..default() }, TextColor(Color::WHITE)));
+                        }
+                    });
+                }
                 "settings-rendering" => view.section = Section::Rendering,
                 "settings-sound" => view.section = Section::Sound,
                 "settings-mods" => view.section = Section::Mods,

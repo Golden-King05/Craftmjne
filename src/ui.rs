@@ -195,6 +195,7 @@ fn setup_hud(mut commands: Commands) {
             .with_children(|wrap| {
                 wrap.spawn((
                     HotbarLabel,
+                    crate::fonts::FontTag::new("hud"),
                     Text::new(""),
                     TextFont { font_size: 16.0, ..default() },
                     TextColor(Color::WHITE),
@@ -223,6 +224,7 @@ fn setup_hud(mut commands: Commands) {
 
             root.spawn((
                 DebugText,
+                crate::fonts::FontTag::new("hud"),
                 Text::new(""),
                 TextFont { font_size: 13.0, ..default() },
                 TextColor(Color::WHITE),

@@ -3470,3 +3470,25 @@ etc.) instead of inventing a new approach:
   tab (`pack_panel::spawn_order`); settings' Packs stays global-only (no world there).
   Disk reminder: this session hit "No space left" three times; `rm -rf target/debug/incremental` plus
   deleting stale `craftmjne-<hash>`/`headless-<hash>` test binaries and old `libcraftmjne-*.rlib` freed ~10 GB.
+
+- **The typeface is a real TTF built in memory, and the fonts plugin only decides which handle each text uses.**
+  `font_gen::build_ttf` writes glyf/loca/cmap/COLR/CPAL tables from square pixel contours (em = 12 rows,
+  `PIXEL`=100 units, baseline row 10), checked by parsing the output with `ttf-parser` (a dev-dependency) and by
+  a real screenshot (`CRAFT_SHOT=fonts`). `pixel_font.rs` draws text, `emoji.rs` + `emoji/` draw ~340 emoji as
+  palette-letter 12x12 grids, composed from heads plus eye/mouth overlays. Facts that bit:
+  - **Bevy caches a font by handle id**, so a changed font needs a *new* handle; the default is replaced in place
+    with `Assets<Font>::insert(&Handle::default(), ..)` and `"default_font"` is off in `Cargo.toml`. A font nothing
+    references is not in the cosmic-text database, so the emoji font is registered directly
+    (`load_font_source`) as the fallback.
+  - **Sizes snap to a multiple of the font's unit** (`snap_size`, 12 for the built-in) with `FontSmoothing::None`
+    and a fixed 1.25 line height, in `apply_fonts` (PostUpdate, before `UiSystem::Prepare`). Vector pack fonts
+    are not snapped. A `FontTag(String)` (role or name; unknown -> default) is read there; spawn sites only add the
+    tag, never a font handle. Roles map through `fonts/fonts.json`; block/item files take a `font` definition tag
+    used by the tooltip (`Tip::font`).
+  - **No GSUB**: ZWJ/VS16/keycap marks are zero-width and sequences are not combined; skin-tone modifiers draw as
+    swatches. Flags are deliberately excluded. Colour emoji take a text colour tint only as far as the renderer
+    does it (not verified beyond the screenshot).
+  - **Chat** expands `:name:` through `emoji::expand_shortcodes` only for plain messages, not `/commands`.
+  - A glyph defined as base + accent (`COMPOSED`) can't have a descender mark; `ç`/`Ç` are drawn by hand in `BASE`.
+  - A screenshot of the preview text is the only way to see a glyph problem from here: `{}` first read as `()` until
+    looked at at size 24.

@@ -96,6 +96,8 @@ pub struct ItemDef {
     pub throw: crate::blocks::ThrowSpec,
     /// Seconds between melee hits while held.
     pub attack_cooldown: f32,
+    /// Font its name is drawn in (tooltips); `None` = the default.
+    pub font: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +117,7 @@ struct ItemFile {
     #[serde(default)]
     throwable: bool,
     attack_cooldown: Option<f32>,
+    font: Option<String>,
     #[serde(flatten)]
     throw: crate::blocks::ThrowFile,
 }
@@ -201,6 +204,7 @@ impl ItemRegistry {
                     throwable: file.throwable,
                     throw: file.throw.spec(),
                     attack_cooldown: file.attack_cooldown.filter(|c| *c > 0.0).unwrap_or(crate::blocks::DEFAULT_ATTACK_COOLDOWN),
+                    font: file.font.filter(|f| !f.trim().is_empty()),
                     id: file.id,
                 }
             })
@@ -209,7 +213,7 @@ impl ItemRegistry {
     }
 
     pub fn build(blocks: &BlockRegistry, plain: Vec<ItemDef>) -> Self {
-        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false, throw: Default::default(), attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN };
+        let empty = ItemDef { id: "air".into(), name: "Nothing".into(), max_stack: 1, kind: ItemKind::Block(AIR), tool: None, mass: 0.0, throwable: false, throw: Default::default(), attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN, font: None };
         let mut reg = Self {
             defs: vec![empty],
             by_name: HashMap::new(),
@@ -232,6 +236,7 @@ impl ItemRegistry {
                 throwable: def.throwable,
                 throw: def.throw,
                 attack_cooldown: def.attack_cooldown,
+                font: def.font.clone(),
             });
             reg.of_block[block] = id;
         }
@@ -495,6 +500,7 @@ mod tests {
             throwable: false,
             throw: Default::default(),
             attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN,
+            font: None,
         };
         ItemRegistry::build(&blocks, vec![def]);
     }
@@ -563,6 +569,7 @@ mod tests {
             throwable: false,
             throw: Default::default(),
             attack_cooldown: crate::blocks::DEFAULT_ATTACK_COOLDOWN,
+            font: None,
         };
         ItemRegistry::build(&blocks, vec![def]).with_tiers(TierBook::with_defaults());
     }

@@ -841,6 +841,8 @@ pub struct BlockDef {
     pub hittable: bool,
     /// Seconds between melee hits while this is held (`attack_cooldown`).
     pub attack_cooldown: f32,
+    /// Font its name is drawn in (tooltips); `None` = the default (`font`).
+    pub font: Option<String>,
     /// A thrown object at least this fast (m/s) shatters it (glass); `None`
     /// means it never breaks that way.
     pub shatters_at: Option<f32>,
@@ -944,6 +946,7 @@ impl Default for BlockDef {
             requires_crouch: false,
             hittable: false,
             attack_cooldown: DEFAULT_ATTACK_COOLDOWN,
+            font: None,
             shatters_at: None,
             shatter_keep: 1.0,
             mass: DEFAULT_MASS,
@@ -1047,6 +1050,7 @@ pub(crate) struct BlockFile {
     #[serde(default)]
     hittable: bool,
     attack_cooldown: Option<f32>,
+    font: Option<String>,
     shatters_at: Option<f32>,
     shatter_keep: Option<f32>,
     mass: Option<f32>,
@@ -1135,6 +1139,7 @@ impl BlockFile {
             requires_crouch: self.requires_crouch,
             hittable: self.hittable,
             attack_cooldown: self.attack_cooldown.filter(|c| *c > 0.0).unwrap_or(DEFAULT_ATTACK_COOLDOWN),
+            font: self.font.filter(|f| !f.trim().is_empty()),
             shatters_at: self.shatters_at,
             shatter_keep: self.shatter_keep.unwrap_or(1.0).clamp(0.0, 1.0),
             mass: self.mass.filter(|m| *m > 0.0).unwrap_or(DEFAULT_MASS),

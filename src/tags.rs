@@ -96,6 +96,7 @@ pub const DEFINITION_TAGS: &[DefinitionTag] = &[
     tag("tool_response", Block, Mining, "How much of a tool's speed-up this block takes (0..1)."),
     tag("requires_crouch", Block, Mining, "Only mined while crouching."),
     tag("hittable", Block, Combat, "A plain left click hits it instead of mining it."),
+    tag("font", Both, Appearance, "Font its name is drawn in (a role like `title`, or a font name from a pack); default if unknown."),
     tag("attack_cooldown", Both, Combat, "Seconds between melee hits while held."),
     tag("mass", Both, Throwing, "Kilograms."),
     tag("throwable", Both, Throwing, "Left click throws it."),
