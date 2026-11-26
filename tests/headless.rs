@@ -1687,3 +1687,66 @@ fn turning_a_mod_off_and_on_loses_nothing_it_made() {
     leave(&mut app);
     assert!(store.load_data(&slug).shelved_items.is_empty(), "nothing is left on the shelf");
 }
+
+/// A resource pack with a half-height model for dirt, in `root/<folder>`.
+fn install_slab_pack(root: &std::path::Path, folder: &str) -> craftmjne::packs::PackInfo {
+    let dir = root.join(folder);
+    std::fs::create_dir_all(dir.join("models").join("blocks")).unwrap();
+    std::fs::write(
+        dir.join("models").join("blocks").join("dirt.json"),
+        r#"{"boxes": [{"from": [0, 0, 0], "to": [16, 8, 16], "textures": {"all": "dirt"}}]}"#,
+    )
+    .unwrap();
+    craftmjne::packs::PackInfo { folder: folder.into(), name: folder.into(), description: String::new(), path: dir, warning: None }
+}
+
+fn dirt_is_remodelled(app: &App) -> bool {
+    let id = app.world().resource::<BlockRegistry>().id("dirt") as usize;
+    app.world().resource::<craftmjne::blocks::BlockTables>().0.pack_models[id].is_some()
+}
+
+/// A world's own packs apply in that world only; global packs and changes made while
+/// playing apply at once, with no re-entering the world.
+#[test]
+fn world_packs_apply_only_in_their_world_and_changes_apply_live_in_game() {
+    let temp = temp_saves();
+    let installed_mods = temp.0.join("installed-mods");
+    std::fs::create_dir_all(&installed_mods).unwrap();
+    let mut app = app_without_a_world(&temp, &installed_mods);
+    app.add_plugins(craftmjne::packs::PackPlugin);
+    let pack = install_slab_pack(&temp.0.join("packs"), "slab");
+    app.world_mut().insert_resource(craftmjne::packs::InstalledPacks(vec![pack]));
+    assert!(!dirt_is_remodelled(&app));
+
+    let store = SaveStore::at(temp.0.clone());
+    // 1. A world with the pack on its own list gets it...
+    let (slug, mut meta) = store.create_world("With", 7, GameMode::Survival).unwrap();
+    meta.world_packs = vec!["slab".into()];
+    enter(&mut app, slug, meta);
+    assert!(in_game(&app));
+    assert!(dirt_is_remodelled(&app), "the world's own pack is on in it");
+    leave(&mut app);
+
+    // 2. ...and the next world, without it, doesn't.
+    let (slug2, meta2) = store.create_world("Without", 8, GameMode::Survival).unwrap();
+    enter(&mut app, slug2.clone(), meta2);
+    assert!(!dirt_is_remodelled(&app), "another world's pack doesn't leak into this one");
+
+    // 3. Turning it on for this world while playing applies at once; off again undoes it.
+    app.world_mut().resource_mut::<ActiveWorld>().meta.world_packs = vec!["slab".into()];
+    app.update();
+    app.update();
+    assert!(dirt_is_remodelled(&app), "a world pack chosen in game shows without re-entering");
+    app.world_mut().resource_mut::<ActiveWorld>().meta.world_packs.clear();
+    app.update();
+    app.update();
+    assert!(!dirt_is_remodelled(&app));
+
+    // 4. A global pack applies in the open world too.
+    app.world_mut().resource_mut::<craftmjne::packs::PackSelection>().enabled = vec!["slab".into()];
+    app.update();
+    app.update();
+    assert!(dirt_is_remodelled(&app), "a global pack chosen in game shows at once");
+    // And every loaded chunk was marked for remeshing so the new art actually appears.
+    assert!(run_until(&mut app, |app| app.world().resource::<ChunkMap>().stats().0 >= 4, 2000));
+}

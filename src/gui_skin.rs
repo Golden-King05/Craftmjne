@@ -563,6 +563,28 @@ fn build_skin(
     commands.insert_resource(upload_skin(images, &mut assets));
 }
 
+/// Rebuilds the menu skin when the packs in force change, so choosing a pack retextures the
+/// menus on the spot (nodes re-resolve their image by name every frame, see [`apply_skin`]).
+fn rebuild_skin(
+    mut commands: Commands,
+    assets: Option<ResMut<Assets<Image>>>,
+    installed: Option<Res<crate::mods::InstalledMods>>,
+    effective: Option<Res<crate::packs::EffectivePacks>>,
+    mut last: Local<Option<Vec<PathBuf>>>,
+) {
+    let (Some(mut assets), Some(effective)) = (assets, effective) else { return };
+    if last.as_ref() == Some(&effective.0) {
+        return;
+    }
+    let first = last.is_none();
+    *last = Some(effective.0.clone());
+    if first {
+        return; // `build_skin` just made it from the same packs
+    }
+    let mods_dir = installed.map(|i| i.0.clone()).unwrap_or_else(crate::mods::installed_mods_dir);
+    commands.insert_resource(upload_skin(build_skin_images(&gui_texture_dirs(&mods_dir, &effective.0)), &mut assets));
+}
+
 /// Puts an element's image on a node. `hover` is shown while the node is hovered
 /// (any node with an `Interaction`).
 #[derive(Component, Clone, Copy, Debug)]
@@ -623,7 +645,7 @@ pub struct GuiSkinPlugin;
 
 impl Plugin for GuiSkinPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, build_skin).add_systems(Update, apply_skin);
+        app.add_systems(PreStartup, build_skin).add_systems(Update, (rebuild_skin, apply_skin).chain());
     }
 }
 
@@ -724,6 +746,32 @@ mod tests {
         assert_eq!(b.border_px(Element::Button), 16.0, "the 4-pixel border is 4x as wide in a 4x texture");
         assert!(!skin[&Element::ButtonHover].custom, "only the named element changes");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn choosing_a_pack_retextures_the_menus_without_a_restart() {
+        let pack = tmp("live");
+        std::fs::create_dir_all(pack.join("textures").join("gui")).unwrap();
+        write_png(&pack.join("textures").join("gui").join("button.png"), 64, 48, [10, 200, 10, 255]);
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Image>()
+            .insert_resource(crate::packs::EffectivePacks::default())
+            .add_plugins(GuiSkinPlugin);
+        let first_pixel = |app: &App| {
+            let handle = app.world().resource::<GuiSkin>().handle(Element::Button).unwrap();
+            app.world().resource::<Assets<Image>>().get(&handle).unwrap().data.as_ref().unwrap()[..4].to_vec()
+        };
+        app.update();
+        app.update();
+        assert_ne!(first_pixel(&app), [10, 200, 10, 255], "the built-in button to start with");
+        app.world_mut().resource_mut::<crate::packs::EffectivePacks>().0 = vec![pack.clone()];
+        app.update();
+        assert_eq!(first_pixel(&app), [10, 200, 10, 255], "the pack's button shows as soon as it is chosen");
+        app.world_mut().resource_mut::<crate::packs::EffectivePacks>().0 = Vec::new();
+        app.update();
+        assert_ne!(first_pixel(&app), [10, 200, 10, 255], "and turning it off puts the built-in one back");
+        let _ = std::fs::remove_dir_all(pack);
     }
 
     #[test]

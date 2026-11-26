@@ -22,6 +22,10 @@ const LIST_HEIGHT: f32 = 330.0;
 pub(crate) enum MenuButton {
     GoWorlds,
     GoSettings,
+    /// Pause menu: the resource-pack panel.
+    PausePacks,
+    /// Pause menu: back from the pack panel.
+    PausePacksBack,
     GoMods,
     Quit,
     BackToMainMenu,
@@ -706,32 +710,55 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
 // Pause screen (shown over the still-rendering world; see `PauseState`)
 // ---------------------------------------------------------------------------
 
-fn spawn_pause_screen(commands: &mut Commands) {
+/// Whether the pause menu is showing the resource-pack panel instead of its buttons.
+#[derive(Resource, Default)]
+pub struct PausePacksOpen(pub bool);
+
+fn spawn_pause_screen(commands: &mut Commands, packs_open: bool, panel: &crate::pack_panel::PackPanel, selection: &crate::packs::PackSelection, installed: &crate::packs::InstalledPacks, world_packs: &[String]) {
     commands.spawn((PauseRoot, theme::overlay_root())).with_children(|root| {
-        root.spawn(theme::panel(420.0)).with_children(|p| {
-            theme::heading(p, "Paused");
-            nav_button(p, "Resume", MenuButton::Resume, ButtonStyle::Primary);
-            nav_button(p, "Quit to Menu", MenuButton::QuitToMenu, ButtonStyle::Normal);
-            nav_button(p, "Quit Game", MenuButton::Quit, ButtonStyle::Danger);
+        root.spawn(theme::panel(if packs_open { 620.0 } else { 420.0 })).with_children(|p| {
+            if packs_open {
+                crate::pack_panel::spawn_pack_panel(p, panel.scope, true, selection, world_packs, installed);
+                nav_button(p, "Back", MenuButton::PausePacksBack, ButtonStyle::Primary);
+            } else {
+                theme::heading(p, "Paused");
+                nav_button(p, "Resume", MenuButton::Resume, ButtonStyle::Primary);
+                nav_button(p, "Resource Packs", MenuButton::PausePacks, ButtonStyle::Normal);
+                nav_button(p, "Quit to Menu", MenuButton::QuitToMenu, ButtonStyle::Normal);
+                nav_button(p, "Quit Game", MenuButton::Quit, ButtonStyle::Danger);
+            }
         });
     });
 }
 
 /// Spawns/despawns the pause overlay in step with `PauseState`, which is
 /// toggled by `player::cursor_grab` on Escape (and by the Resume/Quit
-/// buttons here, via `handle_menu_buttons`).
-fn sync_pause_screen(mut commands: Commands, paused: Res<PauseState>, roots: Query<Entity, With<PauseRoot>>) {
-    if !paused.is_changed() {
+/// buttons here, via `handle_menu_buttons`). It is rebuilt whenever what it shows changes
+/// (the pack lists, the panel's scope), the usual spawn-on-change pattern.
+#[allow(clippy::too_many_arguments)]
+fn sync_pause_screen(
+    mut commands: Commands,
+    paused: Res<PauseState>,
+    mut packs_open: ResMut<PausePacksOpen>,
+    panel: Res<crate::pack_panel::PackPanel>,
+    selection: Res<crate::packs::PackSelection>,
+    installed: Res<crate::packs::InstalledPacks>,
+    world: Option<Res<ActiveWorld>>,
+    roots: Query<Entity, With<PauseRoot>>,
+) {
+    if !paused.open && packs_open.0 {
+        packs_open.0 = false; // closing the pause menu closes the panel too
+    }
+    let world_changed = world.as_ref().is_some_and(|w| w.is_changed());
+    if !(paused.is_changed() || packs_open.is_changed() || panel.is_changed() || selection.is_changed() || installed.is_changed() || world_changed) {
         return;
     }
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
     if paused.open {
-        if roots.is_empty() {
-            spawn_pause_screen(&mut commands);
-        }
-    } else {
-        for e in &roots {
-            commands.entity(e).despawn();
-        }
+        let world_packs = world.map(|w| w.meta.world_packs.clone()).unwrap_or_default();
+        spawn_pause_screen(&mut commands, packs_open.0, &panel, &selection, &installed, &world_packs);
     }
 }
 
@@ -755,6 +782,7 @@ fn handle_menu_buttons(
     mut mode: ResMut<WorldsScreenMode>,
     mut form: ResMut<CreateWorldForm>,
     mut paused: ResMut<PauseState>,
+    mut packs_open: ResMut<PausePacksOpen>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     store: Res<SaveStore>,
     installed: Res<InstalledMods>,
@@ -864,6 +892,8 @@ fn handle_menu_buttons(
                     window.cursor_options.visible = false;
                 }
             }
+            MenuButton::PausePacks => packs_open.0 = true,
+            MenuButton::PausePacksBack => packs_open.0 = false,
             MenuButton::QuitToMenu => {
                 paused.open = false;
                 next_state.set(AppState::MainMenu);
@@ -880,6 +910,8 @@ impl Plugin for MenuPlugin {
             app.add_plugins(theme::ThemePlugin);
         }
         app.init_resource::<WorldsScreenMode>()
+            .init_resource::<PausePacksOpen>()
+            .init_resource::<crate::pack_panel::PackPanel>()
             .init_resource::<CreateWorldForm>()
             .add_systems(OnEnter(AppState::MainMenu), setup_main_menu)
             .add_systems(OnExit(AppState::MainMenu), despawn_all::<MainMenuRoot>)
@@ -918,6 +950,7 @@ mod tests {
             mod_storage: storage,
             branch_of: branch.map(str::to_string),
             mod_ids: Default::default(),
+            world_packs: Vec::new(),
             created_at: 0,
             last_played_at: 0,
         }

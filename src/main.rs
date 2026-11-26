@@ -139,7 +139,7 @@ fn main() {
             menu::MenuPlugin,
         ))
         .add_plugins((entities::EntitiesPlugin, block_models::BlockModelsPlugin, particles::ParticlesPlugin, damage::DamagePlugin, states::StatesPlugin))
-        .add_plugins((craftmjne::packs::PackPlugin, craftmjne::keybinds::KeybindPlugin, craftmjne::mod_controls::ModControlsPlugin, craftmjne::settings::SettingsPlugin, craftmjne::sound::SoundPlugin));
+        .add_plugins((craftmjne::packs::PackPlugin, craftmjne::pack_panel::PackPanelPlugin, craftmjne::keybinds::KeybindPlugin, craftmjne::mod_controls::ModControlsPlugin, craftmjne::settings::SettingsPlugin, craftmjne::sound::SoundPlugin));
 
     // CI / smoke mode: skip the menu, drop straight into a throwaway world,
     // let it stream in, save a screenshot, and exit. Run with:

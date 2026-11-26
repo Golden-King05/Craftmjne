@@ -884,6 +884,7 @@ mod tests {
                 mod_storage: Default::default(),
                 branch_of: None,
                 mod_ids: Default::default(),
+                world_packs: Vec::new(),
                 created_at: 0,
                 last_played_at: 0,
             },

@@ -151,6 +151,7 @@ fn setup_render(
     atlas: Res<Atlas>,
     icon_atlas: Res<IconAtlas>,
     settings: Res<WorldSettings>,
+    existing: Option<Res<ChunkMaterials>>,
 ) {
     let atlas_px = atlas.0.atlas_px() as u32;
     let mut image = Image::new(
@@ -186,6 +187,23 @@ fn setup_render(
         alpha_cutoff,
     };
 
+    // Chunks already on screen hold these materials, so a re-upload (new packs, a world's mods)
+    // swaps the atlas inside them rather than making new ones.
+    if let Some(existing) = existing {
+        for handle in [&existing.solid, &existing.water] {
+            if let Some(m) = materials.get_mut(handle) {
+                m.atlas = atlas_handle.clone();
+            }
+        }
+        commands.insert_resource(AtlasImage(atlas_handle));
+        commands.insert_resource(IconAtlasImage {
+            image: icon_atlas_handle,
+            index: icon_atlas.0.index.clone(),
+            icon_size: icon_atlas.0.icon_size,
+        });
+        commands.insert_resource(UploadedContent(loaded.generation));
+        return;
+    }
     let solid = materials.add(ChunkMaterial {
         atlas: atlas_handle.clone(),
         params: fog(1.0, 0.5),
@@ -239,6 +257,13 @@ impl Plugin for RenderSetupPlugin {
             .add_systems(
                 OnEnter(crate::state::AppState::InGame),
                 setup_render.run_if(content_replaced).after(crate::world::WorldContentSet).before(crate::world::EnterWorldSet),
+            )
+            // Packs changed while playing: `world::refresh_content_live` rebuilt the content.
+            .add_systems(
+                Update,
+                setup_render
+                    .run_if(content_replaced.and(in_state(crate::state::AppState::InGame)))
+                    .after(crate::world::LiveContentSet),
             );
     }
 }

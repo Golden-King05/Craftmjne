@@ -998,6 +998,51 @@ pub struct WorldContentSet;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnterWorldSet;
 
+/// The system that rebuilds content when packs change mid-game.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LiveContentSet;
+
+/// While playing: when the packs in force (`packs::EffectivePacks`) differ from the ones the
+/// content was built with, rebuilds the content with the same mods and the new packs, installs
+/// it, and marks every loaded chunk for remeshing so the new art and models show at once.
+/// A pack that can't be built leaves the old content and says so in chat (and isn't retried until
+/// the selection changes again).
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_content_live(
+    mut commands: Commands,
+    effective: Res<crate::packs::EffectivePacks>,
+    ok: Res<ContentOk>,
+    mut loaded: ResMut<LoadedContent>,
+    mut report: ResMut<TextureReport>,
+    mut map: ResMut<ChunkMap>,
+    mut hotbar: ResMut<Hotbar>,
+    chat: Option<ResMut<crate::chat::ChatLog>>,
+) {
+    if !ok.0 || effective.0 == loaded.packs {
+        return;
+    }
+    let packs = effective.0.clone();
+    match try_build_content(&ContentPaths::vanilla().with_mods(&loaded.mods).with_packs(&packs)) {
+        Ok(content) => {
+            report.remove(&loaded.block_textures);
+            let before = report.names();
+            install_content(&mut commands, content, &mut report);
+            loaded.block_textures = report.names().into_iter().filter(|n| !before.contains(n)).collect();
+            loaded.generation += 1;
+            for chunk in map.chunks.values_mut() {
+                chunk.dirty = true;
+            }
+            hotbar.set_changed();
+        }
+        Err(why) => {
+            if let Some(mut chat) = chat {
+                chat.push(format!("Resource packs couldn't be applied: {why}"));
+            }
+        }
+    }
+    loaded.packs = packs;
+}
+
 /// `OnEnter(AppState::InGame)`, before `enter_world`: gives the world the content
 /// its mods make. Works out which mod folders the active world uses
 /// (`mods::resolve_world_mods`), and if they differ from what's loaded builds
@@ -1053,7 +1098,7 @@ fn apply_world_mods(
     // re-entering the world shows the change.
     // The player's resource packs are part of the content too: turning one on or off in Settings
     // changes the atlas, models and sounds, so a change there rebuilds on the next world entry.
-    let packs = crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref());
+    let packs = crate::packs::effective_pack_paths(selection.as_deref(), installed_packs.as_deref(), &active.meta.world_packs);
     if mods.is_empty() && loaded.mods.is_empty() && packs == loaded.packs {
         ok.0 = true;
         return;
@@ -2012,6 +2057,13 @@ impl Plugin for WorldPlugin {
                     .chain()
                     .in_set(ChunkPipelineSet::Collect)
                     .run_if(resource_exists::<ChunkMaterials>),
+            )
+            .add_systems(
+                Update,
+                refresh_content_live
+                    .in_set(LiveContentSet)
+                    .before(ChunkPipelineSet::Stream)
+                    .run_if(in_state(AppState::InGame).and(resource_exists::<crate::packs::EffectivePacks>).and(resource_exists::<ChunkMaterials>)),
             )
             .add_systems(
                 Update,

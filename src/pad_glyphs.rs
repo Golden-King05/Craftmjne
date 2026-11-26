@@ -256,20 +256,50 @@ fn build(
 #[derive(Component, Clone, Copy, Debug)]
 pub struct PadGlyph(pub PadButton);
 
-pub fn apply_glyphs(glyphs: Option<Res<PadGlyphs>>, nodes: Query<(Entity, &PadGlyph), Without<ImageNode>>, mut commands: Commands) {
+pub fn apply_glyphs(glyphs: Option<Res<PadGlyphs>>, mut nodes: Query<(Entity, &PadGlyph, Option<&mut ImageNode>)>, mut commands: Commands) {
     let Some(glyphs) = glyphs else { return };
-    for (e, g) in &nodes {
-        if let Some(image) = glyphs.handle(g.0) {
-            commands.entity(e).try_insert(ImageNode::new(image));
+    for (e, g, existing) in &mut nodes {
+        let Some(image) = glyphs.handle(g.0) else { continue };
+        match existing {
+            Some(mut node) => {
+                if node.image != image {
+                    node.image = image; // the packs changed: show the new picture
+                }
+            }
+            None => {
+                commands.entity(e).try_insert(ImageNode::new(image));
+            }
         }
     }
+}
+
+/// Rebuilds the glyphs when the packs in force change.
+fn rebuild(
+    mut commands: Commands,
+    assets: Option<ResMut<Assets<Image>>>,
+    installed: Option<Res<crate::mods::InstalledMods>>,
+    effective: Option<Res<crate::packs::EffectivePacks>>,
+    mut last: Local<Option<Vec<PathBuf>>>,
+) {
+    let (Some(mut assets), Some(effective)) = (assets, effective) else { return };
+    if last.as_ref() == Some(&effective.0) {
+        return;
+    }
+    let first = last.is_none();
+    *last = Some(effective.0.clone());
+    if first {
+        return;
+    }
+    let mods_dir = installed.map(|i| i.0.clone()).unwrap_or_else(crate::mods::installed_mods_dir);
+    let dirs: Vec<PathBuf> = crate::gui_skin::gui_texture_dirs(&mods_dir, &effective.0).into_iter().map(|d| d.join("glyphs")).collect();
+    commands.insert_resource(upload_glyphs(build_glyphs(&dirs), &mut assets));
 }
 
 pub struct PadGlyphPlugin;
 
 impl Plugin for PadGlyphPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, build).add_systems(Update, apply_glyphs);
+        app.add_systems(PreStartup, build).add_systems(Update, (rebuild, apply_glyphs).chain());
     }
 }
 

@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the second has to be refused, because "load it anyway" means writing it
 /// back out in the older format and quietly discarding whatever the newer
 /// build had stored.
-pub const SAVE_FORMAT: u32 = 9;
+pub const SAVE_FORMAT: u32 = 10;
 
 /// How a world's stored format relates to what this build can handle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +108,9 @@ fn migrate(data: &mut WorldData, from: u32) {
         // Step 4 -> 5 (a tool's quality on its stack) is defaults only too:
         // a format-4 build would read a saved tool back as quality 0 and
         // write that over the real value.
+        // Step 9 -> 10 (a world's own resource packs, `world_packs`) needs no rewrite: an old
+        // world has none. Bumped because a format-9 build would load the world and write its
+        // meta back without the list.
         // Step 8 -> 9 (shelved items and, with them, saves that keep entries for
         // mods that are off) needs no rewrite: a format-8 world has none. Bumped
         // because a format-8 build would load a world with shelved entries and write
@@ -209,6 +212,10 @@ pub struct WorldMeta {
     /// been added or removed since.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub mod_ids: std::collections::BTreeMap<String, String>,
+    /// The resource packs turned on for just this world (folder names, top of the list first).
+    /// They stack above the player's global packs (`packs::PackSelection`), in this world only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub world_packs: Vec<String>,
     pub created_at: u64,
     pub last_played_at: u64,
 }
@@ -548,6 +555,7 @@ impl SaveStore {
             mod_storage: ModStorage::default(),
             branch_of: None,
             mod_ids: Default::default(),
+            world_packs: Vec::new(),
             created_at: now,
             last_played_at: now,
         };

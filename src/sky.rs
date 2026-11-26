@@ -893,6 +893,40 @@ fn spawn_sky(
     commands.insert_resource(SkyMaterials { sun, moon_phases });
 }
 
+/// Re-reads the sun and moon textures when the packs in force change, swapping them into the
+/// existing materials (so a pack chosen mid-game or in the menus shows at once).
+fn refresh_sky(
+    effective: Option<Res<crate::packs::EffectivePacks>>,
+    sky: Option<Res<SkyMaterials>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<CelestialMaterial>>,
+    mut texture_report: ResMut<TextureReport>,
+    mut last: Local<Option<Vec<std::path::PathBuf>>>,
+) {
+    let (Some(effective), Some(sky)) = (effective, sky) else { return };
+    if last.as_ref() == Some(&effective.0) {
+        return;
+    }
+    let first = last.is_none();
+    *last = Some(effective.0.clone());
+    if first {
+        return; // `spawn_sky` used the same packs
+    }
+    let mut dirs = vec![find_sky_dir()];
+    dirs.extend(effective.0.iter().map(|p| p.join("textures").join("sky")));
+    let (sun_pixels, sun_size, sun_status) = sky_texture(&sky_dir_for(&dirs, "sun"), "sun", generate_sun_pixels);
+    let (moon_pixels, moon_size, moon_status) = sky_texture(&sky_dir_for(&dirs, "moon"), "moon", generate_moon_pixels);
+    texture_report.extend([("sun".to_string(), sun_status), ("moon".to_string(), moon_status)]);
+    if let Some(m) = materials.get_mut(&sky.sun) {
+        m.texture = images.add(upload_sky_image(sun_pixels, sun_size));
+    }
+    for (phase, handle) in sky.moon_phases.iter().enumerate() {
+        if let Some(m) = materials.get_mut(handle) {
+            m.texture = images.add(upload_sky_image(mask_moon_phase(&moon_pixels, moon_size, phase as u8), moon_size));
+        }
+    }
+}
+
 /// Advances `elapsed` by `delta` seconds, wrapping into `[0, CYCLE_SECONDS)`
 /// and bumping `day_count` exactly when that wrap happens - pure logic
 /// pulled out of `advance_clock` so it's directly testable without needing
@@ -1026,6 +1060,7 @@ impl Plugin for SkyPlugin {
             .init_resource::<DayNightClock>()
             .init_resource::<MoonScheduleCache>()
             .add_systems(Startup, spawn_sky)
+            .add_systems(Update, refresh_sky)
             .add_systems(
                 Update,
                 (advance_clock, update_sky)

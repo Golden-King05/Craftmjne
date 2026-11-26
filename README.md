@@ -1404,12 +1404,22 @@ anything *looks and sounds*, never how it *plays*. Two kinds:
   sounds/<event path>.ogg|.wav sounds
 ```
 
-**Order.** Lowest to highest: the game, each of the world's mods (load order), then the player's
-packs. The highest layer holding a file wins, so a player's pack can retexture even a mod's art.
+**Two ways to load a pack.** *Global* packs (Settings > Packs, or **Resource Packs** in the pause
+menu) apply to every world and to the menus. *World* packs (the **This world** tab in the pause menu)
+apply only inside that world and are saved with it (`world_packs` in its `meta.json`). A world's packs
+sit above your global ones; a pack on both lists counts once, at the world's position.
+
+**Changes apply at once, in menus and in game.** Pick or reorder a pack and the menu textures,
+controller glyphs and sun/moon retexture on the spot; in a world the block art, models and sounds are
+rebuilt and every loaded chunk is remeshed (a short burst of remeshing, no re-entering the world).
+Per-world packs are swapped out again when you go to another world.
+
+**Order.** Lowest to highest: the game, each of the world's mods (load order), your global packs, then
+the world's own packs. The highest layer holding a file wins, so a player's pack can retexture even a
+mod's art.
 **Names:** in the game's folder and in a player's pack a plain name is the core game's (`dirt`) and
 `<mod id>/<name>` is a mod's; inside a mod's pack a plain name is the mod's own and
-`craftmjne/dirt` re-skins vanilla. Block art, models and sounds change when you next open a world
-(a pack that changed is rebuilt on entry); menu art is read at startup.
+`craftmjne/dirt` re-skins vanilla.
 
 ### Block models
 

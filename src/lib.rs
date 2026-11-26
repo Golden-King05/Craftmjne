@@ -28,6 +28,7 @@ pub mod knapping;
 pub mod player_model;
 pub mod light;
 pub mod menu;
+pub mod pack_panel;
 pub mod menu_nav;
 pub mod mod_controls;
 pub mod mods;

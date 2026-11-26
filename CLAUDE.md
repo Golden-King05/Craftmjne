@@ -3423,3 +3423,22 @@ etc.) instead of inventing a new approach:
   (`SoundOptions`, saved `sound.json` per instance) so the struct stays `Eq`. Building on Linux needs
   `libasound2-dev` (both workflows install it). Not verified from here: actual audible output (no sound device
   in this environment) - tests cover synthesis, WAV validity, pack lookup/priority and volume maths.
+- **Pack scopes: one "what is in force" resource that every consumer watches, not each consumer
+  reading the selection itself.** Global packs (`PackSelection`, `resourcepacks.json` per instance) and a
+  world's own (`WorldMeta::world_packs`, `SAVE_FORMAT` 10) combine in `packs::effective_pack_paths` (global
+  below, world above, a pack on both counted once at the world's position) into `packs::EffectivePacks`,
+  refreshed in `PreUpdate` *and* `OnEnter(InGame)` after `WorldContentSet`. The second one matters: without
+  it the first frame in a world sees the menu-time list, differs from what `apply_world_mods` just built
+  with, and `world::refresh_content_live` would rebuild without the world's packs. Consumers: `gui_skin::
+  rebuild_skin`, `pad_glyphs::rebuild`, `sky::refresh_sky` (each remembers the last list in a `Local`, skips the
+  first run because its startup system already built from the same list, and swaps assets in place), and
+  `refresh_content_live` (rebuild with `loaded.mods` + new packs, `install_content`, mark every chunk
+  `dirty`, bump `generation`). `render::setup_render` now runs in `Update` too and, if `ChunkMaterials`
+  exists, swaps the atlas *inside* the existing materials instead of making new ones - chunk entities
+  hold the old handles. `apply_skin`/`apply_glyphs` already re-resolved images every frame, so the menus
+  needed nothing but the rebuild. The panel is `pack_panel.rs` (shared by Settings > Packs and a pause-menu
+  overlay, sub-mode `menu::PausePacksOpen`); its pure helpers (`toggle`, `shift`, `list_for`) are tested.
+  Break-tested: removing `rebuild_skin` fails `choosing_a_pack_retextures_the_menus_without_a_restart`;
+  disabling `refresh_content_live` fails `world_packs_apply_only_in_their_world_and_changes_apply_live_in_game`.
+  Not verified from here: how the in-game remesh burst feels with many chunks loaded, and the layout of
+  the pause-menu panel (no display).

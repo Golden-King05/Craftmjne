@@ -107,9 +107,6 @@ enum SettingsButton {
     DeadzoneDelta(i32),
     ToggleInvertLook,
     VolumeDelta(crate::sound::Slider, i32),
-    PackToggle(String),
-    PackShift(String, bool),
-    PackRescan,
     RenderDistanceDelta(i32),
     ToggleDefaultModStorage,
     Rebind(String),
@@ -312,7 +309,7 @@ fn rebuild_settings(
                 }
                 dim(body, "Resource packs and mods can replace any sound: see sounds/ in a pack.", 13.0);
             }
-            Section::Packs => spawn_packs(body, &pack_selection, &installed_packs),
+            Section::Packs => crate::pack_panel::spawn_pack_panel(body, crate::pack_panel::PackScope::Global, false, &pack_selection, &[], &installed_packs),
             Section::Mods => {
                 body.spawn((Text::new("Mods"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
                 let storage = store.load_graphics_settings().mod_storage;
@@ -322,36 +319,6 @@ fn rebuild_settings(
             Section::Controls => spawn_controls(body, &view, &bindings, &capture, &notes, &options, &pad_state),
         });
     });
-}
-
-/// The Resource Packs list: enabled packs top (strongest) first with reorder buttons, then the
-/// rest. A pack the selection remembers but that isn't installed shows as missing.
-fn spawn_packs(body: &mut ChildSpawnerCommands, selection: &crate::packs::PackSelection, installed: &crate::packs::InstalledPacks) {
-    body.spawn((Text::new("Resource packs"), TextFont { font_size: 20.0, ..default() }, TextColor(theme::TEXT)));
-    for folder in &selection.enabled {
-        let info = installed.0.iter().find(|p| &p.folder == folder);
-        body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
-            sbutton(row, "Up", SettingsButton::PackShift(folder.clone(), true), ButtonStyle::Normal, 56.0, 34.0, 15.0, false, theme::TEXT, None);
-            sbutton(row, "Down", SettingsButton::PackShift(folder.clone(), false), ButtonStyle::Normal, 64.0, 34.0, 15.0, false, theme::TEXT, None);
-            sbutton(row, "Off", SettingsButton::PackToggle(folder.clone()), ButtonStyle::Choice, 56.0, 34.0, 15.0, true, theme::TEXT, None);
-            let label = match info {
-                Some(p) => p.name.clone(),
-                None => format!("{folder} (missing)"),
-            };
-            row.spawn((Text::new(label), TextFont { font_size: 16.0, ..default() }, TextColor(if info.is_some() { theme::TEXT } else { RED })));
-        });
-    }
-    for p in installed.0.iter().filter(|p| !selection.is_enabled(&p.folder)) {
-        body.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).with_children(|row| {
-            sbutton(row, "On", SettingsButton::PackToggle(p.folder.clone()), ButtonStyle::Choice, 56.0, 34.0, 15.0, false, theme::TEXT, None);
-            row.spawn((Text::new(p.name.clone()), TextFont { font_size: 16.0, ..default() }, TextColor(theme::TEXT_DIM)));
-        });
-    }
-    if selection.enabled.is_empty() && installed.0.is_empty() {
-        dim(body, "No resource packs installed. Put a pack folder in the resourcepacks folder next to the game.", 14.0);
-    }
-    sbutton(body, "Rescan", SettingsButton::PackRescan, ButtonStyle::Normal, 120.0, 34.0, 15.0, false, theme::TEXT, None);
-    dim(body, "Packs higher in the list win. Block art, models and sounds change the next time you open a world; menu art after a restart.\nA mod's own pack always loads with the mod and can't be switched here.", 13.0);
 }
 
 fn spawn_controls(body: &mut ChildSpawnerCommands, view: &SettingsView, bindings: &Bindings, capture: &Capture, notes: &ControlNotes, options: &ControlOptions, pad: &PadState) {
@@ -558,7 +525,6 @@ fn handle_settings_buttons(
     mut world_settings: ResMut<WorldSettings>,
     mut options: ResMut<ControlOptions>,
     mut sound: ResMut<crate::sound::SoundOptions>,
-    mut pack_selection: ResMut<crate::packs::PackSelection>,
     mut installed_packs: ResMut<crate::packs::InstalledPacks>,
     store: Res<SaveStore>,
 ) {
@@ -593,21 +559,6 @@ fn handle_settings_buttons(
             SettingsButton::DeadzoneDelta(d) => {
                 options.nudge_deadzone(d);
                 let _ = store.save_control_options(&options);
-            }
-            SettingsButton::PackToggle(folder) => {
-                if pack_selection.is_enabled(&folder) {
-                    pack_selection.disable(&folder);
-                } else {
-                    pack_selection.enable(&folder);
-                }
-                let _ = store.save_pack_selection(&pack_selection);
-            }
-            SettingsButton::PackShift(folder, up) => {
-                pack_selection.shift(&folder, up);
-                let _ = store.save_pack_selection(&pack_selection);
-            }
-            SettingsButton::PackRescan => {
-                installed_packs.0 = crate::packs::scan_packs(&crate::packs::user_packs_dir());
             }
             SettingsButton::VolumeDelta(slider, d) => {
                 sound.nudge(slider, d);
@@ -723,6 +674,9 @@ pub struct SettingsPlugin;
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<crate::sound::SoundOptions>();
+        if !app.is_plugin_added::<crate::pack_panel::PackPanelPlugin>() {
+            app.add_plugins(crate::pack_panel::PackPanelPlugin);
+        }
         app.init_resource::<crate::packs::PackSelection>().init_resource::<crate::packs::InstalledPacks>();
         if !app.is_plugin_added::<theme::ThemePlugin>() {
             app.add_plugins(theme::ThemePlugin);
@@ -834,6 +788,13 @@ mod tests {
             self.app.update();
         }
 
+        fn click_pack(&mut self, button: crate::pack_panel::PackButton) {
+            let mut q = self.app.world_mut().query::<(Entity, &crate::pack_panel::PackButton)>();
+            let entity = q.iter(self.app.world()).find(|(_, b)| **b == button).map(|(e, _)| e).unwrap_or_else(|| panic!("no {button:?} on screen"));
+            self.app.world_mut().entity_mut(entity).insert(Interaction::Pressed);
+            self.app.update();
+        }
+
         fn texts(&mut self) -> Vec<String> {
             let mut q = self.app.world_mut().query::<&Text>();
             q.iter(self.app.world()).map(|t| t.0.clone()).collect()
@@ -905,13 +866,13 @@ mod tests {
             .map(|f| crate::packs::PackInfo { folder: f.to_string(), name: f.to_string(), description: String::new(), path: f.into(), warning: None })
             .collect();
         s.app.update();
-        s.click(SettingsButton::PackToggle("a".into()));
-        s.click(SettingsButton::PackToggle("b".into()));
+        s.click_pack(crate::pack_panel::PackButton::Toggle("a".into()));
+        s.click_pack(crate::pack_panel::PackButton::Toggle("b".into()));
         assert_eq!(s.app.world().resource::<crate::packs::PackSelection>().enabled, ["b", "a"], "newest goes on top");
-        s.click(SettingsButton::PackShift("a".into(), true));
+        s.click_pack(crate::pack_panel::PackButton::Shift("a".into(), true));
         assert_eq!(s.app.world().resource::<crate::packs::PackSelection>().enabled, ["a", "b"]);
         assert_eq!(s.app.world().resource::<SaveStore>().load_pack_selection().enabled, ["a", "b"], "saved");
-        s.click(SettingsButton::PackToggle("a".into()));
+        s.click_pack(crate::pack_panel::PackButton::Toggle("a".into()));
         assert_eq!(s.app.world().resource::<crate::packs::PackSelection>().enabled, ["b"]);
     }
 
