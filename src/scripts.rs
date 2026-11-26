@@ -23,7 +23,8 @@
 use std::collections::BTreeMap;
 
 use crate::cjk::{decode, font_from_with, spec_of, specs_from, Glyph, Join};
-use crate::font_gen::{GlyphSpec, Substitution};
+use crate::font_gen::{rects_from_mask, GlyphSpec, Layer, Substitution, BASELINE_ROW};
+use crate::mongolian::{piece, Form, Piece};
 
 const BLOB: &[u8] = include_bytes!("cjk/scripts.bin");
 
@@ -114,8 +115,65 @@ fn forms() -> Vec<(char, [Option<(char, Glyph)>; 3])> {
     out
 }
 
+/// Mongolian-block letters (not marks): drawn rotated, with their own joining forms, below.
+fn is_mongolian_letter(cp: u32, g: &Glyph) -> bool {
+    (0x1800..=0x18AF).contains(&cp) && !g.combining
+}
+
+/// Where the rotated Mongolian forms (and their spines) sit: the row of the 16-row rotated glyph the spine is on.
+const MONGOLIAN_SPINE_ROW: i32 = 12;
+/// Private-use letters naming the rotated Mongolian forms (after the cursive scripts' at `FORM_BASE`).
+const MONGOLIAN_FORM_BASE: u32 = 0xE800;
+
+/// A Mongolian piece turned a quarter turn so it reads left to right: the upright letter's top becomes its
+/// left, its spine runs along one row, and the spine rows of all letters line up. `gap` is the space after
+/// it; joined forms have none, so their strokes meet.
+fn rotated_spec(c: char, p: &Piece, gap: i32) -> GlyphSpec {
+    let h = p.rows.len();
+    let w = p.rows[0].len();
+    // Counter-clockwise: the right edge becomes the top, the top the left.
+    let mask: Vec<Vec<bool>> = (0..w).map(|nr| (0..h).map(|nc| p.rows[nc][w - 1 - nr]).collect()).collect();
+    let spine_row = (w - 1 - p.spine) as i32;
+    let y_offset = (BASELINE_ROW - 14) + (MONGOLIAN_SPINE_ROW - spine_row);
+    let rects = rects_from_mask(h, &mask, y_offset);
+    GlyphSpec { chars: vec![c], advance: h as i32 + gap, layers: vec![Layer { color: 0, rects }], colour: false }
+}
+
+/// The rotated Mongolian glyphs and the substitutions that choose their forms: `(glyphs, substitutions)`.
+fn mongolian() -> (Vec<GlyphSpec>, Vec<Substitution>) {
+    let (mut specs, mut subs) = (Vec::new(), Vec::new());
+    let mut next = MONGOLIAN_FORM_BASE;
+    for (&cp, g) in &glyphs() {
+        if !is_mongolian_letter(cp, g) {
+            continue;
+        }
+        let Some(c) = char::from_u32(cp) else { continue };
+        let isolated = piece(g, Form::Isolated);
+        if isolated.rows.is_empty() {
+            continue;
+        }
+        specs.push(rotated_spec(c, &isolated, 1));
+        if g.join != Join::Dual {
+            continue;
+        }
+        for (form, feature) in [(Form::Final, *b"fina"), (Form::Initial, *b"init"), (Form::Medial, *b"medi")] {
+            let p = piece(g, form);
+            if p.rows.is_empty() {
+                continue;
+            }
+            let to = char::from_u32(next).unwrap();
+            next += 1;
+            specs.push(rotated_spec(to, &p, 0));
+            subs.push(Substitution { script: *b"mong", feature, from: c, to });
+        }
+    }
+    (specs, subs)
+}
+
 pub fn glyph_specs() -> Vec<GlyphSpec> {
-    let mut specs = specs_from(&glyphs());
+    let rest: BTreeMap<u32, Glyph> = glyphs().into_iter().filter(|(cp, g)| !is_mongolian_letter(*cp, g)).collect();
+    let mut specs = specs_from(&rest);
+    specs.extend(mongolian().0);
     for (_, fs) in forms() {
         for (c, g) in fs.iter().flatten() {
             specs.push(spec_of(*c, g));
@@ -126,7 +184,7 @@ pub fn glyph_specs() -> Vec<GlyphSpec> {
 
 /// The `GSUB` substitutions that pick a cursive letter's form.
 pub fn substitutions() -> Vec<Substitution> {
-    let mut out = Vec::new();
+    let mut out = mongolian().1;
     for (base, [fina, init, medi]) in forms() {
         let script = script_tag(base);
         for (feature, form) in [(*b"fina", fina), (*b"init", init), (*b"medi", medi)] {

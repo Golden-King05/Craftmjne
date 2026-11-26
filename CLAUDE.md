@@ -3695,3 +3695,52 @@ etc.) instead of inventing a new approach:
     away in `build_cjk_data.py` if wanted.
   - **The preview window is 1280x720**: asia1/asia2 are two screens for that reason (see the `natives`
     entry); wrapped lines are normal.
+
+- **"Make Mongolian look right" needed a renderer, not a font, and the data dictated the algorithm.** The
+  game's `Text` only flows horizontally, and Unifont draws each Mongolian letter once, upright, with a
+  vertical spine (usually column 3) - so no GSUB trick could join them. `mongolian.rs` is pure bitmap work
+  (`render(text, max_height) -> Bitmap`) behind a `VerticalText` component whose system
+  (`build_vertical_text`, registered from `FontPlugin`) turns the bitmap into an `Image` + `ImageNode`
+  sized with `Node`. Decisions that mattered:
+  - **Forms by deleting, not drawing.** From the isolated glyph: find the spine (most-inked column, its
+    longest vertical run); the head is the ink above the run and the hook left of its top two rows, the
+    tail is everything below it. Initial = no tail, medial = neither, final = no head, isolated = whole;
+    joined ends get a one-pixel spine stub so neighbours abut. Crop each piece to its rows, align spines,
+    stack. A real Mongolian font draws every positional form of every letter; this is an approximation and
+    is documented as one.
+  - **Test the seams, not the whole spine.** The first tests asserted "spine inked on every row" and
+    failed twice for the right reasons: the head sits *above* the spine, and Unifont's NA has a detached
+    tick *below* it. The seam between letters is what joining means, so `a_word_is_one_unbroken_spine_...`
+    now checks the spine is inked on both sides of each seam, using the same `piece()` heights.
+  - **Columns left to right, one spine line per column** (every word in a column is aligned to the widest
+    word's spine), wrapped at a pixel height; `scale` is an integer so pixels stay square. The system takes
+    `Option<ResMut<Assets<Image>>>` so `FontPlugin` still works in the headless font tests.
+  - **Joining flags had to be ignored for the wrong cases**: Mongolian is flagged dual-joining in the blob,
+    but only `mongolian.rs` may use that - `scripts::forms()` stays restricted to Syriac/Mandaic/N'Ko
+    (`is_cursive_script`), or it would derive horizontal baseline strokes for a vertical script.
+  - Not done: contextual letter rules, FVS alternate glyphs, rotated digits, Phags-pa (vertical but
+    non-joining - the same column layout would serve it), and any use in the game's own UI.
+
+- **"Do the joined scripts actually flow together in game" was two questions: does the real text engine pick
+  the joined forms, and does every script that should join have forms at all.** A test that shapes with
+  `rustybuzz` alone proves the font's GSUB; it does not prove the engine Bevy actually uses (cosmic-text)
+  chooses fonts and runs the same way. So `fonts.rs` now has engine-level tests: a `FontSystem` holding only
+  the game's own fonts (no system fonts, so the result is deterministic), a `Buffer` set with the default
+  family and `Shaping::Advanced`, and the glyph chosen for each character read from `layout_runs`. The
+  assertion is the one that matters: *inside the word* each letter's glyph differs from the glyph the same
+  letter gets alone, and the three positions give three different shapes. It covers Arabic, Persian,
+  Syriac, N'Ko, Mandaic and Mongolian, plus lam-alef (one glyph), the Devanagari ksha conjunct (two glyphs
+  for three characters), a right-joining alef not joining forward, and a joined word keeping its forms when
+  Latin and other scripts surround it. Facts worth keeping:
+  - **The answer was "no" for Mongolian in ordinary text.** It joined only in the `VerticalText` widget; a chat
+    line was still separate upright letters. Fixed by also giving the font *rotated* Mongolian forms
+    (`scripts::mongolian`): `mongolian::piece` forms turned a quarter turn counter-clockwise (the top becomes
+    the left), the spine rows aligned (`MONGOLIAN_SPINE_ROW`), joined forms with no advance gap so their
+    strokes meet, registered under script tag `mong` as `init`/`medi`/`fina` GSUB substitutions. Upright
+    stays the widget's job. `Piece` and `piece()` became `pub(crate)` for it.
+  - **System fonts are a variable this does not control.** Bevy's `CosmicFontSystem` also loads the machine's
+    fonts, so on a player's machine a script the game's fonts lack may be drawn by a system font (which
+    may join correctly in its own style). The tests deliberately use a database with only the game's fonts.
+  - **Scripts that do not join in-game, said plainly**: Bengali, Tamil, Kannada, Malayalam, Sinhala, Gujarati,
+    Gurmukhi, Telugu, Odia, Khmer, Burmese, Tibetan and the other Unifont Indic-family scripts get letters and
+    mark placement but no conjuncts.

@@ -421,7 +421,7 @@ impl Plugin for FontPlugin {
         app.init_resource::<FontBook>()
             .init_resource::<crate::cjk::CjkStyle>()
             .add_systems(PreStartup, install_builtin)
-            .add_systems(Update, (refresh_pack_fonts, update_cjk, load_bitmap_fonts))
+            .add_systems(Update, (refresh_pack_fonts, update_cjk, load_bitmap_fonts, crate::mongolian::build_vertical_text))
             .add_systems(PostUpdate, apply_fonts.before(bevy::ui::UiSystem::Prepare));
     }
 }
@@ -429,6 +429,91 @@ impl Plugin for FontPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Joined scripts, through the real text engine (cosmic-text, as Bevy uses it) ----
+
+    /// A font system holding only the game's own fonts, as they are registered at start-up.
+    fn engine() -> bevy::text::cosmic_text::FontSystem {
+        use bevy::text::cosmic_text::{fontdb, FontSystem};
+        let mut fs = FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new());
+        for bytes in [default_font_bytes(), emoji_font_bytes(), crate::syllabics::font_bytes(), crate::scripts::font_bytes(), crate::cjk::font_bytes(crate::cjk::Style::Chinese)] {
+            fs.db_mut().load_font_source(fontdb::Source::Binary(std::sync::Arc::new(bytes)));
+        }
+        fs
+    }
+
+    /// `(byte offset in the text, font, glyph)` for every glyph the engine draws `text` with, in drawing order.
+    fn engine_glyphs(fs: &mut bevy::text::cosmic_text::FontSystem, text: &str) -> Vec<(usize, bevy::text::cosmic_text::fontdb::ID, u16)> {
+        use bevy::text::cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping};
+        let mut buffer = Buffer::new(fs, Metrics::new(12.0, 15.0));
+        buffer.set_size(fs, Some(2000.0), Some(200.0));
+        buffer.set_text(fs, text, Attrs::new().family(Family::Name("Craftmjne")), Shaping::Advanced);
+        buffer.layout_runs().flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.font_id, g.glyph_id)).collect::<Vec<_>>()).collect()
+    }
+
+    /// The glyph the engine picks for each character of `text` (by its position in the string), as a map from
+    /// character index; a ligature or substitution that merges characters gives the merged glyph to its first.
+    fn glyph_of_each_char(fs: &mut bevy::text::cosmic_text::FontSystem, text: &str) -> Vec<(char, Option<(bevy::text::cosmic_text::fontdb::ID, u16)>)> {
+        let glyphs = engine_glyphs(fs, text);
+        text.char_indices().map(|(at, c)| (c, glyphs.iter().find(|(s, _, _)| *s == at).map(|(_, f, g)| (*f, *g)))).collect()
+    }
+
+    #[test]
+    fn every_joined_script_takes_its_joined_forms_in_the_real_text_engine() {
+        let mut fs = engine();
+        // (script, three letters that join, typed in order): Arabic, Persian, Syriac, N'Ko, Mandaic, Mongolian.
+        let samples = [
+            ("Arabic", "\u{628}\u{64A}\u{62A}"),
+            ("Persian", "\u{6AF}\u{686}\u{67E}"),
+            ("Syriac", "\u{712}\u{713}\u{71A}"),
+            ("N'Ko", "\u{7CA}\u{7CB}\u{7CC}"),
+            ("Mandaic", "\u{841}\u{842}\u{843}"),
+            ("Mongolian", "\u{182E}\u{1823}\u{1829}"),
+        ];
+        for (name, text) in samples {
+            let word = glyph_of_each_char(&mut fs, text);
+            for (c, g) in &word {
+                assert!(g.is_some(), "{name}: the engine drew nothing for U+{:04X}", *c as u32);
+            }
+            // The same letter alone is its isolated form; in the word it must have changed shape (first = initial,
+            // last = final, middle = medial), so none of the three may match its isolated glyph.
+            for (i, (c, g)) in word.iter().enumerate() {
+                let alone = glyph_of_each_char(&mut fs, &c.to_string())[0].1;
+                assert_ne!(*g, alone, "{name}: letter {} (U+{:04X}) kept its isolated shape inside the word", i + 1, *c as u32);
+            }
+            // And the three positions are three different shapes.
+            let shapes: std::collections::HashSet<_> = word.iter().map(|(_, g)| *g).collect();
+            assert_eq!(shapes.len(), 3, "{name}: initial, medial and final should all differ");
+        }
+    }
+
+    #[test]
+    fn arabic_lam_alef_and_devanagari_conjuncts_form_in_the_real_text_engine() {
+        let mut fs = engine();
+        // Lam + alef is one ligature glyph.
+        assert_eq!(engine_glyphs(&mut fs, "\u{644}\u{627}").len(), 1, "lam-alef");
+        // Devanagari क + virama + ष: the ka takes its half form, so two glyphs for three characters.
+        assert_eq!(engine_glyphs(&mut fs, "\u{915}\u{94D}\u{937}").len(), 2, "ksha conjunct");
+        // A right-joining letter (alef) does not join what follows: beh after alef is isolated.
+        let after_alef = glyph_of_each_char(&mut fs, "\u{627}\u{628}");
+        let beh_alone = glyph_of_each_char(&mut fs, "\u{628}")[0].1;
+        assert_eq!(after_alef[1].1, beh_alone, "beh after alef is isolated");
+    }
+
+    #[test]
+    fn joined_text_stays_joined_when_latin_and_other_scripts_are_mixed_in() {
+        let mut fs = engine();
+        let plain = glyph_of_each_char(&mut fs, "\u{628}\u{64A}\u{62A}");
+        let mixed = glyph_of_each_char(&mut fs, "abc \u{628}\u{64A}\u{62A} xyz 123");
+        let word: Vec<_> = mixed.iter().filter(|(c, _)| ('\u{628}'..='\u{64A}').contains(c)).map(|(_, g)| *g).collect();
+        let want: Vec<_> = plain.iter().map(|(_, g)| *g).collect();
+        assert_eq!(word.len(), 3);
+        // The same three glyphs, in whatever visual order the bidi algorithm gave them.
+        for g in &want {
+            assert!(word.contains(g), "a joined form went missing in mixed text");
+        }
+    }
+
 
     #[test]
     fn cjk_text_gets_taller_lines() {

@@ -246,13 +246,15 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
-                "fonts" | "scripts" | "cjk" | "natives" | "world" | "asia1" | "asia2" => {
+                "fonts" | "scripts" | "cjk" | "natives" | "world" | "asia1" | "asia2" | "mongol" | "joined" => {
                     let scripts = name == "scripts";
                     let cjk = name == "cjk";
                     let natives = name == "natives";
                     let world = name == "world";
                     let asia1 = name == "asia1";
                     let asia2 = name == "asia2";
+                    let mongol = name == "mongol";
+                    let joined = name == "joined";
                     for e in &buttons_roots {
                         commands.entity(e).despawn();
                     }
@@ -261,7 +263,24 @@ fn ui_shot(
                         BackgroundColor(Color::srgb(0.16, 0.12, 0.09)),
                     ))
                     .with_children(|p| {
-                        let sample: &[(f32, &str)] = if asia1 {
+                        let sample: &[(f32, &str)] = if joined {
+                            &[
+                                (24.0, "Arabic:  مرحبا بالعالم السلام عليكم كيف حالك  لا"),
+                                (24.0, "Persian: پارسی چای ژاله گل کتاب فارسی  گچپژ"),
+                                (24.0, "Syriac:  ܣܘܪܝܝܐ ܫܠܡܐ ܒܝܬ ܡܠܟܐ ܐܠܗܐ ܟܬܒܐ ܒܪܝܫܝܬ"),
+                                (24.0, "N'Ko:    ߒߞߏ ߞߊ߲ ߘߋ߲ ߛߓߍ ߝߊ߲ߠߊ ߊߋߌߍߎߏ"),
+                                (24.0, "Mandaic: ࡌࡀࡍࡃࡀࡉࡀ ࡁࡂࡃࡄࡅࡆࡇࡈࡉ ࡌࡍࡎࡏ"),
+                                (24.0, "Mongol:  ᠮᠣᠩᠭᠣᠯ ᠤᠯᠤᠰ ᠪᠢᠴᠢᠭ ᠮᠠᠨᠵᡠ ᡤᡳᠰᡠᠨ ᠲᠣᠳᠣ"),
+                                (24.0, "Hindi:   क्षत्रिय ज्ञान श्री प्रेम धर्म कर्म क्या"),
+                                (24.0, "Mixed: hello مرحبا ܣܘܪܝܝܐ world ᠮᠣᠩᠭᠣᠯ 123"),
+                                (12.0, "مرحبا ܣܘܪܝܝܐ ߒߞߏ ࡌࡀࡍ ᠮᠣᠩᠭᠣᠯ क्षत्रिय (twelve)"),
+                            ]
+                        } else if mongol {
+                            &[
+                                (24.0, "Before (separate letters, left to right):  ᠮᠣᠩᠭᠣᠯ ᠤᠯᠤᠰ ᠪᠢᠴᠢᠭ"),
+                                (24.0, "After (joined, upright, columns left to right) ->"),
+                            ]
+                        } else if asia1 {
                             &[
                                 (24.0, "Монгол Улс, Улаанбаатар. Өнөөдөр сайхан үдэш. ӨөҮү ҢңҺһ"),
                                 (24.0, "ᠮᠣᠩᠭᠣᠯ ᠤᠯᠤᠰ ᠪᠢᠴᠢᠭ ᠮᠠᠨᠵᡠ ᡤᡳᠰᡠᠨ ᠲᠣᠳᠣ ꡖꡍꡂꡛ ꡏꡡꡃꡡꡙ"),
@@ -357,6 +376,18 @@ fn ui_shot(
                             (24.0, "👍🏻👍🏼👍🏽👍🏾👍🏿 👋🏽 1\u{FE0F}\u{20E3}2\u{FE0F}\u{20E3}3\u{20E3}#\u{FE0F}\u{20E3}*\u{FE0F}\u{20E3} ♈♉♊♋♌♍♎♏♐♑♒♓⛎"),
                             ]
                         };
+                        if mongol {
+                            p.spawn(Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(48.0), margin: UiRect::top(Val::Px(8.0)), ..default() }).with_children(|r| {
+                                for (text, tint) in [
+                                    ("ᠮᠣᠩᠭᠣᠯ ᠤᠯᠤᠰ ᠪᠢᠴᠢᠭ ᠮᠣᠩᠭᠣᠯ ᠤᠯᠤᠰ ᠪᠢᠴᠢᠭ ᠮᠣᠩᠭᠣᠯ", Color::WHITE),
+                                    ("ᠮᠠᠨᠵᡠ ᡤᡳᠰᡠᠨ ᠮᠠᠨᠵᡠ ᡤᡳᠰᡠᠨ", Color::srgb(0.9, 0.8, 0.5)),
+                                    ("ᠲᠣᠳᠣ ᠪᠢᠴᠢᠭ ᠲᠣᠳᠣ ᠪᠢᠴᠢᠭ ᠲᠣᠳᠣ", Color::srgb(0.6, 0.85, 1.0)),
+                                ] {
+                                    let mut e = r.spawn(craftmjne::mongolian::VerticalText::new(text, 300, 3));
+                                    e.insert(ImageNode { color: tint, ..default() });
+                                }
+                            });
+                        }
                         for (size, line) in sample.iter().copied() {
                             p.spawn((Text::new(line), TextFont { font_size: size, ..default() }, TextColor(Color::WHITE)));
                         }

@@ -1549,12 +1549,32 @@ default font that ships with Bevy is turned off, so there is no other font unles
     stacked or ligature glyphs, so the Indic scripts, Khmer, Burmese, Tibetan, Javanese, Balinese and
     the like show a consonant cluster as separate cells (virama visible), not as the joined form a
     reader of those scripts expects; real conjunct shaping would need every ligature drawn per script
-    (Devanagari has it, hand-built, from an earlier step). **Mongolian, Manchu and Todo are written
-    downward and join by position; here they are separate upright letters set left to right** - no
-    vertical layout, no positional forms. Everything was judged only from software-rendered screenshots,
-    and the sample words in the preview screens are only to exercise the shaping, not to be correct
-    prose.
-  - `CRAFT_SHOT=asia1` and `asia2` render samples.
+    (Devanagari has it, hand-built, from an earlier step). Everything was judged only from software-rendered
+    screenshots, and the sample words in the preview screens are only to exercise the shaping, not to be
+    correct prose.
+  - **Mongolian, joined, two ways** (`src/scripts.rs`, `src/mongolian.rs`). Mongolian, Todo, Manchu and Sibe are
+    written *downward*, joined along a spine, with columns running left to right.
+    - **In any ordinary text** (chat, menus, tooltips) they are drawn **turned a quarter turn**, the way
+      Mongolian is shown on a horizontal line: every letter has its initial, medial, final and isolated
+      form, chosen by the font's `GSUB` from the neighbours, so a word is one continuous spine reading left
+      to right.
+    - **Upright**: the **`VerticalText`** component (`VerticalText::new(text, max_height_px, scale)`) draws the
+      real vertical script as an image - words stacked downward on one spine, long text wrapping into
+      columns that run left to right (a newline starts a column, `U+202F` leaves a small gap, `U+180E`
+      breaks the joining, `U+180A` is a connecting stroke, variation selectors are accepted and ignored);
+      tint it with `ImageNode::color`. Nothing in the game's own UI uses it yet (there are no
+      translations to show); a translated string that should read vertically should be spawned as a
+      `VerticalText` instead of a `Text`.
+    - Both come from Unifont's isolated letters: the forms are derived by dropping the head or tail and
+      extending the spine, so every letter gets the same treatment where a real font draws each positional
+      form by hand. The contextual letter rules, the variation selectors' alternate glyphs and rotated
+      digits are not made.
+  - **Joined scripts, checked in the real text engine.** A test shapes Arabic, Persian, Syriac, N'Ko, Mandaic and
+    Mongolian through cosmic-text (the engine Bevy uses) with the game's own fonts registered, and asserts
+    every letter of a word takes its initial / medial / final form rather than its isolated one; others check
+    lam-alef, Devanagari conjuncts, and that mixed-script lines stay joined. `CRAFT_SHOT=joined` renders them.
+    The Indic scripts shown from Unifont (Bengali, Tamil ...) are *not* in that list: they do not form conjuncts.
+  - `CRAFT_SHOT=asia1`, `asia2`, `mongol` (before/after) and `joined` render samples.
 - **Emoji.** 12x12 colour emoji (about 700 drawn, the rest generated, see below) drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second
   built-in font used as a fallback, so they work anywhere text does, including chat and signs. In chat,
