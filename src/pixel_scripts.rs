@@ -135,17 +135,20 @@ const HEBREW_POINTS: &[(char, &[(i32, i32)])] = &[
     ('\u{5C2}', &[(-4, 1)]),                                          // sin dot
 ];
 
-fn point_glyph(c: char, pixels: &[(i32, i32)]) -> GlyphSpec {
-    let left = pixels.iter().map(|(x, _)| -x).max().unwrap_or(0).max(0) as usize;
-    let mut g = vec![vec![false; left + 1]; 12];
+pub(crate) fn point_glyph(c: char, pixels: &[(i32, i32)]) -> GlyphSpec {
+    // Pixels may sit on either side of the origin (a tie spans two letters); the glyph takes no room.
+    let min_x = pixels.iter().map(|(x, _)| *x).min().unwrap_or(0);
+    let max_x = pixels.iter().map(|(x, _)| *x).max().unwrap_or(0);
+    let width = (max_x - min_x + 1) as usize;
+    let mut g = vec![vec![false; width]; 12];
     for (x, y) in pixels {
-        g[*y as usize][(left as i32 + x) as usize] = true;
+        g[*y as usize][(x - min_x) as usize] = true;
     }
-    let rects = crate::font_gen::rects_from_mask(left + 1, &g, 0)
+    let rects = crate::font_gen::rects_from_mask(width, &g, 0)
         .into_iter()
         .map(|mut r| {
-            r.x0 -= left as i32;
-            r.x1 -= left as i32;
+            r.x0 += min_x;
+            r.x1 += min_x;
             r
         })
         .collect();

@@ -3612,3 +3612,29 @@ etc.) instead of inventing a new approach:
   - Not done: a language setting (translations will own it), vertical writing, input method, and
     judging legibility of the smallest ideographs at 1x - checked only in software-rendered screenshots
     (`CRAFT_SHOT=cjk`).
+
+- **Cherokee, Cree, Inuktitut, Icelandic, Yup'ik and Ndyuka: sort the request by what each script
+  actually needs before choosing a method.** Measured first (CLDR exemplar letters, Wikipedia's
+  orthography tables, a probe test listing which letters the Latin font lacked), and it split three ways:
+  - **Syllabaries with hundreds of signs (Cherokee, Canadian syllabics)** go through the same Unifont
+    pipeline as CJK: `tools/build_cjk_data.py` writes `cjk/syllabics.bin` (896 glyphs, 8 KB deflated),
+    `syllabics.rs` builds the font, `fonts::load_syllabics` registers it in the background (not
+    style-dependent, unlike CJK). `cjk::{decode, specs_from, font_from}` were made `pub(crate)` so both
+    modules share one decoder/font builder. Unifont turned out to be *complete* for both blocks (96+80
+    Cherokee, 640+80 UCAS), checked by a test against the assigned ranges. Note CLDR's Cherokee main set is
+    the *lowercase* AB70.. letters, easy to miss if you only test U+13A0-13FF.
+  - **Latin languages** need almost nothing: Ndyuka's Latin alphabet is plain Latin (+ acute), so the real
+    gaps were Icelandic ð þ Ð Þ, Yup'ik U+02BC and the combining tie U+0361, and Inuit ł ŋ. Those are drawn
+    in the 12-row Latin style, not taken from Unifont (a 16-pixel ð between 12-pixel letters would look
+    wrong). The tie is a zero-advance mark reaching both sides of its origin, so
+    `pixel_scripts::point_glyph` (which assumed marks only reach left) was generalised to min..max x, and the
+    glyph-cell test allows a zero-width mark to reach 4 pixels right.
+  - **Afaka and Yugtun are not in Unicode** (Afaka's U+16C80-16CCF is only tentative), and Wikimedia
+    rate-limited me when I went for the chart. Drawing 56 signs from memory would be invented, so they are
+    reported as not done rather than approximated. If they are wanted, the decision is whether to use the
+    tentative code points or private-use ones, and who supplies reference shapes.
+  - **A screenshot window is 1280x720**: a sample screen with too many 24-pixel lines silently cuts the
+    last ones off (the Yup'ik line was missing from the first shot). Give a script group its own
+    `CRAFT_SHOT` screen (`natives`) instead of appending lines.
+  - Break-tested: the app-level fallback test needs the plugin's `load_syllabics` to run; the CJK swap test
+    still guards the shared registration path.

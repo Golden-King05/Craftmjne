@@ -1500,6 +1500,21 @@ default font that ships with Bevy is turned off, so there is no other font unles
   so the rest show as an empty box; Hong Kong or other regional forms beyond the three styles are not
   made. `CRAFT_SHOT=cjk CRAFT_CJK=ja|zh-Hans|zh-Hant` renders a sample screen; `tools/build_cjk_data.py`
   rebuilds the data from a Unifont release.
+- **Cherokee, Cree, Inuktitut, Icelandic, Yup'ik and Ndyuka (Njuka)** (`src/syllabics.rs`, `src/pixel_font.rs`):
+  - **Cherokee** (the 86 capital syllables, the lowercase ones and the 80 small letters of the Cherokee
+    Supplement) and **all of the Canadian Aboriginal syllabics** (640 + 80 extended: Cree, Inuktitut,
+    Ojibwe, Naskapi, Blackfoot, Carrier ...) are GNU Unifont bitmaps in a small fallback font
+    (`third_party/unifont/`), complete for what Unicode encodes. Same 16-pixel geometry as the Chinese
+    and Japanese glyphs, so text containing them gets the taller line height.
+  - **Icelandic** (ð þ Ð Þ added; æ Æ ö and the accented vowels were there), **Yup'ik** (voiceless ḿ ń,
+    the modifier apostrophe ʼ and the tie of u͡g), **Inuit Latin** (ł Ł ŋ Ŋ) and **Cree Latin** (â ê î ô
+    and the macron forms) are drawn in the game's own 12-row Latin font. Ndyuka's Latin alphabet is
+    plain Latin with an acute for tone, which the font already had.
+  - **Not in Unicode, so not made:** Ndyuka's own **Afaka syllabary** (56 signs, proposed for U+16C80-16CCF)
+    and Yup'ik's **Yugtun script**. There is nothing standard to encode them as and I had no reference
+    shapes to draw them from, so they are not guessed at. Capital eth/thorn and the Inuit letters are
+    first-pass drawings that I judged only from a software-rendered screenshot.
+  - `CRAFT_SHOT=natives` renders a sample.
 - **Emoji.** 12x12 colour emoji (about 700 drawn, the rest generated, see below) drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second
   built-in font used as a fallback, so they work anywhere text does, including chat and signs. In chat,

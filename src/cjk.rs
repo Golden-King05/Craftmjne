@@ -101,7 +101,7 @@ impl Glyph {
 }
 
 /// Reads one blob: a zlib stream of `u32 code point | u8 width/8 | rows` records.
-fn decode(blob: &[u8]) -> BTreeMap<u32, Glyph> {
+pub(crate) fn decode(blob: &[u8]) -> BTreeMap<u32, Glyph> {
     let mut raw = Vec::new();
     flate2::read::ZlibDecoder::new(blob).read_to_end(&mut raw).expect("the CJK data is a zlib stream");
     let mut out = BTreeMap::new();
@@ -134,14 +134,19 @@ pub fn glyphs(style: Style) -> BTreeMap<u32, Glyph> {
 
 /// The font glyphs for a style.
 pub fn glyph_specs(style: Style) -> Vec<GlyphSpec> {
-    // Whatever the emoji font draws stays the emoji font's (a symbol both fonts know must not turn
-    // from the colour picture into a plain one, nor split an emoji sequence between two fonts).
+    specs_from(&glyphs(style))
+}
+
+/// Turns Unifont bitmaps into font glyphs (16 rows, baseline 14 rows down), leaving out whatever the
+/// emoji font draws: a symbol both fonts know must not turn from the colour picture into a plain one,
+/// nor split an emoji sequence between two fonts.
+pub(crate) fn specs_from(set: &BTreeMap<u32, Glyph>) -> Vec<GlyphSpec> {
     let emoji: std::collections::HashSet<char> = crate::emoji::all().iter().flat_map(|e| e.chars.iter().copied()).collect();
-    glyphs(style)
-        .into_iter()
-        .filter_map(|(cp, g)| {
+    let joiners = crate::emoji::joiners();
+    set.iter()
+        .filter_map(|(&cp, g)| {
             let c = char::from_u32(cp)?;
-            if emoji.contains(&c) || crate::emoji::joiners().contains(&c) {
+            if emoji.contains(&c) || joiners.contains(&c) {
                 return None;
             }
             let mask: Vec<Vec<bool>> = (0..ROWS).map(|y| (0..g.width).map(|x| g.ink(x, y)).collect()).collect();
@@ -152,18 +157,23 @@ pub fn glyph_specs(style: Style) -> Vec<GlyphSpec> {
         .collect()
 }
 
-/// The font for a style as file bytes ("Craftmjne CJK" - never "Unifont", which the licence reserves).
-pub fn font_bytes(style: Style) -> Vec<u8> {
+/// A font file from glyphs made by [`specs_from`].
+pub(crate) fn font_from(family: &str, glyphs: Vec<GlyphSpec>) -> Vec<u8> {
     build_ttf(&FontSpec {
-        family: "Craftmjne CJK".into(),
+        family: family.into(),
         palette: vec![],
-        glyphs: glyph_specs(style),
+        glyphs,
         em_rows: EM_ROWS,
         baseline_row: BASELINE_ROW,
         space_advance: 8,
         substitutions: vec![],
         ligatures: vec![],
     })
+}
+
+/// The font for a style as file bytes ("Craftmjne CJK" - never "Unifont", which the licence reserves).
+pub fn font_bytes(style: Style) -> Vec<u8> {
+    font_from("Craftmjne CJK", glyph_specs(style))
 }
 
 #[cfg(test)]

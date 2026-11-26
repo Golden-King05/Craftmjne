@@ -246,9 +246,10 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
-                "fonts" | "scripts" | "cjk" => {
+                "fonts" | "scripts" | "cjk" | "natives" => {
                     let scripts = name == "scripts";
                     let cjk = name == "cjk";
+                    let natives = name == "natives";
                     for e in &buttons_roots {
                         commands.entity(e).despawn();
                     }
@@ -257,7 +258,16 @@ fn ui_shot(
                         BackgroundColor(Color::srgb(0.16, 0.12, 0.09)),
                     ))
                     .with_children(|p| {
-                        let sample: &[(f32, &str)] = if cjk {
+                        let sample: &[(f32, &str)] = if natives {
+                            &[
+                                (24.0, "ᏣᎳᎩ ᏓᎶᏂᎨᏍᏗ ᎠᏂᏴᏫᏯ ᎣᏏᏲ ᏙᎯᏧ  ꭰꭱꭲꭳꭴ ꮃꮄꮅ ᏗᎦᏘ"),
+                                (24.0, "ᓀᐦᐃᔭᐍᐏᐣ ᐊᓯᔾᔨᐧᐃᐧᑭᓯᓯᐤ ᐱᐢᑯᓯ ᑭᑌᐧᐃᓄᐊ ᑲᐦᐋᐧᐃ  ᐊᒥᐢᑯᐧᐃᓂᐃᐧᑯᐤ"),
+                                (24.0, "ᐃᓄᒃᑎᑐᑦ ᓄᓇᕗᑦ ᐅᖃᐅᓯᖅ ᖃᓄᐃᓕᐅᕈᑎᒃ ᑕᑯᔭᒐᓕᒋᐊᖅ ᐊᐃᑉᐹᐱ ᓇᑦᑎᒍ"),
+                                (24.0, "Þú ert íslensk? Já, Ðór ætlar að fara í Öxará. Þórður, Ásgeir, Æsa, Ólöf, Hrafnhildur Ýr."),
+                                (24.0, "Yupʼik: Yup\u{2BC}ik, cetaman, ḿikelnguq, ńukaq, qayaq, u\u{361}gaaq, ll rr ss gg ng ńg  Inuit: łŋ ŁŊ  Cree: nêhiyawêwin wîpâc"),
+                                (12.0, "ᏣᎳᎩ ᐃᓄᒃᑎᑐᑦ ᓀᐦᐃᔭᐍᐏᐣ Þórður Yupʼik łŋ (twelve)"),
+                            ]
+                        } else if cjk {
                             &[
                                 (24.0, "ひらがな あいうえお かきくけこ さしすせそ たちつてと なにぬねの はひふへほ まみむめも やゆよ らりるれろ わをん"),
                                 (24.0, "カタカナ アイウエオ カキクケコ ガギグゲゴ パピプペポ ヴ ー ｱｲｳｴｵ ｶﾞ"),

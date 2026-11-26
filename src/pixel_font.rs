@@ -149,6 +149,18 @@ const BASE: &[(char, i32, &str)] = &[
     ('ç', 4, ".####/#..../#..../#..../#..../.####/..#../.##.."),
     ('Ç', 2, ".####./#....#/#...../#...../#...../#...../#....#/.####./..#.../.##..."),
     ('ı', 4, "##./.#./.#./.#./.#./###"),
+    // Icelandic eth and thorn.
+    ('ð', 2, "...##./..###./.####./#....#/#....#/#....#/#....#/.####."),
+    ('Ð', 2, ".#####./.#....#/.#....#/####..#/.#....#/.#....#/.#....#/.#####."),
+    ('þ', 2, "#...../#...../#.###./##...#/#....#/#....#/##...#/#.###./#...../#....."),
+    ('Þ', 2, "#...../#####./#....#/#....#/#....#/#####./#...../#....."),
+    // Modifier apostrophe (Yup'ik, Cree) and turned comma, Inuit letters with a bar or a tail.
+    ('\u{2BC}', 2, "##/.#/#."),
+    ('\u{2BB}', 2, ".#/#./##"),
+    ('ł', 2, "##../.#../.#.#/.##./##../.#../.#../.##."),
+    ('Ł', 2, "#...../#...../#.#.../##..../#...../#...../#...../######"),
+    ('ŋ', 4, "#.###./##...#/#....#/#....#/#....#/#....#/.....#/....#."),
+    ('Ŋ', 2, "#....#/##...#/##...#/#.#..#/#.#..#/#..#.#/#...##/#....#/.....#/....#."),
 ];
 
 /// Accent marks: rows, drawn above a letter.
@@ -272,6 +284,9 @@ pub fn glyphs() -> Vec<GlyphSpec> {
             out.push(to_glyph(*c, &compose(&dotted, *mark)));
         }
     }
+    // The tie that joins two letters into one sound (Yup'ik u͡g): a zero-width arch reaching back over
+    // the letter before it.
+    out.push(crate::pixel_scripts::point_glyph('\u{361}', &[(-3, 2), (-2, 2), (-1, 2), (0, 2), (1, 2), (2, 2), (-4, 3), (3, 3)]));
     out.extend(crate::pixel_scripts::glyphs());
     // A non-breaking space is a space.
     out.push(GlyphSpec { chars: vec!['\u{A0}'], advance: SPACE, colour: false, layers: vec![Layer { color: 0, rects: vec![] }] });
@@ -334,10 +349,48 @@ mod tests {
             for r in rects {
                 assert!(r.y0 >= 0 && r.y1 <= crate::font_gen::EM_ROWS, "{:?} leaves the cell: {r:?}", g.chars);
                 // Hebrew, Arabic and Devanagari marks sit over the letter before them, so they reach left of their own origin.
-                let reach_left = if ('\u{590}'..='\u{6FF}').contains(&g.chars[0]) || ('\u{900}'..='\u{97F}').contains(&g.chars[0]) || ('\u{E900}'..='\u{E9FF}').contains(&g.chars[0]) { -6 } else { 0 };
-                assert!(r.x0 >= reach_left && r.x1 <= g.advance, "{:?} is wider than its advance: {r:?}", g.chars);
+                let reach_left = if ('\u{300}'..='\u{36F}').contains(&g.chars[0]) || ('\u{590}'..='\u{6FF}').contains(&g.chars[0]) || ('\u{900}'..='\u{97F}').contains(&g.chars[0]) || ('\u{E900}'..='\u{E9FF}').contains(&g.chars[0]) { -6 } else { 0 };
+                // A zero-width mark may also reach a little right of its origin (a tie spans two letters).
+                let reach_right = if g.advance == 0 { 4 } else { g.advance };
+                assert!(r.x0 >= reach_left && r.x1 <= reach_right, "{:?} is wider than its advance: {r:?}", g.chars);
             }
         }
+    }
+
+    #[test]
+    fn icelandic_yupik_and_inuit_latin_letters_are_all_there() {
+        let have: std::collections::HashSet<char> = glyphs().iter().flat_map(|g| g.chars.iter().copied()).collect();
+        // CLDR's Icelandic main, auxiliary and index letters.
+        for c in "aábdðeéfghiíjklmnoópqrstuúvwxyýzþæö".chars().chain("AÁBCDÐEÉFGHIÍJKLMNOÓPQRSTUÚVWXYÝZÞÆÖ".chars()) {
+            assert!(have.contains(&c), "Icelandic {c} has no glyph");
+        }
+        // Yup'ik: m and n with acute (voiceless), the modifier apostrophe and the tie of u͡g.
+        for c in "ḿń\u{2BC}\u{361}".chars() {
+            assert!(have.contains(&c), "Yup'ik U+{:X} has no glyph", c as u32);
+        }
+        // Inuit Latin and Cree SRO.
+        for c in "łŁŋŊâêîôāēīō\u{2BB}".chars() {
+            assert!(have.contains(&c), "U+{:X} has no glyph", c as u32);
+        }
+    }
+
+    #[test]
+    fn eth_and_thorn_differ_from_the_letters_they_resemble() {
+        let ink = |c: char| {
+            let g = glyphs().into_iter().find(|g| g.chars == [c]).unwrap();
+            let mut r: Vec<_> = g.layers.iter().flat_map(|l| l.rects.iter().map(|r| (r.x0, r.y0, r.x1, r.y1))).collect();
+            r.sort();
+            r
+        };
+        for (a, b) in [('ð', 'd'), ('þ', 'p'), ('þ', 'b'), ('Ð', 'D'), ('Þ', 'P'), ('ł', 'l'), ('Ł', 'L'), ('ŋ', 'n'), ('Ŋ', 'N')] {
+            assert_ne!(ink(a), ink(b), "{a} looks like {b}");
+        }
+        // Thorn has both an ascender and a descender; eth has an ascender; the tie takes no room.
+        let rows = |c: char| ink(c).iter().map(|r| (r.1, r.3)).fold((i32::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+        assert!(rows('þ').0 <= 2 && rows('þ').1 >= 12, "{:?}", rows('þ'));
+        assert!(rows('ð').0 <= 2 && rows('ð').1 <= 10);
+        let tie = glyphs().into_iter().find(|g| g.chars == ['\u{361}']).unwrap();
+        assert_eq!(tie.advance, 0);
     }
 
     #[test]

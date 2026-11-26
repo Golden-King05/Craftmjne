@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds src/cjk/{zh,zh_hant,ja}.bin from GNU Unifont's precompiled .hex files.
+"""Builds src/cjk/{zh,zh_hant,ja,syllabics}.bin from GNU Unifont's precompiled .hex files.
 
 Usage: tools/build_cjk_data.py <unifont-x.y.z/font/precompiled>
 
@@ -7,6 +7,7 @@ zh.bin is the base set (Simplified-leaning glyphs: unifont-X.hex, plus unifont_u
 the BMP). zh_hant.bin and ja.bin hold only the glyphs that differ from it (or that it lacks), taken
 from unifont_t-X.hex and unifont_jp-X.hex. Each file is a zlib stream of records:
     u32 LE code point | u8 width in 8-pixel columns (1 or 2) | 16 rows, `width` bytes each
+syllabics.bin is Cherokee and the Canadian Aboriginal syllabics (Cree, Inuktitut, ...), same record format.
 Only the CJK-related ranges below are kept; Latin, Hangul and the rest are the game's own.
 Unifont is dual-licensed SIL OFL 1.1 / GPLv2+ with the font exception; see third_party/unifont/.
 """
@@ -24,17 +25,19 @@ RANGES = [
     (0x20000, 0x2EE5D), (0x2F800, 0x2FA1F), (0x30000, 0x323AF),
 ]
 
-def wanted(c):
-    return any(a <= c <= b for a, b in RANGES)
+SYLLABICS = [(0x13A0, 0x13FF), (0xAB70, 0xABBF), (0x1400, 0x167F), (0x18B0, 0x18FF)]
 
-def load(path):
+def wanted(c, ranges=None):
+    return any(a <= c <= b for a, b in (ranges or RANGES))
+
+def load(path, ranges=None):
     out = {}
     for line in open(path):
         if ':' not in line:
             continue
         cp, bits = line.strip().split(':')
         c = int(cp, 16)
-        if wanted(c):
+        if wanted(c, ranges):
             out[c] = bits
     return out
 
@@ -62,3 +65,4 @@ for name, pat in (('zh_hant', 'unifont_t-[0-9]*.hex'), ('ja', 'unifont_jp-[0-9]*
     var = load(find(d, pat))
     diff = {c: b for c, b in var.items() if base.get(c) != b}
     write(f'src/cjk/{name}.bin', diff)
+write('src/cjk/syllabics.bin', load(find(d, 'unifont-[0-9]*.hex'), SYLLABICS))
