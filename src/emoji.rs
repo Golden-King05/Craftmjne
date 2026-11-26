@@ -17,6 +17,7 @@ use crate::font_gen::{rects_from_mask, GlyphSpec, Layer};
 mod drawn;
 mod faces;
 mod flags;
+mod sequences;
 mod generated;
 
 pub const SIZE: usize = 12;
@@ -47,6 +48,17 @@ pub const PALETTE: &[(char, [u8; 4])] = &[
     ('t', [242, 192, 142, 255]), // skin
     ('T', [214, 150, 104, 255]), // skin shadow
     ('e', [250, 236, 202, 255]), // cream
+    // The five skin tones (light, shadow pairs), for toned hands.
+    ('1', [250, 220, 188, 255]),
+    ('2', [222, 176, 140, 255]),
+    ('3', [236, 188, 146, 255]),
+    ('4', [200, 146, 106, 255]),
+    ('5', [200, 150, 104, 255]),
+    ('6', [162, 110, 72, 255]),
+    ('7', [150, 100, 66, 255]),
+    ('8', [116, 72, 46, 255]),
+    ('9', [96, 62, 44, 255]),
+    ('0', [70, 44, 32, 255]),
 ];
 
 pub type Grid = [[char; SIZE]; SIZE];
@@ -169,6 +181,8 @@ pub fn all() -> Vec<Emoji> {
     out.extend(drawn::all());
     out.extend(generated::all());
     out.extend(flags::all());
+    let so_far = out.clone();
+    out.extend(sequences::all(&so_far));
     // The first drawing of a character wins; a name is unique.
     let mut seen_chars = std::collections::HashSet::new();
     let mut seen_names = std::collections::HashSet::new();
@@ -404,6 +418,24 @@ mod tests {
         // The plain black flag is still just itself.
         let black = all().into_iter().find(|e| e.name == "black_flag").unwrap();
         assert_eq!(shape(&font, "\u{1F3F4}"), vec![gid(black.chars[0])]);
+    }
+
+    #[test]
+    fn keycaps_and_skin_tones_are_ligatures() {
+        let font = crate::fonts::emoji_font_bytes();
+        let face = ttf_parser::Face::parse(&font, 0).unwrap();
+        let gid = |c: char| face.glyph_index(c).unwrap().0 as u32;
+        let find = |n: &str| all().into_iter().find(|e| e.name == n).unwrap_or_else(|| panic!("{n}"));
+        assert_eq!(shape(&font, "1\u{FE0F}\u{20E3}"), vec![gid(find("keycap_1").chars[0])]);
+        assert_eq!(shape(&font, "#\u{20E3}"), vec![gid(find("keycap_hash").chars[0])]);
+        // A digit with a stray variation selector is not a keycap.
+        assert_eq!(shape(&font, "1\u{FE0F}").len(), 2);
+        let up = find("thumbs_up").chars[0];
+        let toned = find("thumbs_up_tone_3").chars[0];
+        assert_eq!(shape(&font, &format!("{up}\u{1F3FD}")), vec![gid(toned)]);
+        assert_eq!(shape(&font, &format!("{up}\u{FE0F}\u{1F3FD}")), vec![gid(toned)]);
+        // Without a modifier it is the default.
+        assert_eq!(shape(&font, &up.to_string()), vec![gid(up)]);
     }
 
     #[test]
