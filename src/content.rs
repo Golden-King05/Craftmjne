@@ -17,6 +17,7 @@ use crate::blocks::{find_data_dir, BlockRegistry, Tables};
 use crate::crafting::RecipeBook;
 use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::item_registry::ItemRegistry;
+use crate::models::{collision_boxes, compile_model, load_block_models};
 use crate::mods::ModSource;
 use crate::overlay::{KindDir, Locals};
 use crate::packs::PackStack;
@@ -100,6 +101,8 @@ pub struct Content {
     pub texture_status: Vec<(String, TextureStatus)>,
     /// Texture names a block needs that never made it into the atlas.
     pub missing_textures: Vec<String>,
+    /// Pack models that couldn't be used (and why), for the log and the pack's author.
+    pub model_notes: Vec<String>,
 }
 
 /// Builds content from `paths`. Panics, naming the file, on malformed content,
@@ -118,6 +121,11 @@ pub fn build_content(paths: &ContentPaths) -> Content {
     for name in items.texture_names() {
         painters.ensure_registered(name);
     }
+    // Resource-pack models name textures too; each needs a tile (a placeholder if nobody has art).
+    let models = load_block_models(&registry, &paths.models());
+    for name in models.texture_names() {
+        painters.ensure_registered(&name);
+    }
     let mut atlas = build_atlas_in(&painters, &paths.textures());
     items.resolve_tiles(&atlas.indices);
     let recipes = RecipeBook::load_from_dirs(&registry, &items, &paths.recipes);
@@ -134,8 +142,11 @@ pub fn build_content(paths: &ContentPaths) -> Content {
         registry.texture_names().filter(|name| !atlas.indices.contains_key(name)).collect();
     let texture_status = atlas.texture_status.clone();
     let icons = build_icon_atlas(&registry, &atlas);
-    let tables = registry.compile(&atlas.indices, atlas.tile_size);
-    Content { registry, items, recipes, atlas, icons, tables, texture_status, missing_textures }
+    let mut tables = registry.compile(&atlas.indices, atlas.tile_size);
+    let visual = models.visual.iter().map(|(id, m)| (*id, compile_model(m, &atlas.indices))).collect();
+    let collision = models.collision.iter().map(|(id, m)| (*id, collision_boxes(m))).collect();
+    Arc::get_mut(&mut tables).expect("the tables aren't shared yet").apply_models(visual, collision);
+    Content { registry, items, recipes, atlas, icons, tables, texture_status, missing_textures, model_notes: models.notes }
 }
 
 /// [`build_content`], reporting a problem as an `Err` instead of panicking - for
@@ -338,6 +349,48 @@ mod tests {
         let c = build_content(&ContentPaths::vanilla().with_packs(&[low.path(), high.path()]));
         assert_eq!(tile_pixel(&c, "dirt"), [9, 9, 9, 255], "the later (higher) pack wins where both have a file");
         assert_eq!(tile_pixel(&c, "stone"), [2, 2, 2, 255], "and the lower one still supplies what the higher doesn't");
+    }
+
+    #[test]
+    fn a_players_pack_model_changes_how_a_block_is_drawn_and_nothing_else() {
+        let pack = Scratch::new();
+        pack.file("models/blocks/dirt.json", r#"{"boxes": [{"from": [0,0,0], "to": [16,8,16], "textures": {"all": "mytex"}}], "collision": "model"}"#)
+            .png("textures/blocks/mytex.png", [5, 6, 7, 255]);
+        let c = build_content(&ContentPaths::vanilla().with_packs(&[pack.path()]));
+        let dirt = c.registry.id("dirt") as usize;
+        let model = c.tables.pack_models[dirt].as_ref().expect("the pack's model is installed");
+        assert_eq!(model.boxes[0].max[1], 0.5);
+        let tile = model.boxes[0].tiles[2].expect("its texture got a tile") as usize;
+        assert_eq!(tile, c.atlas.indices["mytex"] as usize, "a texture only the model names still reaches the atlas");
+        assert_eq!(tile_pixel(&c, "mytex"), [5, 6, 7, 255], "with the pack's art");
+        assert!(!c.tables.occludes[dirt] && c.tables.opaque[dirt], "a half block hides no neighbour's face, but it is still an opaque block for light");
+        assert!(c.tables.collision_boxes[dirt].is_none(), "a player's pack can't change collision, even asking to");
+        assert!(c.tables.solid[dirt]);
+    }
+
+    #[test]
+    fn a_mods_model_can_replace_a_core_blocks_collision() {
+        let m = Scratch::new();
+        m.file("resourcepack/models/blocks/craftmjne/dirt.json", r#"{"boxes": [{"from": [0,0,0], "to": [16,8,16], "textures": {"all": "dirt"}}], "collision": "model"}"#)
+            .file("blocks/granite.json", r#"{"id": "granite"}"#)
+            .file("resourcepack/models/blocks/granite.json", r#"{"boxes": [{"from": [4,0,4], "to": [12,16,12], "textures": {"all": "granite"}}]}"#)
+            .png("resourcepack/textures/blocks/granite.png", [4, 5, 6, 255]);
+        let c = build_content(&with(&[m.source("g")]));
+        let dirt = c.registry.id("dirt") as usize;
+        let boxes = c.tables.collision_boxes[dirt].as_ref().expect("the mod's model took over dirt's collision");
+        assert_eq!((boxes[0].min, boxes[0].max), ([0.0; 3], [1.0, 0.5, 1.0]));
+        let granite = c.registry.id("g:granite") as usize;
+        assert!(c.tables.pack_models[granite].is_some(), "a mod's own block is drawn by its model");
+        assert!(c.tables.collision_boxes[granite].is_none(), "without \"collision\": \"model\" its collision is the block's own");
+    }
+
+    #[test]
+    fn a_broken_model_is_noted_and_the_block_keeps_its_look() {
+        let pack = Scratch::new();
+        pack.file("models/blocks/dirt.json", "{broken");
+        let c = build_content(&ContentPaths::vanilla().with_packs(&[pack.path()]));
+        assert!(c.tables.pack_models[c.registry.id("dirt") as usize].is_none());
+        assert!(c.model_notes.iter().any(|n| n.contains("dirt.json")), "{:?}", c.model_notes);
     }
 
     #[test]

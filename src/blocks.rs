@@ -1182,6 +1182,14 @@ pub struct Tables {
     pub floor: Vec<bool>,
     /// Drawn by something other than the mesher (`Shape::Model`).
     pub model: Vec<bool>,
+    /// A resource pack's model for this block, if one changes its look (see `models.rs`).
+    /// Drawing only - collision, light and everything physical still follow the block definition.
+    pub pack_models: Vec<Option<Arc<crate::models::CompiledModel>>>,
+    /// Whether a neighbour may hide its face against this block. Equal to `opaque`, except for a
+    /// block drawn by a pack model that doesn't fill its cell, which hides nothing.
+    pub occludes: Vec<bool>,
+    /// A mod's model replaced this block's collision and hitbox with these boxes (block units).
+    pub collision_boxes: Vec<Option<Arc<Vec<crate::models::CollisionBox>>>>,
     /// Only mined while crouching (`BlockDef::requires_crouch`).
     pub requires_crouch: Vec<bool>,
     /// Minimum projectile speed that shatters the block (`INFINITY` = never).
@@ -1268,6 +1276,31 @@ pub struct Tables {
 }
 
 impl Tables {
+    /// Installs the pack models: what draws each block, and which blocks still hide a neighbour's
+    /// face (a model that doesn't fill its cell hides nothing, so no hole shows in the wall beside
+    /// a half block). `collision` replaces those blocks' collision and hitbox (a mod's models only -
+    /// the loader decides which). Call once, right after `compile`, before the tables are shared.
+    pub fn apply_models(
+        &mut self,
+        visual: HashMap<BlockId, crate::models::CompiledModel>,
+        collision: HashMap<BlockId, Vec<crate::models::CollisionBox>>,
+    ) {
+        self.occludes = self.opaque.clone();
+        for (id, model) in visual {
+            let i = id as usize;
+            if i >= self.pack_models.len() {
+                continue;
+            }
+            self.occludes[i] = self.opaque[i] && model.fills_cell;
+            self.pack_models[i] = Some(Arc::new(model));
+        }
+        for (id, boxes) in collision {
+            if let Some(slot) = self.collision_boxes.get_mut(id as usize) {
+                *slot = Some(Arc::new(boxes));
+            }
+        }
+    }
+
     /// Whether a cell holding `id` at stored fluid `level` has fluid state
     /// worth saving and drawing: a fluid, or something frozen from one that
     /// still carries a flowing level.
@@ -1636,6 +1669,9 @@ impl BlockRegistry {
             rotates: vec![false; n],
             floor: vec![false; n],
             model: vec![false; n],
+            pack_models: vec![None; n],
+            occludes: vec![false; n],
+            collision_boxes: vec![None; n],
             requires_crouch: vec![false; n],
             shatter_speed: vec![f32::INFINITY; n],
             shatter_keep: vec![1.0; n],
@@ -1745,6 +1781,7 @@ impl BlockRegistry {
             }
         }
         self.compiled = true;
+        tables.occludes = tables.opaque.clone();
         Arc::new(tables)
     }
 }

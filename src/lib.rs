@@ -36,6 +36,7 @@ pub mod noise;
 pub mod overlay;
 pub mod particles;
 pub mod pad_glyphs;
+pub mod models;
 pub mod packs;
 pub mod player;
 pub mod render;

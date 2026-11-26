@@ -405,6 +405,68 @@ fn push_floor(bucket: &mut MeshBucket, padded: &PaddedChunk, tables: &Tables, at
     bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
 }
 
+/// A block drawn by a resource pack's model (`models.rs`): each textured box face as one quad,
+/// lit from the cell outside that face, shaded like an ordinary face of that direction. A face
+/// lying on the cell's edge is hidden by a neighbour that occludes (`Tables::occludes`), exactly
+/// as an ordinary cube's would be; faces inside the cell always draw.
+fn push_pack_model(
+    bucket: &mut MeshBucket,
+    padded: &PaddedChunk,
+    tables: &Tables,
+    model: &crate::models::CompiledModel,
+    at: [f32; 3],
+    cell: usize,
+) {
+    for b in &model.boxes {
+        for (f, face) in FACES.iter().enumerate() {
+            let Some(tile) = b.tiles[f] else { continue };
+            let n_cell = (cell as i32 + face.neighbor_ofs) as usize;
+            // The face is on the cell's edge when its plane is the box's outer limit at 0 or 1.
+            let axis = if face.dir[0] != 0.0 { 0 } else if face.dir[1] != 0.0 { 1 } else { 2 };
+            let on_edge = if face.dir[axis] > 0.0 { b.max[axis] >= 1.0 } else { b.min[axis] <= 0.0 };
+            if on_edge && tables.occludes[padded.blocks[n_cell] as usize] {
+                continue;
+            }
+            let (block_rgb, sky_rgb) = vertex_light(padded, tables, [if on_edge { n_cell } else { cell }; 4]);
+            let (block_rgb, sky_rgb) = if on_edge || block_rgb != [0.0; 3] || sky_rgb != [0.0; 3] {
+                (block_rgb, sky_rgb)
+            } else {
+                // Inside an opaque cell nothing was ever lit (a half block in solid rock): use the
+                // neighbour above so the top reads as lit rather than black.
+                vertex_light(padded, tables, [(cell as i32 + SY) as usize; 4])
+            };
+            let tu = (tile as usize % ATLAS_TILES) as f32 * UV_TILE;
+            let tv = (tile as usize / ATLAS_TILES) as f32 * UV_TILE;
+            let vi = bucket.positions.len() as u32;
+            for c in &face.corners {
+                let p = [
+                    b.min[0] + c.pos[0] * (b.max[0] - b.min[0]),
+                    b.min[1] + c.pos[1] * (b.max[1] - b.min[1]),
+                    b.min[2] + c.pos[2] * (b.max[2] - b.min[2]),
+                ];
+                let uv = crate::models::face_uv(f, p);
+                bucket.positions.push([at[0] + p[0], at[1] + p[1], at[2] + p[2]]);
+                bucket.uvs.push([tu + tables.uv_pad + uv[0] * tables.uv_span, tv + tables.uv_pad + (1.0 - uv[1]) * tables.uv_span]);
+                bucket.colors.push([
+                    block_rgb[0].max(AMBIENT_LIGHT) * face.shade,
+                    block_rgb[1].max(AMBIENT_LIGHT) * face.shade,
+                    block_rgb[2].max(AMBIENT_LIGHT) * face.shade,
+                    sky_rgb[0] * face.shade,
+                ]);
+                bucket.sky_gb.push([sky_rgb[1] * face.shade, sky_rgb[2] * face.shade]);
+                bucket.tint.push([1.0; 3]);
+            }
+            bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
+        }
+    }
+}
+
+/// The ordinary cube's face corners as `(position, uv)`, per face - what a model's UVs must agree with.
+#[cfg(test)]
+pub(crate) fn face_corner_table() -> Vec<Vec<([f32; 3], [f32; 2])>> {
+    FACES.iter().map(|f| f.corners.iter().map(|c| (c.pos, c.uv)).collect()).collect()
+}
+
 /// `chunk_origin` is this chunk's world-space `(x, z)` (block coordinates
 /// of its `(0, 0)` corner) - the only reason `biome::grass_tint` needs it
 /// is to convert the mesher's chunk-local `x`/`z` loop variables into the
@@ -481,6 +543,12 @@ pub fn mesh_chunk_styled(
                     continue;
                 }
 
+                if let Some(model) = &tables.pack_models[id as usize] {
+                    let bucket = if tables.translucent[id as usize] { &mut water } else { &mut solid };
+                    push_pack_model(bucket, padded, tables, model, [x as f32, y as f32, z as f32], cell);
+                    continue;
+                }
+
                 if tables.floor[id as usize] {
                     push_floor(&mut solid, padded, tables, [x as f32, y as f32, z as f32], cell, id);
                     continue;
@@ -547,7 +615,7 @@ pub fn mesh_chunk_styled(
                     let mut bottom = 0.0f32;
                     let mut stepped = false;
                     if nid != 0 {
-                        if tables.opaque[nid as usize] {
+                        if tables.occludes[nid as usize] {
                             continue;
                         }
                         if nid == id {
@@ -968,6 +1036,68 @@ mod tests {
         let top = &cube.colors[8..12];
         assert!(top.iter().all(|c| (c[3] - 1.0).abs() < 1e-6 && (c[0] - AMBIENT_LIGHT).abs() < 1e-6));
         assert!(cube.sky_gb[8..12].iter().all(|gb| (gb[0] - 0.5).abs() < 0.01 && gb[1] == 0.0));
+    }
+
+    /// Tables for `stone` drawn by the given model JSON (any texture name resolves to tile 1).
+    fn tables_with_stone_model(json: &str) -> (BlockRegistry, std::sync::Arc<Tables>) {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let mut tables = reg.compile(&atlas.indices, atlas.tile_size);
+        let raw = crate::models::parse_model(json, &crate::overlay::KindDir::pack("x")).unwrap();
+        let everything: std::collections::HashMap<String, u16> = ["stone", "stone_top", "planks"].iter().map(|n| (n.to_string(), 1)).collect();
+        let model = crate::models::compile_model(&raw, &everything);
+        let id = reg.id("stone");
+        std::sync::Arc::get_mut(&mut tables).unwrap().apply_models([(id, model)].into(), Default::default());
+        (reg, tables)
+    }
+
+    const SLAB_MODEL: &str = r#"{"boxes": [{"from": [0,0,0], "to": [16,8,16], "textures": {"all": "stone"}}]}"#;
+    const CUBE_MODEL: &str = r#"{"boxes": [{"from": [0,0,0], "to": [16,16,16], "textures": {"all": "planks"}}]}"#;
+
+    #[test]
+    fn a_slab_model_is_drawn_half_height_and_a_neighbour_still_shows_the_face_behind_it() {
+        let (reg, tables) = tables_with_stone_model(SLAB_MODEL);
+        let (stone, dirt) = (reg.id("stone"), reg.id("dirt"));
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone; // the slab
+        padded.blocks[padded_index(6, 10, 5)] = dirt; // a cube beside it
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        // The slab's top is at y = 10.5, not 11.
+        assert!(mesh.solid.positions.iter().any(|p| (p[1] - 10.5).abs() < 1e-6 && (5.0..=6.0).contains(&p[0])), "half-height top");
+        assert!(!mesh.solid.positions.iter().any(|p| p[0] < 6.0 && (p[1] - 11.0).abs() < 1e-6), "nothing of the slab reaches the top of the cell");
+        // The dirt block's -x face (the plane x = 6) is still drawn: a half-block doesn't hide it.
+        let dirt_face = mesh.solid.positions.iter().filter(|p| (p[0] - 6.0).abs() < 1e-6 && p[1] >= 10.0 && p[1] <= 11.0 && (5.0..=6.0).contains(&p[2])).count();
+        assert!(dirt_face >= 4, "the cube's face toward the slab must draw, found {dirt_face} vertices");
+    }
+
+    #[test]
+    fn a_cube_model_costs_nothing_extra_and_still_hides_faces_like_a_cube() {
+        let (reg, tables) = tables_with_stone_model(CUBE_MODEL);
+        let stone = reg.id("stone");
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = stone;
+        padded.blocks[padded_index(6, 10, 5)] = stone;
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        // Two cubes side by side: 2 * 6 faces, minus the shared pair.
+        assert_eq!(mesh.solid.positions.len(), 10 * 4, "the faces between two filled model cells are hidden");
+    }
+
+    #[test]
+    fn a_model_lights_and_textures_its_faces_from_the_atlas_tile_it_names() {
+        let (reg, tables) = tables_with_stone_model(SLAB_MODEL);
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = reg.id("stone");
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        assert_eq!(mesh.solid.positions.len(), 24, "six faces of one box");
+        // Every vertex of the slab is lit by the sky (shade <= 1) and carries a plain tint.
+        assert!(mesh.solid.colors.iter().all(|c| c[3] > 0.0));
+        assert!(mesh.solid.tint.iter().all(|t| *t == [1.0; 3]));
+        // The side faces sample only the lower half of their tile (the part matching where they sit).
+        let tile_v = |v: f32| ((v / UV_TILE) - (v / UV_TILE).floor()).clamp(0.0, 1.0);
+        // Faces are pushed in order, four vertices each: the -x face is the second.
+        let side_vs: Vec<f32> = mesh.solid.uvs[4..8].iter().map(|uv| tile_v(uv[1])).collect();
+        let (lo, hi) = (side_vs.iter().cloned().fold(f32::MAX, f32::min), side_vs.iter().cloned().fold(f32::MIN, f32::max));
+        assert!(hi - lo < 0.55 && hi - lo > 0.4, "the -x face spans half the tile height: {lo}..{hi}");
     }
 
     fn tables() -> (BlockRegistry, std::sync::Arc<Tables>) {

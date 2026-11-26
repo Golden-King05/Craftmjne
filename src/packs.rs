@@ -30,6 +30,7 @@
 //! file wins.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -175,13 +176,15 @@ pub struct Layer {
     pub root: PathBuf,
     /// A player's pack or a mod's (may hold other namespaces' files in `<ns>/` folders).
     pub extends: bool,
+    /// What this layer's mod defines (so a plain texture name in its models means its own).
+    pub locals: Arc<crate::overlay::Locals>,
 }
 
 impl Layer {
     /// The directory for one kind of file in this layer (`"textures/blocks"`, `"models/blocks"`, `"sounds"`).
     pub fn kind_dir(&self, section: &str) -> KindDir {
         let dir = section.split('/').fold(self.root.clone(), |p, part| p.join(part));
-        KindDir { ns: self.ns.clone(), dir, locals: Default::default(), extends: self.extends }
+        KindDir { ns: self.ns.clone(), dir, locals: self.locals.clone(), extends: self.extends }
     }
 }
 
@@ -199,18 +202,23 @@ pub struct PackStack {
 impl PackStack {
     /// Just the game's own files.
     pub fn core() -> Self {
-        Self { layers: vec![Layer { ns: CORE_NS.to_string(), root: core_root(), extends: false }] }
+        Self { layers: vec![Layer { ns: CORE_NS.to_string(), root: core_root(), extends: false, locals: Default::default() }] }
     }
 
     /// Adds a mod's resource pack on top.
     pub fn with_mod(mut self, ns: &str, mod_root: &Path) -> Self {
-        self.layers.push(Layer { ns: ns.to_string(), root: mod_root.join(MOD_PACK_DIR), extends: true });
+        self.layers.push(Layer {
+            ns: ns.to_string(),
+            root: mod_root.join(MOD_PACK_DIR),
+            extends: true,
+            locals: Arc::new(crate::overlay::Locals::scan(mod_root)),
+        });
         self
     }
 
     /// Adds the player's packs (given lowest first) on top.
     pub fn with_user_packs(mut self, paths: &[PathBuf]) -> Self {
-        self.layers.extend(paths.iter().map(|p| Layer { ns: CORE_NS.to_string(), root: p.clone(), extends: true }));
+        self.layers.extend(paths.iter().map(|p| Layer { ns: CORE_NS.to_string(), root: p.clone(), extends: true, locals: Default::default() }));
         self
     }
 
@@ -223,18 +231,21 @@ impl PackStack {
 /// The file for `name` (`ns:local` or plain) with extension `ext` under `section` in the highest
 /// layer holding one, using the same whose-name-is-whose rule as textures.
 pub fn find_file(dirs: &[KindDir], name: &str, ext: &str) -> Option<(usize, PathBuf)> {
+    dirs.iter().enumerate().rev().find_map(|(i, kd)| file_in(kd, name, ext).map(|p| (i, p)))
+}
+
+/// The file for `name` in this one layer, if it has it (same rule as [`find_file`]).
+pub fn file_in(kd: &KindDir, name: &str, ext: &str) -> Option<PathBuf> {
     let (ns, local) = crate::overlay::split_name(name);
     let file = format!("{local}.{ext}");
-    dirs.iter().enumerate().rev().find_map(|(i, kd)| {
-        let path = if kd.ns == ns {
-            kd.dir.join(&file)
-        } else if !kd.extends {
-            return None;
-        } else {
-            kd.dir.join(ns).join(&file)
-        };
-        path.is_file().then_some((i, path))
-    })
+    let path = if kd.ns == ns {
+        kd.dir.join(&file)
+    } else if !kd.extends {
+        return None;
+    } else {
+        kd.dir.join(ns).join(&file)
+    };
+    path.is_file().then_some(path)
 }
 
 /// A note for a mod that still keeps art in the old place: textures, models and sounds now

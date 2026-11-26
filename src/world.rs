@@ -938,6 +938,9 @@ pub fn compile_content(
 /// and tables resources and records its textures in the report. The one place
 /// content is installed, at startup and again when a world brings its own mods.
 pub fn install_content(commands: &mut Commands, content: Content, texture_report: &mut TextureReport) {
+    for note in &content.model_notes {
+        warn!("Resource pack model skipped: {note}");
+    }
     texture_report.extend(content.texture_status);
     texture_report.set_missing(content.missing_textures);
     commands.insert_resource(content.registry);
