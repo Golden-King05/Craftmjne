@@ -3551,3 +3551,33 @@ etc.) instead of inventing a new approach:
   - Not done: family/couple/profession ZWJ sequences, most objects and people emoji, Devanagari digits, the special
     क्ष/ज्ञ ligature shapes, stackable conjuncts for stemless consonants, Arabic `calt` variants.
 
+
+- **"Every single emoji covered" is a different promise from "every emoji drawn", and the
+  honest version is measured.** `src/emoji/data/standard.txt` (the fully-qualified rows of the
+  official `emoji-test.txt`, `group|code points|name`) is the checklist; the test
+  `every_standard_emoji_shows_as_one_real_glyph` shapes each row with rustybuzz and demands one
+  visible glyph and no `.notdef`. Measured before this work: 760 of 3,963 passed. Now all do,
+  but 2,171 are *labelled tiles* (`Emoji::placeholder`), not art - say so, don't call them
+  drawn. `standard::all` decides per entry, in this order: recolour an existing picture (skin
+  tone), draw a person scene by rule, put a badge on a drawn emoji, else a labelled tile.
+  Facts that mattered:
+  - **Processing order is part of the algorithm.** Untoned singles, untoned sequences, toned
+    singles, toned sequences - a toned variant recolours the untoned art, a profession needs its
+    prop's art, so those must already be in `known`. Glyph code points (`BASE + index`) are
+    assigned in *list* order afterwards so they stay stable.
+  - **The fully-qualified list omits the component emoji** (hair colours U+1F9B0-3), so the
+    `man: red hair` rows silently had no ligature (a missing component glyph makes `font_gen`
+    skip the ligature). The test caught it (72 failures); the four components are generated
+    explicitly. Check "component" rows whenever a sequence fails to shape.
+  - **A single code point never becomes a ligature** (needs 2+ components): a one-char row is a
+    plain `cmap` entry, and `U+FE0F` after it is the existing zero-advance joiner glyph.
+  - **Thousands of ligatures overflow a GSUB subtable.** Offsets are 16-bit, so
+    `font_gen::gsub_table` now splits a ligature lookup into subtables of ~20 KB, keeping each
+    starting glyph's whole set (longest first) in one subtable.
+  - **The labels use a local 3x5 capital font**, because the pixel font's letters are 6 wide and two
+    do not fit in a 12-pixel tile.
+  - **Placeholders are listed, not hidden**: `/emoji-report` (also `/emojireport`) prints the counts
+    and the first 30 names, in the same colours as `/texture-report`.
+  - Not verified: the people sprites were only looked at in a software-rendered contact sheet
+    (`CRAFT_EMOJI_SHEET=<png> CRAFT_EMOJI_CROP=<0..1> cargo test --lib emoji::tests::sheet`).
+    They are small and plain; treat them as a first pass.

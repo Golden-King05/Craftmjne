@@ -445,31 +445,56 @@ fn gsub_table(subs: &[Substitution], ligs: &[Ligature], gid_of: &BTreeMap<u32, u
                     }
                     set_bytes.push(sb);
                 }
-                let n = firsts.len();
-                let sub_header = 6 + 2 * n;
-                let mut sub = Vec::new();
-                be16(&mut sub, 1); // substFormat 1
-                let sets_total: usize = set_bytes.iter().map(|b| b.len()).sum();
-                be16(&mut sub, (sub_header + sets_total) as i32); // coverage offset
-                be16(&mut sub, n as i32);
-                let mut o = sub_header;
-                for sb in &set_bytes {
-                    be16(&mut sub, o as i32);
-                    o += sb.len();
+                // A subtable's offsets are 16-bit, so a big lookup is split into several subtables
+                // (each start glyph's whole set stays in one, keeping longest-first order).
+                const SUBTABLE_LIMIT: usize = 20_000;
+                let mut groups: Vec<Vec<usize>> = vec![Vec::new()];
+                let mut size = 0;
+                for (i, sb) in set_bytes.iter().enumerate() {
+                    if size + sb.len() > SUBTABLE_LIMIT && !groups.last().unwrap().is_empty() {
+                        groups.push(Vec::new());
+                        size = 0;
+                    }
+                    groups.last_mut().unwrap().push(i);
+                    size += sb.len();
                 }
-                for sb in &set_bytes {
-                    sub.extend_from_slice(sb);
-                }
-                be16(&mut sub, 1); // coverage format 1
-                be16(&mut sub, n as i32);
-                for f in &firsts {
-                    be16(&mut sub, *f as i32);
+                let mut subs: Vec<Vec<u8>> = Vec::new();
+                for g in &groups {
+                    let n = g.len();
+                    let sub_header = 6 + 2 * n;
+                    let mut sub = Vec::new();
+                    be16(&mut sub, 1); // substFormat 1
+                    let sets_total: usize = g.iter().map(|&i| set_bytes[i].len()).sum();
+                    be16(&mut sub, (sub_header + sets_total) as i32); // coverage offset
+                    be16(&mut sub, n as i32);
+                    let mut o = sub_header;
+                    for &i in g {
+                        be16(&mut sub, o as i32);
+                        o += set_bytes[i].len();
+                    }
+                    for &i in g {
+                        sub.extend_from_slice(&set_bytes[i]);
+                    }
+                    be16(&mut sub, 1); // coverage format 1
+                    be16(&mut sub, n as i32);
+                    for &i in g {
+                        be16(&mut sub, firsts[i] as i32);
+                    }
+                    assert!(sub.len() < 0xFFFF, "a ligature subtable is too big for 16-bit offsets");
+                    subs.push(sub);
                 }
                 be16(&mut t, 4); // lookupType: ligature substitution
                 be16(&mut t, 0);
-                be16(&mut t, 1);
-                be16(&mut t, 8);
-                t.extend(sub);
+                be16(&mut t, subs.len() as i32);
+                let mut off = 6 + 2 * subs.len();
+                for sub in &subs {
+                    assert!(off <= 0xFFFF, "a ligature lookup is too big for 16-bit offsets");
+                    be16(&mut t, off as i32);
+                    off += sub.len();
+                }
+                for sub in subs {
+                    t.extend(sub);
+                }
             }
         }
         lookup_tables.push(t);

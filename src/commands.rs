@@ -2,7 +2,7 @@
 //!
 //! Commands live in [`CommandRegistry`], the same "central extension point"
 //! shape `blocks.rs`'s `BlockRegistry` already established: `with_defaults`
-//! registers the built-ins below (`/mode` and `/texture-report`), and a
+//! registers the built-ins below (`/mode`, `/texture-report` and `/emoji-report`), and a
 //! plugin can `.register()` more of its own before the game starts, the same
 //! way a mod adds a block via `BlockRegistry::register`. There is no
 //! "built-in vs modded" distinction once startup finishes - both go through
@@ -87,6 +87,29 @@ fn texture_report_message(report: &TextureReport) -> String {
     }
     if !missing_names.is_empty() {
         lines.push(colorize(&format!("Completely broken: {}", missing_names.join(", ")), "ff0000"));
+    }
+    lines.join("\n")
+}
+
+/// How many placeholder names `/emoji-report` lists before saying "and N more" (the chat is not a file).
+const EMOJI_REPORT_NAMES: usize = 30;
+
+/// Builds `/emoji-report`'s message: how the standard emoji list is covered, and the first few
+/// that are still labelled tiles rather than pictures.
+fn emoji_report_message(s: &crate::emoji::standard::Summary) -> String {
+    let n = s.placeholder_count();
+    let mut lines = vec![format!(
+        "Emoji: {} in the standard  {}  {}  {}",
+        s.total,
+        colorize(&format!("{} drawn or made by rule", s.existing + s.generated), "00ff00"),
+        colorize(&format!("{n} labelled tiles"), "ffff00"),
+        colorize("0 missing", "ff0000"),
+    )];
+    if n > 0 {
+        let shown: Vec<&str> = s.placeholders.iter().take(EMOJI_REPORT_NAMES).map(String::as_str).collect();
+        let more = n.saturating_sub(EMOJI_REPORT_NAMES);
+        let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
+        lines.push(colorize(&format!("Tiles to replace with art: {}{tail}", shown.join(", ")), "ffff00"));
     }
     lines.join("\n")
 }
@@ -462,6 +485,15 @@ impl CommandRegistry {
             )
             .alias("texturereport"),
         );
+        reg.register(
+            CommandSpec::new(
+                "emoji-report",
+                "/emoji-report",
+                "Report how many standard emoji are pictures and how many are still labelled tiles.",
+                |_args, _ctx| CommandOutcome::Ok(emoji_report_message(&crate::emoji::coverage())),
+            )
+            .alias("emojireport"),
+        );
         let entities = EntityRegistry::with_defaults();
         let for_candidates = entities.ids();
         reg.register(
@@ -811,8 +843,24 @@ mod tests {
         let names: Vec<String> = registry.suggestions("").into_iter().map(|s| s.text).collect();
         assert_eq!(
             names,
-            vec!["blockstate", "bs", "clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
+            vec!["blockstate", "bs", "clearentities", "emoji-report", "emojireport", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
         );
+    }
+
+    #[test]
+    fn emoji_report_counts_pictures_and_tiles_and_caps_the_list() {
+        let s = crate::emoji::standard::Summary {
+            total: 100,
+            existing: 40,
+            generated: 10,
+            placeholders: (0..50).map(|i| format!("thing {i}")).collect(),
+        };
+        let msg = emoji_report_message(&s);
+        assert!(msg.contains("100 in the standard"));
+        assert!(msg.contains("50 drawn or made by rule"));
+        assert!(msg.contains("50 labelled tiles"));
+        assert!(msg.contains("thing 29") && !msg.contains("thing 30"));
+        assert!(msg.contains("and 20 more"));
     }
 
     #[test]

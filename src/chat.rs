@@ -682,7 +682,7 @@ mod tests {
         let names: Vec<String> = command_suggestions("/", &registry).into_iter().map(|s| s.text).collect();
         assert_eq!(
             names,
-            vec!["blockstate", "bs", "clearentities", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
+            vec!["blockstate", "bs", "clearentities", "emoji-report", "emojireport", "gamemode", "locate", "mode", "summon", "texture-report", "texturereport"]
         );
     }
 

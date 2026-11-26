@@ -18,6 +18,7 @@ mod drawn;
 mod faces;
 mod flags;
 mod sequences;
+pub mod standard;
 mod generated;
 
 pub const SIZE: usize = 12;
@@ -168,14 +169,16 @@ pub struct Emoji {
     pub grid: Grid,
     /// Character sequences that a ligature turns into this glyph (flags, keycaps, toned people ...).
     pub sequences: Vec<Vec<char>>,
+    /// A labelled tile standing in for art that has not been drawn (see `standard.rs`).
+    pub placeholder: bool,
 }
 
 pub(crate) fn emoji(name: &str, chars: &str, grid: Grid) -> Emoji {
-    Emoji { name: name.to_string(), chars: chars.chars().collect(), grid, sequences: Vec::new() }
+    Emoji { name: name.to_string(), chars: chars.chars().collect(), grid, sequences: Vec::new(), placeholder: false }
 }
 
-/// Every emoji, drawn, composed and generated.
-pub fn all() -> Vec<Emoji> {
+/// The hand-drawn and rule-made emoji, before the standard list is completed.
+fn base() -> Vec<Emoji> {
     let mut out = Vec::new();
     out.extend(faces::all());
     out.extend(drawn::all());
@@ -183,7 +186,11 @@ pub fn all() -> Vec<Emoji> {
     out.extend(flags::all());
     let so_far = out.clone();
     out.extend(sequences::all(&so_far));
-    // The first drawing of a character wins; a name is unique.
+    dedup(out)
+}
+
+/// The first drawing of a character wins; a name is unique.
+fn dedup(mut out: Vec<Emoji>) -> Vec<Emoji> {
     let mut seen_chars = std::collections::HashSet::new();
     let mut seen_names = std::collections::HashSet::new();
     out.retain_mut(|e| {
@@ -191,6 +198,18 @@ pub fn all() -> Vec<Emoji> {
         !e.chars.is_empty() && seen_names.insert(e.name.clone())
     });
     out
+}
+
+/// Every emoji of the Unicode list, drawn, composed, generated or labelled.
+pub fn all() -> Vec<Emoji> {
+    let mut out = base();
+    out.extend(standard::all(&out).0);
+    dedup(out)
+}
+
+/// How the standard emoji list is covered (for `/emoji-report`).
+pub fn coverage() -> standard::Summary {
+    standard::all(&base()).1
 }
 
 /// The characters that take no room: variation selectors and the zero-width joiner.
@@ -343,7 +362,7 @@ mod tests {
     #[test]
     fn every_flag_is_in_the_set_and_shows_through_a_ligature() {
         let set = all();
-        let flags: Vec<_> = set.iter().filter(|e| e.name.starts_with("flag_")).collect();
+        let flags: Vec<_> = set.iter().filter(|e| e.name.starts_with("flag_") && e.chars[0] as u32 >= 0xF0000).collect();
         assert!(flags.len() >= 258 + 4, "only {} flags", flags.len());
         for e in &flags {
             assert!(!e.sequences.is_empty(), "{} has no sequence", e.name);
@@ -388,6 +407,32 @@ mod tests {
         buf.push_str(text);
         let out = rustybuzz::shape(&face, &[], buf);
         out.glyph_infos().iter().map(|i| i.glyph_id).collect()
+    }
+
+    #[test]
+    fn every_standard_emoji_shows_as_one_real_glyph() {
+        let font = crate::fonts::emoji_font_bytes();
+        let face = rustybuzz::Face::from_slice(&font, 0).unwrap();
+        let mut failures = Vec::new();
+        for e in standard::entries() {
+            let text: String = e.cps.iter().collect();
+            let mut buf = rustybuzz::UnicodeBuffer::new();
+            buf.push_str(&text);
+            let out = rustybuzz::shape(&face, &[], buf);
+            let visible = out.glyph_infos().iter().zip(out.glyph_positions()).filter(|(_, p)| p.x_advance != 0).count();
+            let notdef = out.glyph_infos().iter().any(|i| i.glyph_id == 0);
+            if visible != 1 || notdef {
+                failures.push(format!("{} ({:X?})", e.name, e.cps));
+            }
+        }
+        assert!(failures.is_empty(), "{} emoji do not show as one glyph, e.g. {:?}", failures.len(), &failures[..failures.len().min(8)]);
+    }
+
+    #[test]
+    fn the_coverage_summary_adds_up() {
+        let s = coverage();
+        eprintln!("emoji: {} total, {} existing, {} generated, {} placeholders", s.total, s.existing, s.generated, s.placeholder_count());
+        assert_eq!(s.existing + s.generated + s.placeholder_count(), s.total);
     }
 
     #[test]
@@ -455,7 +500,14 @@ mod tests {
     fn sheet() {
         let (w, h, px) = contact_sheet(6, 20);
         if let Ok(path) = std::env::var("CRAFT_EMOJI_SHEET") {
-            image::RgbaImage::from_raw(w, h, px).unwrap().save(path).unwrap();
+            let img = image::RgbaImage::from_raw(w, h, px).unwrap();
+            img.save(&path).unwrap();
+            // CRAFT_EMOJI_CROP=<fraction>: also save a 900px-tall band starting that far down.
+            if let Ok(f) = std::env::var("CRAFT_EMOJI_CROP") {
+                let top = (h as f32 * f.parse::<f32>().unwrap_or(0.0)) as u32;
+                let band = image::imageops::crop_imm(&img, 0, top.min(h - 1), w, 900.min(h - top.min(h - 1))).to_image();
+                band.save(format!("{path}.crop.png")).unwrap();
+            }
         }
     }
 }
