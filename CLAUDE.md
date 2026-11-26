@@ -3859,3 +3859,20 @@ etc.) instead of inventing a new approach:
   shown once when equal (Spanish in Spanish). It uses the catalog directly rather than `tr`, so the settings tests
   can check both directions without touching the process-wide language. A mod's new language with no `lang.name.*`
   entries just shows its own name. 12 keys x 9 languages were added; es-MX and pt-PT inherit theirs.
+- **Dialects are files that inherit, and the structure was a decision, not an accident.** zh-Hans is the full Mandarin
+  Simplified text; zh-Hant is `s2t` (characters only, mainland words) of it - the *old* zh-Hant (OpenCC `s2twp`, Taiwan
+  words) became zh-Hant-TW, stored as only the ~66 strings that differ from the generic one, and zh-Hans-TW is `t2s` of
+  that, again only the ~58 differences. Singaporean is two empty files with a `fallback` (nothing in this game's text to
+  differ; said so in the README rather than inventing differences). Cantonese (`yue-Hant`, fallback zh-Hant) is a full file:
+  77 sentences written in Cantonese by hand, every other string the Taiwan wording with Hong Kong words swapped in
+  (`資料夾`->`檔案夾`, ...); `yue-Hans` is `t2s` of it. The assembler (`/tmp` scratch, not committed) did this with OpenCC
+  and fails on any placeholder mismatch; regenerating means re-running a script, not editing 20 files by hand.
+  - **English got a group of its own, which meant `en` is "English (United States)".** `Catalog::build`'s built-in English
+    entry is named that (a file `_meta` can't rename a language that already has a name, so the default had to change
+    rather than `en.json`'s meta). English dialects count 100% by definition (`percent` special-cases `en`/`en-*`) because
+    nothing is left to translate; the other dialects count what they inherit.
+  - **A language's name changes meaning when a group appears**: `lang.name.zh-Hant` went from "Chinese (Traditional)" to
+    "Mandarin Chinese (Traditional)", and `lang.name.en` and the Chinese entries were re-translated in all nine languages.
+    Existing saved codes (`zh-Hant`, `zh-Hans`) still work, but `zh-Hant` now means the generic Mandarin text, not Taiwan's -
+    the integration test that expected `設定` from `zh-Hant` had to move to `zh-Hant-TW`.
+  - Plural rules treat `yue` like `zh` (no plural).

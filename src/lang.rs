@@ -117,7 +117,7 @@ impl Catalog {
         let mut langs: BTreeMap<String, Language> = BTreeMap::new();
         langs.insert(
             ENGLISH.into(),
-            Language { code: ENGLISH.into(), name: "English".into(), group: "English".into(), fallback: None, cjk: None, strings: HashMap::new() },
+            Language { code: ENGLISH.into(), name: "English (United States)".into(), group: "English".into(), fallback: None, cjk: None, strings: HashMap::new() },
         );
         for f in files {
             let lang = langs.entry(f.code.clone()).or_insert_with(|| Language {
@@ -160,7 +160,8 @@ impl Catalog {
     /// How much of the game `code` covers, as a whole percent (rounded down, so 99.9% never reads 100).
     pub fn percent(&self, code: &str) -> u8 {
         let keys = self.english_keys();
-        if code == ENGLISH || keys.is_empty() {
+        // English and its dialects (`en-GB`...) are the reference text itself: nothing is left to translate.
+        if code == ENGLISH || code.starts_with("en-") || keys.is_empty() {
             return 100;
         }
         if !self.langs.contains_key(code) {
@@ -220,7 +221,7 @@ pub fn plural_category(code: &str, n: i64) -> &'static str {
     let base = code.split('-').next().unwrap_or(code);
     let one = match base {
         // No plural forms.
-        "zh" | "ja" | "ko" | "vi" | "th" | "id" => false,
+        "zh" | "yue" | "ja" | "ko" | "vi" | "th" | "id" => false,
         // 0 and 1 are singular; Portugal's Portuguese only 1.
         "fr" | "hi" => (0..=1).contains(&n),
         "pt" => if code == "pt-PT" { n == 1 } else { (0..=1).contains(&n) },
@@ -537,6 +538,7 @@ mod tests {
         assert_eq!(plural_category("pt-PT", 0), "other", "Portugal: only 1");
         assert_eq!(plural_category("hi", 0), "one");
         assert_eq!(plural_category("zh-Hant", 1), "other", "Chinese has no plural");
+        assert_eq!(plural_category("yue-Hant", 1), "other", "nor does Cantonese");
     }
 
     #[test]
@@ -632,7 +634,10 @@ mod tests {
         load_catalog(Path::new(FOLDER), Path::new("no-mods-here"))
     }
 
-    const EXPECTED: &[&str] = &["en", "es-ES", "es-MX", "pt-PT", "pt-BR", "fr-FR", "hi", "zh-Hant", "zh-Hans"];
+    const EXPECTED: &[&str] = &[
+        "en", "en-GB", "en-NZ", "en-IN", "en-ZA", "es-ES", "es-MX", "es-PR", "pt-PT", "pt-BR", "fr-FR", "hi", "zh-Hans", "zh-Hant", "zh-Hans-TW", "zh-Hant-TW",
+        "zh-Hans-SG", "zh-Hant-SG", "yue-Hant", "yue-Hans",
+    ];
 
     #[test]
     fn the_shipped_languages_all_load_cleanly_with_names_and_no_stray_keys() {
@@ -647,11 +652,50 @@ mod tests {
                 assert!(english.contains(k.as_str()), "{code} has {k:?}, which English doesn't");
             }
         }
-        for (code, fallback) in [("es-MX", "es-ES"), ("pt-PT", "pt-BR")] {
+        for (code, fallback) in [
+            ("es-MX", "es-ES"), ("es-PR", "es-MX"), ("pt-PT", "pt-BR"), ("zh-Hant-TW", "zh-Hant"), ("zh-Hans-TW", "zh-Hans"), ("zh-Hant-SG", "zh-Hant"),
+            ("zh-Hans-SG", "zh-Hans"), ("yue-Hant", "zh-Hant"), ("yue-Hans", "zh-Hans"),
+        ] {
             assert_eq!(c.language(code).unwrap().fallback.as_deref(), Some(fallback));
         }
-        assert_eq!(c.language("zh-Hant").unwrap().cjk.as_deref(), Some("zh-Hant"));
-        assert_eq!(c.language("zh-Hans").unwrap().cjk.as_deref(), Some("zh-Hans"));
+        // Every Chinese language draws the ideograph set its script asks for.
+        for code in EXPECTED.iter().filter(|c| c.starts_with("zh") || c.starts_with("yue")) {
+            let want = if code.contains("Hant") { "zh-Hant" } else { "zh-Hans" };
+            assert_eq!(c.language(code).unwrap().cjk.as_deref(), Some(want), "{code}");
+        }
+        // The groups the picker shows: English dialects together, Mandarin together, Cantonese on its own.
+        let groups = c.groups();
+        let members = |g: &str| groups.iter().find(|x| x.name == g).unwrap().members.clone();
+        assert_eq!(members("English").len(), 5);
+        assert_eq!(members("Español").len(), 3);
+        assert_eq!(members("中文 (普通话)").len(), 6);
+        assert_eq!(members("粵語 (廣東話)"), vec!["yue-Hans".to_string(), "yue-Hant".to_string()]);
+    }
+
+    #[test]
+    fn the_dialects_differ_where_their_speakers_would_and_inherit_the_rest() {
+        let (c, _) = shipped();
+        // Mandarin: mainland vocabulary in either script, Taiwan's own words in the Taiwanese variants.
+        assert_eq!(c.lookup("zh-Hans", "Settings"), Some("设置"));
+        assert_eq!(c.lookup("zh-Hant", "Settings"), Some("設置"), "traditional characters, mainland word");
+        assert_eq!(c.lookup("zh-Hant-TW", "Settings"), Some("設定"));
+        assert_eq!(c.lookup("zh-Hans-TW", "Settings"), Some("设定"), "Taiwan's word in simplified characters");
+        assert_eq!(c.lookup("zh-Hant-SG", "Settings"), Some("設置"), "inherited");
+        // The Taiwanese files hold only what differs.
+        assert!(c.language("zh-Hant-TW").unwrap().strings.len() < 100);
+        // Cantonese is written as Cantonese, not Mandarin in other characters.
+        assert_eq!(c.lookup("zh-Hant", "You died!"), Some("你死了！"));
+        assert_eq!(c.lookup("yue-Hant", "You died!"), Some("你死咗！"));
+        assert_eq!(c.lookup("yue-Hans", "You died!"), Some("你死咗！"), "same words, simplified characters");
+        assert_eq!(c.lookup("yue-Hans", "Settings"), Some("设定"));
+        // Puerto Rican Spanish: its own words, then Mexico's, then Spain's.
+        assert_eq!(c.lookup("es-PR", "Done"), Some("Listo"));
+        assert_eq!(c.lookup("es-PR", "Settings"), Some("Configuración"), "from Mexican Spanish");
+        assert_eq!(c.lookup("es-PR", "Worlds"), Some("Mundos"), "from Spain's");
+        // English dialects: the reference text, with their few differences.
+        assert_eq!(c.lookup("en-GB", "rarity.trash"), Some("Rubbish"));
+        assert_eq!(c.lookup("en-IN", "rarity.trash"), Some("Trash"));
+        assert_eq!(c.percent("en-NZ"), 100);
     }
 
     #[test]
@@ -679,8 +723,11 @@ mod tests {
     /// The percentages the game ships at. Everything shipped is fully translated; when strings are added to
     /// English and not yet translated (the translations are done when asked for), lower the affected entries
     /// here on purpose - the test then keeps them from slipping further.
-    const SHIPPED_PERCENT: &[(&str, u8)] =
-        &[("en", 100), ("es-ES", 100), ("es-MX", 100), ("pt-PT", 100), ("pt-BR", 100), ("fr-FR", 100), ("hi", 100), ("zh-Hant", 100), ("zh-Hans", 100)];
+    const SHIPPED_PERCENT: &[(&str, u8)] = &[
+        ("en", 100), ("en-GB", 100), ("en-NZ", 100), ("en-IN", 100), ("en-ZA", 100), ("es-ES", 100), ("es-MX", 100), ("es-PR", 100), ("pt-PT", 100),
+        ("pt-BR", 100), ("fr-FR", 100), ("hi", 100), ("zh-Hans", 100), ("zh-Hant", 100), ("zh-Hans-TW", 100), ("zh-Hant-TW", 100), ("zh-Hans-SG", 100),
+        ("zh-Hant-SG", 100), ("yue-Hant", 100), ("yue-Hans", 100),
+    ];
 
     #[test]
     fn the_shipped_languages_are_as_translated_as_they_claim() {

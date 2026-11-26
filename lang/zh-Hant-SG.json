@@ -1,0 +1,8 @@
+{
+ "_meta": {
+  "name": "繁體中文（新加坡）",
+  "group": "中文 (普通话)",
+  "fallback": "zh-Hant",
+  "cjk": "zh-Hant"
+ }
+}

@@ -1,0 +1,11 @@
+{
+ "_meta": {
+  "name": "Español (Puerto Rico)",
+  "group": "Español",
+  "fallback": "es-MX"
+ },
+ "Done": "Listo",
+ "Paused": "Pausa",
+ "Resume": "Seguir",
+ "Respawn": "Revivir"
+}

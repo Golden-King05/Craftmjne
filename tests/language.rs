@@ -70,11 +70,27 @@ fn the_saved_language_is_what_the_game_speaks_and_switching_follows_through() {
     // Chinese: the variant picks the ideograph set the font draws.
     {
         let mut languages = app.world_mut().resource_mut::<Languages>();
-        assert!(languages.select("zh-Hant"));
+        assert!(languages.select("zh-Hant-TW"));
     }
     app.update();
-    assert_eq!(lang::tr("Settings"), "設定");
+    assert_eq!(lang::tr("Settings"), "設定", "Taiwan's word");
     assert_eq!(app.world().resource::<craftmjne::cjk::CjkStyle>().0, craftmjne::cjk::Style::TraditionalChinese);
+    app.world_mut().resource_mut::<Languages>().select("zh-Hant");
+    app.update();
+    assert_eq!(lang::tr("Settings"), "設置", "traditional characters, the mainland word");
+    // Cantonese is its own language, written as it is spoken, and also draws traditional characters.
+    app.world_mut().resource_mut::<Languages>().select("yue-Hant");
+    app.update();
+    assert_eq!(lang::tr("You died!"), "你死咗！");
+    assert_eq!(app.world().resource::<craftmjne::cjk::CjkStyle>().0, craftmjne::cjk::Style::TraditionalChinese);
+    app.world_mut().resource_mut::<Languages>().select("yue-Hans");
+    app.update();
+    assert_eq!(lang::tr("You died!"), "你死咗！");
+    assert_eq!(app.world().resource::<craftmjne::cjk::CjkStyle>().0, craftmjne::cjk::Style::Chinese);
+    app.world_mut().resource_mut::<Languages>().select("es-PR");
+    app.update();
+    assert_eq!(lang::tr("Done"), "Listo");
+    assert_eq!(lang::tr("Settings"), "Configuración");
     app.world_mut().resource_mut::<Languages>().select("zh-Hans");
     app.update();
     assert_eq!(lang::tr("Settings"), "设置");

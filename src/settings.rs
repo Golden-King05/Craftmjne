@@ -978,7 +978,7 @@ mod tests {
         s.app.update();
         s.app.update();
         let texts = s.texts();
-        assert!(texts.iter().any(|t| t == "English  -  100%"), "English is listed directly: {texts:?}");
+        assert!(texts.iter().any(|t| t == "English (United States)  -  100%"), "English is listed directly: {texts:?}");
         assert!(texts.iter().any(|t| t == "Hindi  -  50%"), "a lone language shows its own percentage");
         assert!(texts.iter().any(|t| t == "> Español"), "variants sit under one heading");
         assert!(!texts.iter().any(|t| t.starts_with("Español (")), "collapsed: the variants are not listed yet");
@@ -1002,19 +1002,19 @@ mod tests {
     fn each_language_is_listed_in_its_own_name_and_in_the_one_in_use() {
         let files = |code: &str, json: &str| crate::lang::parse_file(code, json).unwrap().0;
         let catalog = crate::lang::Catalog::build(vec![
-            files("en", r#"{"lang.name.en": "English", "lang.name.es-ES": "Spanish (Spain)", "lang.group.Español": "Spanish"}"#),
-            files("es-ES", r#"{"_meta": {"name": "Español (España)", "group": "Español"}, "lang.name.en": "Inglés", "lang.name.es-ES": "Español (España)", "lang.group.Español": "Español"}"#),
+            files("en", r#"{"lang.name.en": "English (United States)", "lang.name.es-ES": "Spanish (Spain)", "lang.group.Español": "Spanish"}"#),
+            files("es-ES", r#"{"_meta": {"name": "Español (España)", "group": "Español"}, "lang.name.en": "Inglés (Estados Unidos)", "lang.name.es-ES": "Español (España)", "lang.group.Español": "Español"}"#),
             files("tlh", r#"{"_meta": {"name": "tlhIngan Hol"}}"#),
         ]);
         let mut languages = crate::lang::Languages { catalog: std::sync::Arc::new(catalog), ..Default::default() };
         // English in use: native name, then English's name for it.
         assert_eq!(languages.display_name("es-ES"), "Español (España) / Spanish (Spain)");
         assert_eq!(languages.display_group("Español"), "Español / Spanish");
-        assert_eq!(languages.display_name("en"), "English", "the same in both: shown once");
+        assert_eq!(languages.display_name("en"), "English (United States)", "the same in both: shown once");
         assert_eq!(languages.display_name("tlh"), "tlhIngan Hol", "a language nobody has named is just its own name");
         // Spanish in use: English keeps its own name first, then Spanish's word for it.
         languages.select("es-ES");
-        assert_eq!(languages.display_name("en"), "English / Inglés");
+        assert_eq!(languages.display_name("en"), "English (United States) / Inglés (Estados Unidos)");
         assert_eq!(languages.display_name("es-ES"), "Español (España)", "Spanish in Spanish: once");
         assert_eq!(languages.display_group("Español"), "Español");
     }

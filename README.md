@@ -1101,9 +1101,11 @@ emergency save, and a crash between a world's creation and its first snapshot
 
 ## Translations
 
-Settings > **Language** picks the language. Shipped: English, Español (España), Español (México), Português
-(Portugal), Português (Brasil), Français (France), हिन्दी, 繁體中文 (台灣) and 简体中文 (中国). Languages with regional
-variants are one heading in the list (Español, Português, 中文) that opens to show its variants; each language
+Settings > **Language** picks the language. Shipped: **English** (United States, United Kingdom, New Zealand, India,
+South Africa), **Español** (España, México, Puerto Rico), **Português** (Portugal, Brasil), **Français** (France),
+**हिन्दी**, **中文 (普通话)** (Mandarin: Simplified and Traditional, plus Taiwanese and Singaporean variants of each) and
+**粵語 (廣東話)** (Cantonese: Traditional and Simplified). Languages with regional variants are one heading in the list
+that opens to show its variants; each language
 shows **how much of the game is translated**, as a percentage, and is named twice: in its own language and in the
 one you're using (`Español (España) / Spanish (Spain)` while English is chosen; just once when they're the same). Those
 names are keys too - `lang.name.<code>` and `lang.group.<group>` - so a mod adding a language adds its name in each
@@ -1146,6 +1148,17 @@ syntax (`key:a`), and the launcher (a separate program). A translation of *your 
 * Ship `lang/en.json` with your own keys so the percentages count them. Mods load after the game, in folder-name
   order, each overriding what came before; the game's names for a language can't be changed by a mod.
 * Files are read from the installed mods folder when the game starts and whenever the Language tab opens.
+
+How the variants are made, honestly: a variant is a small file that `fallback`s to its parent and holds only what
+differs. **Mexican and Puerto Rican Spanish** differ in vocabulary (the Puerto Rican file is only a handful of words).
+**Taiwanese Mandarin** differs from the generic Mandarin in ~60 strings (設定 vs 設置, 資料夾 vs 文件夾...), in either
+script. **Cantonese** is written as it is spoken (你死咗！, 冇, 嘅, 喺) for the sentences and uses Hong Kong terms for the
+labels; its Simplified file is the same words in simplified characters. **Singaporean Mandarin** is listed and
+inherits from the generic Mandarin because this game's text has nothing a Singaporean would say differently - add
+strings to `zh-Hans-SG.json` / `zh-Hant-SG.json` and they win. The **English dialects** are the reference text with
+the few differences this game's text has (`Trash` is `Rubbish` in the UK, New Zealand and South Africa); spelling
+differences between English dialects hardly come up in this game's wording. English dialects always show 100%: they
+are the reference text.
 
 Notes on the translations themselves: they were written for this project, not by native-speaking reviewers - treat
 them as a solid first pass and correct them freely (they are plain JSON). Hindi is drawn with the game's own

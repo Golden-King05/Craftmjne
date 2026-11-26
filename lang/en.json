@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "name": "English",
+  "name": "English (United States)",
   "group": "English"
  },
  "Worlds": "Worlds",
@@ -309,16 +309,29 @@
  "rarity.trash": "Trash",
  " or ": " or ",
  "build  -  explore  -  survive": "build  -  explore  -  survive",
- "lang.name.en": "English",
+ "lang.name.en": "English (United States)",
  "lang.name.es-ES": "Spanish (Spain)",
  "lang.name.es-MX": "Spanish (Mexico)",
  "lang.name.pt-PT": "Portuguese (Portugal)",
  "lang.name.pt-BR": "Portuguese (Brazil)",
  "lang.name.fr-FR": "French (France)",
  "lang.name.hi": "Hindi",
- "lang.name.zh-Hant": "Chinese (Traditional)",
- "lang.name.zh-Hans": "Chinese (Simplified)",
+ "lang.name.zh-Hant": "Mandarin Chinese (Traditional)",
+ "lang.name.zh-Hans": "Mandarin Chinese (Simplified)",
  "lang.group.Español": "Spanish",
  "lang.group.Português": "Portuguese",
- "lang.group.中文 (普通话)": "Chinese (Mandarin)"
+ "lang.group.中文 (普通话)": "Chinese (Mandarin)",
+ "lang.name.es-PR": "Spanish (Puerto Rico)",
+ "lang.name.en-GB": "English (United Kingdom)",
+ "lang.name.en-NZ": "English (New Zealand)",
+ "lang.name.en-IN": "English (India)",
+ "lang.name.en-ZA": "English (South Africa)",
+ "lang.name.zh-Hant-TW": "Taiwanese Mandarin Chinese (Traditional)",
+ "lang.name.zh-Hans-TW": "Taiwanese Mandarin Chinese (Simplified)",
+ "lang.name.zh-Hant-SG": "Singaporean Mandarin Chinese (Traditional)",
+ "lang.name.zh-Hans-SG": "Singaporean Mandarin Chinese (Simplified)",
+ "lang.name.yue-Hant": "Cantonese Chinese (Traditional)",
+ "lang.name.yue-Hans": "Cantonese Chinese (Simplified)",
+ "lang.group.English": "English",
+ "lang.group.粵語 (廣東話)": "Cantonese Chinese"
 }
