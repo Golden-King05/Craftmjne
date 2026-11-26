@@ -315,8 +315,8 @@ mod tests {
             assert!(!rects.is_empty(), "{:?} is blank", g.chars);
             for r in rects {
                 assert!(r.y0 >= 0 && r.y1 <= crate::font_gen::EM_ROWS, "{:?} leaves the cell: {r:?}", g.chars);
-                // Devanagari marks sit over the letter before them, so they reach left of their own origin.
-                let reach_left = if ('\u{900}'..='\u{97F}').contains(&g.chars[0]) { -6 } else { 0 };
+                // Hebrew, Arabic and Devanagari marks sit over the letter before them, so they reach left of their own origin.
+                let reach_left = if ('\u{590}'..='\u{6FF}').contains(&g.chars[0]) || ('\u{900}'..='\u{97F}').contains(&g.chars[0]) || ('\u{E900}'..='\u{E9FF}').contains(&g.chars[0]) { -6 } else { 0 };
                 assert!(r.x0 >= reach_left && r.x1 <= g.advance, "{:?} is wider than its advance: {r:?}", g.chars);
             }
         }
