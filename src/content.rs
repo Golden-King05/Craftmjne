@@ -9,6 +9,7 @@
 //! a mod overlays them.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::atlas::{build_atlas_in, default_painters, normalize_tint_mask_tile, AtlasData, TextureStatus};
@@ -18,6 +19,7 @@ use crate::icons::{build_icon_atlas, IconAtlasData};
 use crate::item_registry::ItemRegistry;
 use crate::mods::ModSource;
 use crate::overlay::{KindDir, Locals};
+use crate::packs::PackStack;
 use crate::tools::TierBook;
 
 /// Where to read content from, one list per kind. Each is in load order: the
@@ -30,7 +32,9 @@ pub struct ContentPaths {
     pub recipes: Vec<KindDir>,
     pub tiers: Vec<KindDir>,
     pub rarities: Vec<KindDir>,
-    pub textures: Vec<KindDir>,
+    /// The resource-pack layers (the game's, each mod's, the player's), lowest first: where
+    /// block textures, models and sounds come from.
+    pub stack: PackStack,
 }
 
 impl ContentPaths {
@@ -42,21 +46,43 @@ impl ContentPaths {
             recipes: vec![KindDir::core(find_data_dir("recipes"))],
             tiers: vec![KindDir::core(find_data_dir("tiers"))],
             rarities: vec![KindDir::core(find_data_dir("rarities"))],
-            textures: vec![KindDir::core(find_data_dir("textures").join("blocks"))],
+            stack: PackStack::core(),
         }
+    }
+
+    /// The directories of block textures, lowest priority first.
+    pub fn textures(&self) -> Vec<KindDir> {
+        self.stack.dirs("textures/blocks")
+    }
+
+    /// The directories of block models, lowest priority first.
+    pub fn models(&self) -> Vec<KindDir> {
+        self.stack.dirs("models/blocks")
+    }
+
+    /// The directories of sounds, lowest priority first.
+    pub fn sounds(&self) -> Vec<KindDir> {
+        self.stack.dirs("sounds")
+    }
+
+    /// The player's enabled resource packs on top (given lowest priority first). Call this
+    /// after [`ContentPaths::with_mods`] so a player's pack outranks a mod's.
+    pub fn with_packs(mut self, packs: &[PathBuf]) -> Self {
+        self.stack = self.stack.with_user_packs(packs);
+        self
     }
 
     /// The core game with `mods` laid over it, in load order, each under its namespace.
     pub fn with_mods(mut self, mods: &[ModSource]) -> Self {
         for m in mods {
             let locals = Arc::new(Locals::scan(&m.path));
-            let dir = |kind: &str| KindDir { ns: m.ns.clone(), dir: m.path.join(kind), locals: locals.clone() };
+            let dir = |kind: &str| KindDir { ns: m.ns.clone(), dir: m.path.join(kind), locals: locals.clone(), extends: true };
             self.blocks.push(dir("blocks"));
             self.items.push(dir("items"));
             self.recipes.push(dir("recipes"));
             self.tiers.push(dir("tiers"));
             self.rarities.push(dir("rarities"));
-            self.textures.push(KindDir { dir: m.path.join("textures").join("blocks"), ..dir("") });
+            self.stack = std::mem::replace(&mut self.stack, PackStack { layers: Vec::new() }).with_mod(&m.ns, &m.path);
         }
         self
     }
@@ -92,7 +118,7 @@ pub fn build_content(paths: &ContentPaths) -> Content {
     for name in items.texture_names() {
         painters.ensure_registered(name);
     }
-    let mut atlas = build_atlas_in(&painters, &paths.textures);
+    let mut atlas = build_atlas_in(&painters, &paths.textures());
     items.resolve_tiles(&atlas.indices);
     let recipes = RecipeBook::load_from_dirs(&registry, &items, &paths.recipes);
 
@@ -152,6 +178,9 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             image::RgbaImage::from_pixel(16, 16, image::Rgba(color)).save(path).unwrap();
             self
+        }
+        fn path(&self) -> PathBuf {
+            self.0.clone()
         }
         fn source(&self, ns: &str) -> ModSource {
             ModSource { ns: ns.to_string(), path: self.0.clone() }
@@ -267,8 +296,8 @@ mod tests {
         let vanilla = build_content(&ContentPaths::vanilla());
         let m = Scratch::new();
         m.file("blocks/granite.json", r#"{"id": "granite"}"#)
-            .png("textures/blocks/granite.png", [4, 5, 6, 255])
-            .png("textures/blocks/craftmjne/dirt.png", [1, 2, 3, 255]);
+            .png("resourcepack/textures/blocks/granite.png", [4, 5, 6, 255])
+            .png("resourcepack/textures/blocks/craftmjne/dirt.png", [1, 2, 3, 255]);
         let modded = build_content(&with(&[m.source("g")]));
         assert_eq!(tile_pixel(&modded, "g:granite"), [4, 5, 6, 255], "its own art, by plain file name");
         assert_eq!(tile_pixel(&modded, "dirt"), [1, 2, 3, 255], "re-skinned from the craftmjne folder");
@@ -277,9 +306,44 @@ mod tests {
     }
 
     #[test]
+    fn a_mods_textures_in_the_old_place_are_no_longer_read() {
+        let m = Scratch::new();
+        m.file("blocks/granite.json", r#"{"id": "granite"}"#).png("textures/blocks/granite.png", [4, 5, 6, 255]);
+        let c = build_content(&with(&[m.source("g")]));
+        assert_ne!(tile_pixel(&c, "g:granite"), [4, 5, 6, 255], "art belongs in resourcepack/ now; the old folder is ignored");
+    }
+
+    #[test]
+    fn a_players_pack_reskins_core_and_mod_blocks_and_outranks_a_mods_pack() {
+        let (modd, pack) = (Scratch::new(), Scratch::new());
+        modd.file("blocks/granite.json", r#"{"id": "granite"}"#)
+            .png("resourcepack/textures/blocks/granite.png", [4, 5, 6, 255])
+            .png("resourcepack/textures/blocks/craftmjne/dirt.png", [1, 2, 3, 255]);
+        // A player's pack: plain names are the core game's; <ns>/ is a mod's.
+        pack.png("textures/blocks/dirt.png", [8, 8, 8, 255]).png("textures/blocks/g/granite.png", [7, 0, 7, 255]);
+        let paths = with(&[modd.source("g")]).with_packs(&[pack.path()]);
+        let c = build_content(&paths);
+        assert_eq!(tile_pixel(&c, "dirt"), [8, 8, 8, 255], "the player's pack is above the mod's");
+        assert_eq!(tile_pixel(&c, "g:granite"), [7, 0, 7, 255], "and can re-skin a mod's block");
+        // Without the pack the mod's own art is back.
+        let c = build_content(&with(&[modd.source("g")]));
+        assert_eq!((tile_pixel(&c, "dirt"), tile_pixel(&c, "g:granite")), ([1, 2, 3, 255], [4, 5, 6, 255]));
+    }
+
+    #[test]
+    fn two_players_packs_stack_in_the_order_given() {
+        let (low, high) = (Scratch::new(), Scratch::new());
+        low.png("textures/blocks/dirt.png", [1, 1, 1, 255]).png("textures/blocks/stone.png", [2, 2, 2, 255]);
+        high.png("textures/blocks/dirt.png", [9, 9, 9, 255]);
+        let c = build_content(&ContentPaths::vanilla().with_packs(&[low.path(), high.path()]));
+        assert_eq!(tile_pixel(&c, "dirt"), [9, 9, 9, 255], "the later (higher) pack wins where both have a file");
+        assert_eq!(tile_pixel(&c, "stone"), [2, 2, 2, 255], "and the lower one still supplies what the higher doesn't");
+    }
+
+    #[test]
     fn a_plain_texture_file_named_like_a_core_block_does_not_reskin_it() {
         let m = Scratch::new();
-        m.png("textures/blocks/dirt.png", [9, 9, 9, 255]);
+        m.png("resourcepack/textures/blocks/dirt.png", [9, 9, 9, 255]);
         let c = build_content(&with(&[m.source("m")]));
         assert_ne!(tile_pixel(&c, "dirt"), [9, 9, 9, 255], "that file is the mod's own dirt, not the core game's");
     }
@@ -288,9 +352,9 @@ mod tests {
     fn with_several_mods_the_later_one_wins_a_patch() {
         let (a, b) = (Scratch::new(), Scratch::new());
         a.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 3.0, "name": "Mud"}"#)
-            .png("textures/blocks/craftmjne/dirt.png", [9, 9, 9, 255]);
+            .png("resourcepack/textures/blocks/craftmjne/dirt.png", [9, 9, 9, 255]);
         b.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 6.0}"#)
-            .png("textures/blocks/craftmjne/dirt.png", [7, 7, 7, 255]);
+            .png("resourcepack/textures/blocks/craftmjne/dirt.png", [7, 7, 7, 255]);
         let c = build_content(&with(&[a.source("a"), b.source("b")]));
         let dirt = c.registry.def(c.registry.id("dirt"));
         assert_eq!((dirt.hardness, dirt.name.as_str()), (6.0, "Mud"), "b over a, keeping what only a changed");
@@ -336,7 +400,7 @@ mod tests {
         let m = Scratch::new();
         m.file("blocks/dirt.json", r#"{"id": "craftmjne:dirt", "hardness": 20.0}"#)
             .file("recipes/p.json", r#"{"replaces": "craftmjne:planks", "inputs": [{"item": "stick", "count": 9}], "output": {"item": "planks", "count": 1}}"#)
-            .png("textures/blocks/craftmjne/dirt.png", [1, 1, 1, 255]);
+            .png("resourcepack/textures/blocks/craftmjne/dirt.png", [1, 1, 1, 255]);
         let _ = build_content(&with(&[m.source("m")]));
         assert!(before == snapshot(), "a core file changed");
     }

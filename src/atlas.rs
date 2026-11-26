@@ -235,18 +235,20 @@ fn load_custom_tile(dir: &Path, name: &str) -> CustomTile {
 /// right file wins.
 ///
 /// Which file is "right" depends on whose name it is. A mod's own tile
-/// `mymod:granite` is `<mymod>/textures/blocks/granite.png`. A mod re-skins
+/// `mymod:granite` is `<mymod>/resourcepack/textures/blocks/granite.png`. A mod re-skins
 /// someone else's by putting the file in a folder named for them:
-/// `<mymod>/textures/blocks/craftmjne/dirt.png` replaces the core game's `dirt`.
+/// `<mymod>/resourcepack/textures/blocks/craftmjne/dirt.png` replaces the core game's `dirt`.
 /// The core game's own files are `textures/blocks/<name>.png`, only ever for core names.
+/// A player's resource pack reads like the game's folder for plain names (`dirt.png` is the
+/// core `dirt`) and like a mod for everyone else's (`<ns>/<name>.png`).
 fn load_custom_tile_in(dirs: &[crate::overlay::KindDir], name: &str) -> CustomTile {
     let (ns, local) = crate::overlay::split_name(name);
     let file = format!("{local}.png");
     let found = dirs.iter().rev().find_map(|kd| {
         let path = if kd.ns == ns {
             kd.dir.join(&file)
-        } else if kd.is_core() {
-            return None; // the core game only has its own names
+        } else if !kd.extends {
+            return None; // the game's own folder only has its own names
         } else {
             kd.dir.join(ns).join(&file)
         };

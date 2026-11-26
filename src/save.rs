@@ -659,6 +659,28 @@ impl SaveStore {
         fs::rename(&temp, path)
     }
 
+    pub fn pack_selection_path(&self) -> PathBuf {
+        self.keybinds_path().with_file_name("resourcepacks.json")
+    }
+
+    /// Which resource packs are on, per launcher instance. Missing or unreadable: none.
+    pub fn load_pack_selection(&self) -> crate::packs::PackSelection {
+        fs::read_to_string(self.pack_selection_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_pack_selection(&self, selection: &crate::packs::PackSelection) -> io::Result<()> {
+        let path = self.pack_selection_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_string_pretty(selection).map_err(io::Error::other)?)?;
+        fs::rename(&temp, path)
+    }
+
     pub fn load_keybinds(&self) -> std::collections::BTreeMap<String, String> {
         fs::read_to_string(self.keybinds_path())
             .ok()

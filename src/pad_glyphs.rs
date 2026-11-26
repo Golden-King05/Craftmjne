@@ -238,10 +238,17 @@ pub fn upload_glyphs(images: HashMap<PadButton, GlyphImage>, assets: &mut Assets
     out
 }
 
-fn build(mut commands: Commands, assets: Option<ResMut<Assets<Image>>>, installed: Option<Res<crate::mods::InstalledMods>>) {
+fn build(
+    mut commands: Commands,
+    assets: Option<ResMut<Assets<Image>>>,
+    installed: Option<Res<crate::mods::InstalledMods>>,
+    selection: Option<Res<crate::packs::PackSelection>>,
+    installed_packs: Option<Res<crate::packs::InstalledPacks>>,
+) {
     let Some(mut assets) = assets else { return };
     let mods_dir = installed.map(|i| i.0.clone()).unwrap_or_else(crate::mods::installed_mods_dir);
-    let dirs: Vec<PathBuf> = crate::gui_skin::gui_texture_dirs(&mods_dir).into_iter().map(|d| d.join("glyphs")).collect();
+    let packs = crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref());
+    let dirs: Vec<PathBuf> = crate::gui_skin::gui_texture_dirs(&mods_dir, &packs).into_iter().map(|d| d.join("glyphs")).collect();
     commands.insert_resource(upload_glyphs(build_glyphs(&dirs), &mut assets));
 }
 

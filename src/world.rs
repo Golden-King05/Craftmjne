@@ -921,12 +921,16 @@ pub fn compile_content(
     mut commands: Commands,
     mut texture_report: ResMut<TextureReport>,
     mut loaded: ResMut<LoadedContent>,
+    selection: Option<Res<crate::packs::PackSelection>>,
+    installed_packs: Option<Res<crate::packs::InstalledPacks>>,
 ) {
-    let content = build_content(&ContentPaths::vanilla());
+    let packs = crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref());
+    let content = build_content(&ContentPaths::vanilla().with_packs(&packs));
     let before = texture_report.names();
     install_content(&mut commands, content, &mut texture_report);
     loaded.block_textures = texture_report.names().into_iter().filter(|n| !before.contains(n)).collect();
     loaded.mods = Vec::new();
+    loaded.packs = packs;
     loaded.generation += 1;
 }
 
@@ -983,6 +987,8 @@ fn apply_world_mods(
     mut next_state: ResMut<NextState<AppState>>,
     mut hotbar: ResMut<Hotbar>,
     chat: Option<ResMut<crate::chat::ChatLog>>,
+    selection: Option<Res<crate::packs::PackSelection>>,
+    installed_packs: Option<Res<crate::packs::InstalledPacks>>,
 ) {
     let refuse = |why: String, ok: &mut ContentOk, notice: &mut MenuNotice, next: &mut NextState<AppState>| {
         ok.0 = false;
@@ -1009,17 +1015,21 @@ fn apply_world_mods(
     // No mods now and none before: the content is already right. Anything else
     // is rebuilt - including the same mods again, so editing a mod's files and
     // re-entering the world shows the change.
-    if mods.is_empty() && loaded.mods.is_empty() {
+    // The player's resource packs are part of the content too: turning one on or off in Settings
+    // changes the atlas, models and sounds, so a change there rebuilds on the next world entry.
+    let packs = crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref());
+    if mods.is_empty() && loaded.mods.is_empty() && packs == loaded.packs {
         ok.0 = true;
         return;
     }
-    match try_build_content(&ContentPaths::vanilla().with_mods(&mods)) {
+    match try_build_content(&ContentPaths::vanilla().with_mods(&mods).with_packs(&packs)) {
         Ok(content) => {
             report.remove(&loaded.block_textures);
             let before = report.names();
             install_content(&mut commands, content, &mut report);
             loaded.block_textures = report.names().into_iter().filter(|n| !before.contains(n)).collect();
             loaded.mods = mods;
+            loaded.packs = packs;
             loaded.generation += 1;
             // Icons and textures changed; the hotbar draws from them.
             hotbar.set_changed();

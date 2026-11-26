@@ -65,7 +65,7 @@ impl Locals {
     pub fn scan(root: &Path) -> Self {
         let mut things = json_ids(&root.join("blocks"));
         things.extend(json_ids(&root.join("items")));
-        let textures = std::fs::read_dir(root.join("textures").join("blocks"))
+        let textures = std::fs::read_dir(root.join(crate::packs::MOD_PACK_DIR).join("textures").join("blocks"))
             .into_iter()
             .flatten()
             .flatten()
@@ -84,12 +84,29 @@ pub struct KindDir {
     pub ns: String,
     pub dir: PathBuf,
     pub locals: Arc<Locals>,
+    /// Whether this directory may also hold *other* namespaces' files in `<ns>/`
+    /// subfolders (a re-skin of someone else's thing). True for mods and for a player's
+    /// resource packs; false only for the game's own built-in files.
+    pub extends: bool,
 }
 
 impl KindDir {
     /// A directory of the core game's.
     pub fn core(dir: impl Into<PathBuf>) -> Self {
-        Self { ns: CORE_NS.to_string(), dir: dir.into(), locals: Arc::new(Locals::default()) }
+        Self { ns: CORE_NS.to_string(), dir: dir.into(), locals: Arc::new(Locals::default()), extends: false }
+    }
+
+    /// A directory of a player's resource pack: plain names mean the core game's (as in
+    /// the game's own folder), `<ns>/<name>` re-skins a mod's.
+    pub fn pack(dir: impl Into<PathBuf>) -> Self {
+        Self { extends: true, ..Self::core(dir) }
+    }
+
+    /// Whether files here may change what a block *does* (its collision and hitbox) rather
+    /// than only how it looks: the game's own and a mod's resource pack may, a player's
+    /// standalone pack may not.
+    pub fn may_change_collision(&self) -> bool {
+        !(self.is_core() && self.extends)
     }
 
     pub fn is_core(&self) -> bool {
@@ -288,7 +305,7 @@ mod tests {
             textures: textures.iter().map(|s| s.to_string()).collect(),
             ..Locals::default()
         };
-        KindDir { ns: ns.to_string(), dir: PathBuf::new(), locals: Arc::new(locals) }
+        KindDir { ns: ns.to_string(), dir: PathBuf::new(), locals: Arc::new(locals), extends: ns != CORE_NS }
     }
 
     #[test]

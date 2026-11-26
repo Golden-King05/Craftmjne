@@ -481,15 +481,17 @@ pub fn build_skin_images(dirs: &[PathBuf]) -> HashMap<Element, SkinImage> {
     out
 }
 
-/// The directories that can hold GUI textures: the game's own, then every installed
-/// mod's, in folder-name order (later wins).
-pub fn gui_texture_dirs(installed_mods: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![crate::blocks::find_data_dir("textures").join("gui")];
+/// The directories that can hold GUI textures, lowest priority first: the game's own, then every
+/// installed mod's resource pack (in folder-name order), then the player's enabled resource packs
+/// (`user_packs`, lowest first). Later wins.
+pub fn gui_texture_dirs(installed_mods: &Path, user_packs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![crate::packs::core_root().join("textures").join("gui")];
     if let Ok(rd) = std::fs::read_dir(installed_mods) {
         let mut mods: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
         mods.sort();
-        dirs.extend(mods.into_iter().map(|m| m.join("textures").join("gui")));
+        dirs.extend(mods.into_iter().map(|m| m.join(crate::packs::MOD_PACK_DIR).join("textures").join("gui")));
     }
+    dirs.extend(user_packs.iter().map(|p| p.join("textures").join("gui")));
     dirs
 }
 
@@ -546,11 +548,18 @@ pub fn upload_skin(images: HashMap<Element, SkinImage>, assets: &mut Assets<Imag
     skin
 }
 
-fn build_skin(mut commands: Commands, assets: Option<ResMut<Assets<Image>>>, installed: Option<Res<crate::mods::InstalledMods>>) {
+fn build_skin(
+    mut commands: Commands,
+    assets: Option<ResMut<Assets<Image>>>,
+    installed: Option<Res<crate::mods::InstalledMods>>,
+    selection: Option<Res<crate::packs::PackSelection>>,
+    installed_packs: Option<Res<crate::packs::InstalledPacks>>,
+) {
     // Apps with no renderer (tests) have no image assets and so no skin; every user copes.
     let Some(mut assets) = assets else { return };
     let mods_dir = installed.map(|i| i.0.clone()).unwrap_or_else(crate::mods::installed_mods_dir);
-    let images = build_skin_images(&gui_texture_dirs(&mods_dir));
+    let packs = crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref());
+    let images = build_skin_images(&gui_texture_dirs(&mods_dir, &packs));
     commands.insert_resource(upload_skin(images, &mut assets));
 }
 
@@ -748,9 +757,11 @@ mod tests {
         let dir = tmp("mods");
         std::fs::create_dir_all(dir.join("zeta")).unwrap();
         std::fs::create_dir_all(dir.join("alpha")).unwrap();
-        let dirs = gui_texture_dirs(&dir);
+        let dirs = gui_texture_dirs(&dir, &[PathBuf::from("/p/low"), PathBuf::from("/p/high")]);
         assert!(dirs[0].ends_with("gui") && !dirs[0].starts_with(&dir));
         assert!(dirs[1].starts_with(dir.join("alpha")) && dirs[2].starts_with(dir.join("zeta")));
+        assert!(dirs[1].ends_with("resourcepack/textures/gui"), "a mod's art lives in its resource pack: {:?}", dirs[1]);
+        assert!(dirs[3].starts_with("/p/low") && dirs[4].starts_with("/p/high"), "the player's packs go on top, in order");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -248,7 +248,7 @@ fn edit_candidates(
 
 /// Adds " (!)" to a mod's label when it isn't made for this game version.
 fn with_warning_mark(label: String, m: &crate::mods::ModInfo) -> String {
-    if m.warning(crate::mods::GAME_VERSION).is_some() { format!("{label} (!)") } else { label }
+    if !m.notes(crate::mods::GAME_VERSION).is_empty() { format!("{label} (!)") } else { label }
 }
 
 /// What a world's mod setup looks like in the list, e.g. "2 mods in this world".
@@ -685,7 +685,7 @@ fn setup_mods(mut commands: Commands, installed: Res<InstalledMods>) {
                         if !m.description.is_empty() {
                             theme::hint(c, m.description.clone(), 13.0);
                         }
-                        if let Some(w) = m.warning(crate::mods::GAME_VERSION) {
+                        for w in m.notes(crate::mods::GAME_VERSION) {
                             c.spawn((Text::new(format!("Warning: {w}")), TextFont { font_size: 13.0, ..default() }, TextColor(theme::WARN), Node { max_width: Val::Px(540.0), ..default() }));
                         }
                     });

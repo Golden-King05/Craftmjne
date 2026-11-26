@@ -144,6 +144,16 @@ impl ModInfo {
             self.target_ver.join(" or ")
         ))
     }
+
+    /// Every note about this mod worth showing: the version warning and a stale layout (art
+    /// kept at the top level instead of in its `resourcepack/` folder).
+    pub fn notes(&self, game: &str) -> Vec<String> {
+        let mut out: Vec<String> = self.warning(game).into_iter().collect();
+        if let Some(layout) = crate::packs::legacy_layout_note(&self.path) {
+            out.push(format!("{}: {layout}", self.name));
+        }
+        out
+    }
 }
 
 /// A mod as a world runs it: where it is, and the namespace it was given there.
@@ -344,7 +354,7 @@ pub struct ResolvedMods {
 fn resolved(infos: Vec<ModInfo>, existing: &std::collections::BTreeMap<String, String>) -> ResolvedMods {
     let ids = assign_namespaces(&infos, existing);
     let sources = infos.iter().map(|m| ModSource { ns: ids[&m.folder].clone(), path: m.path.clone() }).collect();
-    let warnings = infos.iter().filter_map(|m| m.warning(GAME_VERSION)).collect();
+    let warnings = infos.iter().flat_map(|m| m.notes(GAME_VERSION)).collect();
     ResolvedMods { sources, ids, warnings }
 }
 
@@ -509,6 +519,8 @@ impl Default for InstalledMods {
 #[derive(Resource, Default, Debug)]
 pub struct LoadedContent {
     pub mods: Vec<ModSource>,
+    /// The player's resource packs (paths, lowest priority first) the content was built with.
+    pub packs: Vec<std::path::PathBuf>,
     pub block_textures: Vec<String>,
     /// Bumped every time content is installed, so things built from it (the GPU
     /// atlas) can tell they're out of date.

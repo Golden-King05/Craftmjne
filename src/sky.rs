@@ -764,6 +764,12 @@ fn generate_moon_pixels(size: usize) -> Vec<u8> {
     pixels
 }
 
+/// Which of `dirs` (lowest priority first) supplies `<name>.png`: the highest one that has the
+/// file, else the lowest (where it is simply absent, so the procedural texture is used).
+fn sky_dir_for(dirs: &[PathBuf], name: &str) -> PathBuf {
+    dirs.iter().rev().find(|d| d.join(format!("{name}.png")).is_file()).or(dirs.first()).cloned().unwrap_or_default()
+}
+
 fn sky_texture(dir: &Path, name: &str, procedural: fn(usize) -> Vec<u8>) -> (Vec<u8>, u32, TextureStatus) {
     match load_custom_sky_texture(dir, name) {
         CustomSkyTexture::Loaded(pixels, size) => (pixels, size, TextureStatus::Working),
@@ -852,10 +858,16 @@ fn spawn_sky(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<CelestialMaterial>>,
     mut texture_report: ResMut<TextureReport>,
+    selection: Option<Res<crate::packs::PackSelection>>,
+    installed_packs: Option<Res<crate::packs::InstalledPacks>>,
 ) {
-    let dir = find_sky_dir();
-    let (sun_pixels, sun_size, sun_status) = sky_texture(&dir, "sun", generate_sun_pixels);
-    let (moon_pixels, moon_size, moon_status) = sky_texture(&dir, "moon", generate_moon_pixels);
+    // The game's own sky folder, then the player's enabled resource packs on top.
+    let mut dirs = vec![find_sky_dir()];
+    dirs.extend(
+        crate::packs::active_pack_paths(selection.as_deref(), installed_packs.as_deref()).into_iter().map(|p| p.join("textures").join("sky")),
+    );
+    let (sun_pixels, sun_size, sun_status) = sky_texture(&sky_dir_for(&dirs, "sun"), "sun", generate_sun_pixels);
+    let (moon_pixels, moon_size, moon_status) = sky_texture(&sky_dir_for(&dirs, "moon"), "moon", generate_moon_pixels);
     texture_report.extend([("sun".to_string(), sun_status), ("moon".to_string(), moon_status)]);
 
     let sun_handle = images.add(upload_sky_image(sun_pixels, sun_size));
@@ -1360,6 +1372,18 @@ mod tests {
         assert_eq!(sun[ci + 3], 255);
         assert_eq!(moon[ci + 3], 255);
         assert!(sun[ci] > sun[ci + 2] + 40, "the sun's center should read warm/gold, not neutral gray");
+    }
+
+    #[test]
+    fn a_resource_packs_sky_texture_beats_the_games_own_and_none_means_the_default() {
+        let (low, high) = (temp_dir(), temp_dir());
+        let dirs = vec![low.0.clone(), high.0.clone()];
+        assert_eq!(sky_dir_for(&dirs, "sun"), low.0, "no file anywhere: the lowest, where it is simply absent");
+        std::fs::write(low.0.join("sun.png"), b"x").unwrap();
+        assert_eq!(sky_dir_for(&dirs, "sun"), low.0);
+        std::fs::write(high.0.join("sun.png"), b"x").unwrap();
+        assert_eq!(sky_dir_for(&dirs, "sun"), high.0, "the pack above wins");
+        assert_eq!(sky_dir_for(&dirs, "moon"), low.0);
     }
 
     #[test]
