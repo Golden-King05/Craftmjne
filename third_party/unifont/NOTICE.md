@@ -1,8 +1,11 @@
 # GNU Unifont glyph data
 
-The Chinese and Japanese text glyphs (`src/cjk/*.bin`) are bitmaps taken from **GNU Unifont 18.0.01**
-(<https://unifoundry.com/unifont/>), converted by `tools/build_cjk_data.py` and turned into a font in
-memory at run time (`src/cjk.rs`). Unifont's CJK ideographs descend from the WenQuanYi bitmap font,
+The glyphs for Chinese, Japanese, Cherokee, the Canadian syllabics and the scripts in `src/scripts.rs`
+(Armenian, Georgian, Syriac, Mandaic, Coptic, Ethiopic, Tifinagh, N'Ko, Vai, Greek Extended) - the
+`src/cjk/*.bin` files - are bitmaps taken from **GNU Unifont 18.0.01** (<https://unifoundry.com/unifont/>),
+converted by `tools/build_cjk_data.py` and turned into fonts in memory at run time (`src/cjk.rs`,
+`src/syllabics.rs`, `src/scripts.rs`). Each glyph also carries two flags taken from the Unicode Character
+Database (`UnicodeData.txt` category and `ArabicShaping.txt` joining type, Unicode License v3). Unifont's CJK ideographs descend from the WenQuanYi bitmap font,
 and its Japanese forms from the Public Domain jiskan16 and related sources.
 
     Copyright (C) 1998-2026 Roman Czyborra, Paul Hardy, Qianqian Fang, Andrew Miller,

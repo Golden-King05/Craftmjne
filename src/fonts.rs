@@ -168,7 +168,7 @@ pub struct FontBook {
     managed: HashSet<AssetId<Font>>,
     emoji_faces: Vec<bevy::text::cosmic_text::fontdb::ID>,
     cjk_faces: Vec<bevy::text::cosmic_text::fontdb::ID>,
-    syllabic_faces: Vec<bevy::text::cosmic_text::fontdb::ID>,
+    bitmap_faces: Vec<bevy::text::cosmic_text::fontdb::ID>,
 }
 
 impl Default for FontBook {
@@ -176,7 +176,7 @@ impl Default for FontBook {
         let base = Handle::<Font>::default();
         let mut units = HashMap::new();
         units.insert(base.id(), EM_ROWS as f32);
-        Self { default: base.clone(), named: HashMap::new(), roles: HashMap::new(), units, managed: HashSet::from([base.id()]), emoji_faces: Vec::new(), cjk_faces: Vec::new(), syllabic_faces: Vec::new() }
+        Self { default: base.clone(), named: HashMap::new(), roles: HashMap::new(), units, managed: HashSet::from([base.id()]), emoji_faces: Vec::new(), cjk_faces: Vec::new(), bitmap_faces: Vec::new() }
     }
 }
 
@@ -253,26 +253,43 @@ fn update_cjk(
     }
 }
 
-/// Builds the Cherokee and Canadian-syllabics font off the main thread, once, and registers it as a
-/// fallback beside the others.
-fn load_syllabics(
+/// Builds the bitmap-script fonts (Cherokee and Canadian syllabics; Armenian, Georgian, Syriac, Ethiopic
+/// and the rest) off the main thread, once, and registers them as fallbacks beside the others.
+fn load_bitmap_fonts(
     cosmic: Option<ResMut<CosmicFontSystem>>,
     mut book: ResMut<FontBook>,
     mut texts: Query<&mut TextFont>,
-    mut pending: Local<Option<bevy::tasks::Task<Vec<u8>>>>,
+    mut pending: Local<Vec<bevy::tasks::Task<Vec<u8>>>>,
     mut started: Local<bool>,
 ) {
     let Some(mut cosmic) = cosmic else { return };
     if !*started {
         *started = true;
-        *pending = Some(bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default).spawn(async { crate::syllabics::font_bytes() }));
+        let pool = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        pending.push(pool.spawn(async { crate::syllabics::font_bytes() }));
+        pending.push(pool.spawn(async { crate::scripts::font_bytes() }));
     }
-    let Some(task) = pending.as_mut() else { return };
-    let Some(bytes) = bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(task)) else { return };
-    *pending = None;
-    book.syllabic_faces = register_face(&mut cosmic, bytes);
-    for mut tf in &mut texts {
-        tf.set_changed();
+    if pending.is_empty() {
+        return;
+    }
+    // Register each as it finishes.
+    let mut registered = false;
+    let mut waiting = Vec::new();
+    for mut task in pending.drain(..) {
+        match bevy::tasks::block_on(bevy::tasks::futures_lite::future::poll_once(&mut task)) {
+            Some(bytes) => {
+                let ids = register_face(&mut cosmic, bytes);
+                book.bitmap_faces.extend(ids);
+                registered = true;
+            }
+            None => waiting.push(task),
+        }
+    }
+    *pending = waiting;
+    if registered {
+        for mut tf in &mut texts {
+            tf.set_changed();
+        }
     }
 }
 
@@ -360,9 +377,9 @@ fn refresh_pack_fonts(
 /// handle onto the current default, and makes pixel-font texts crisp (size snapped to the pixel grid,
 /// no smoothing, a line height that is a whole number of pixels).
 /// The line height, as a multiple of the font size: 1.25 for the pixel font, more for text with Chinese
-/// or Japanese (or Cherokee or Canadian syllabics) in it, whose 16-pixel glyphs would otherwise touch the line below.
+/// or Japanese (or Cherokee, Armenian, Ethiopic ... any bitmap script) in it, whose 16-pixel glyphs would otherwise touch the line below.
 pub fn line_height_for(text: Option<&str>) -> f32 {
-    if text.is_some_and(|t| t.chars().any(|c| crate::cjk::is_cjk(c) || crate::syllabics::is_syllabic(c))) {
+    if text.is_some_and(|t| t.chars().any(|c| crate::cjk::is_cjk(c) || crate::syllabics::is_syllabic(c) || crate::scripts::is_bitmap_script(c))) {
         1.5
     } else {
         1.25
@@ -404,7 +421,7 @@ impl Plugin for FontPlugin {
         app.init_resource::<FontBook>()
             .init_resource::<crate::cjk::CjkStyle>()
             .add_systems(PreStartup, install_builtin)
-            .add_systems(Update, (refresh_pack_fonts, update_cjk, load_syllabics))
+            .add_systems(Update, (refresh_pack_fonts, update_cjk, load_bitmap_fonts))
             .add_systems(PostUpdate, apply_fonts.before(bevy::ui::UiSystem::Prepare));
     }
 }
@@ -419,6 +436,8 @@ mod tests {
         assert_eq!(line_height_for(None), 1.25);
         assert_eq!(line_height_for(Some("hi \u{65E5}\u{672C}")), 1.5);
         assert_eq!(line_height_for(Some("\u{13A0}\u{1403}")), 1.5);
+        assert_eq!(line_height_for(Some("\u{531}\u{1200}")), 1.5);
+        assert_eq!(line_height_for(Some("\u{3B1}\u{3B2} modern Greek is the game's own font")), 1.25);
         assert_eq!(line_height_for(Some("\u{F0}\u{FE} Icelandic")), 1.25);
     }
 
@@ -447,22 +466,23 @@ mod tests {
     }
 
     #[test]
-    fn the_syllabics_font_is_registered_as_a_fallback_in_the_background() {
+    fn the_bitmap_script_fonts_are_registered_as_fallbacks_in_the_background() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));
         app.init_asset::<Font>();
         app.insert_resource(CosmicFontSystem::default());
         app.add_plugins(FontPlugin);
         let start = std::time::Instant::now();
-        while app.world().resource::<FontBook>().syllabic_faces.is_empty() {
-            assert!(start.elapsed().as_secs() < 60, "the syllabics font was never registered");
+        while app.world().resource::<FontBook>().bitmap_faces.len() < 2 {
+            assert!(start.elapsed().as_secs() < 60, "the bitmap fonts were never registered");
             app.update();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let id = app.world().resource::<FontBook>().syllabic_faces[0];
+        let ids = app.world().resource::<FontBook>().bitmap_faces.clone();
         let cosmic = app.world().resource::<CosmicFontSystem>();
-        let has = |c: char| cosmic.0.db().with_face_data(id, |d, i| ttf_parser::Face::parse(d, i).unwrap().glyph_index(c).is_some()).unwrap_or(false);
-        assert!(has('\u{13A0}') && has('\u{1403}'), "Cherokee and Cree glyphs are in the registered face");
+        let has = |c: char| ids.iter().any(|id| cosmic.0.db().with_face_data(*id, |d, i| ttf_parser::Face::parse(d, i).unwrap().glyph_index(c).is_some()).unwrap_or(false));
+        assert!(has('\u{13A0}') && has('\u{1403}'), "Cherokee and Cree glyphs are registered");
+        assert!(has('\u{531}') && has('\u{712}') && has('\u{1200}') && has('\u{2D30}') && has('\u{7CA}') && has('\u{A500}'), "the other scripts are registered");
     }
 
     #[test]

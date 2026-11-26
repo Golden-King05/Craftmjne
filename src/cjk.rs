@@ -92,6 +92,21 @@ pub struct Glyph {
     /// 8 or 16 pixels.
     pub width: usize,
     pub rows: [u16; ROWS],
+    /// A combining mark: Unifont draws it in the cell to the right of the letter it belongs over, so
+    /// it takes no room and is shifted left by its own width.
+    pub combining: bool,
+    /// How it joins its neighbours in a cursive script (Syriac, Mandaic, N'Ko).
+    pub join: Join,
+}
+
+/// Joining behaviour of a letter (Unicode `ArabicShaping.txt`'s `R` and `D`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Join {
+    None,
+    /// Joins only the letter before it (to its right, in a right-to-left script).
+    Right,
+    /// Joins both neighbours.
+    Dual,
 }
 
 impl Glyph {
@@ -108,14 +123,20 @@ pub(crate) fn decode(blob: &[u8]) -> BTreeMap<u32, Glyph> {
     let mut at = 0;
     while at + 5 <= raw.len() {
         let cp = u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
-        let bytes = raw[at + 4] as usize;
+        let flags = raw[at + 4];
+        let bytes = (flags & 0x0F) as usize;
+        let join = match (flags >> 4) & 3 {
+            1 => Join::Right,
+            2 => Join::Dual,
+            _ => Join::None,
+        };
         at += 5;
         let mut rows = [0u16; ROWS];
         for row in rows.iter_mut() {
             *row = if bytes == 1 { raw[at] as u16 } else { u16::from_be_bytes([raw[at], raw[at + 1]]) };
             at += bytes;
         }
-        out.insert(cp, Glyph { width: bytes * 8, rows });
+        out.insert(cp, Glyph { width: bytes * 8, rows, combining: flags & 0x80 != 0, join });
     }
     out
 }
@@ -149,16 +170,36 @@ pub(crate) fn specs_from(set: &BTreeMap<u32, Glyph>) -> Vec<GlyphSpec> {
             if emoji.contains(&c) || joiners.contains(&c) {
                 return None;
             }
-            let mask: Vec<Vec<bool>> = (0..ROWS).map(|y| (0..g.width).map(|x| g.ink(x, y)).collect()).collect();
-            // Row 0 of the glyph sits `ABOVE_BASELINE` rows above the baseline.
-            let rects = rects_from_mask(g.width, &mask, BASELINE_ROW - ABOVE_BASELINE);
-            Some(GlyphSpec { chars: vec![c], advance: g.width as i32, layers: vec![Layer { color: 0, rects }], colour: false })
+            Some(spec_of(c, g))
         })
         .collect()
 }
 
+/// One glyph as a font glyph. A combining mark takes no room and is drawn one cell to the left, over
+/// the letter before it.
+pub(crate) fn spec_of(c: char, g: &Glyph) -> GlyphSpec {
+    let mask: Vec<Vec<bool>> = (0..ROWS).map(|y| (0..g.width).map(|x| g.ink(x, y)).collect()).collect();
+    // Row 0 of the glyph sits `ABOVE_BASELINE` rows above the baseline.
+    let mut rects = rects_from_mask(g.width, &mask, BASELINE_ROW - ABOVE_BASELINE);
+    let advance = if g.combining {
+        for r in &mut rects {
+            r.x0 -= g.width as i32;
+            r.x1 -= g.width as i32;
+        }
+        0
+    } else {
+        g.width as i32
+    };
+    GlyphSpec { chars: vec![c], advance, layers: vec![Layer { color: 0, rects }], colour: false }
+}
+
 /// A font file from glyphs made by [`specs_from`].
 pub(crate) fn font_from(family: &str, glyphs: Vec<GlyphSpec>) -> Vec<u8> {
+    font_from_with(family, glyphs, vec![])
+}
+
+/// Like [`font_from`], with `GSUB` single substitutions (joining forms).
+pub(crate) fn font_from_with(family: &str, glyphs: Vec<GlyphSpec>, substitutions: Vec<crate::font_gen::Substitution>) -> Vec<u8> {
     build_ttf(&FontSpec {
         family: family.into(),
         palette: vec![],
@@ -166,7 +207,7 @@ pub(crate) fn font_from(family: &str, glyphs: Vec<GlyphSpec>) -> Vec<u8> {
         em_rows: EM_ROWS,
         baseline_row: BASELINE_ROW,
         space_advance: 8,
-        substitutions: vec![],
+        substitutions,
         ligatures: vec![],
     })
 }

@@ -185,6 +185,7 @@ pub fn glyphs() -> Vec<GlyphSpec> {
     for (c, px) in HEBREW_POINTS {
         out.push(point_glyph(*c, px));
     }
+    out.extend(crate::pixel_greek::glyphs());
     out.extend(crate::pixel_hangul::glyphs());
     out.extend(crate::pixel_arabic::glyphs());
     out.extend(crate::pixel_devanagari::glyphs());

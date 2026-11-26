@@ -3638,3 +3638,33 @@ etc.) instead of inventing a new approach:
     `CRAFT_SHOT` screen (`natives`) instead of appending lines.
   - Break-tested: the app-level fallback test needs the plugin's `load_syllabics` to run; the CJK swap test
     still guards the shared registration path.
+
+- **Ten more scripts: the question was which ones belong in the game's own style and which need Unifont,
+  and "joining" had to be answered by the shaper, not by guessing.**
+  - **Greek is the one that earns hand-drawing** (`pixel_greek.rs`): it is running text next to Latin and
+    Cyrillic, most capitals are Latin shapes (`LOOKALIKES`), and it needs only ~10 new capitals and ~25 new
+    lowercase. Everything else (Armenian, Georgian, Syriac, Mandaic, Coptic, Ethiopic, Tifinagh, N'Ko, Vai,
+    polytonic Greek) comes from Unifont: measured first, it covers every assigned code point of all of them
+    (`every_assigned_character_of_every_promised_script_has_a_glyph`). One blob, `cjk/scripts.bin` (2,037
+    glyphs, 20 KB), one fallback font (`scripts.rs`). `fonts::load_bitmap_fonts` replaced `load_syllabics`
+    and builds both bitmap fonts in the background; line height keys off `scripts::is_bitmap_script`.
+  - **The blob format grew two flags per glyph** (`width` byte: bit 7 combining, bits 4-5 joining), computed
+    in `tools/build_cjk_data.py` from `unicodedata` and Unicode's `ArabicShaping.txt`. All blobs were
+    rebuilt. Combining marks (Unifont draws them in the cell *right of* the letter they belong over) get
+    advance 0 and are shifted left by their own width (`cjk::spec_of`); the shaper's fallback positioning
+    then centres marks with a combining class over the base, as it did for Hebrew and Arabic.
+  - **Syriac, Mandaic and N'Ko join, and Unifont has only isolated shapes**, so `scripts::forms` derives
+    them: the letter plus a stroke on its lowest ink row (capped at the baseline) from its outermost ink to
+    the cell edge, on the joining side(s). `fina` = stroke on the right, `init` = left, `medi` = both (right
+    to left); right-joining letters (Alaph, Dalath, Waw ...) get only `fina`. They are `GSUB` single
+    substitutions under `syrc`/`mand`/`nko ` through the existing `font_gen::Substitution`. It is a
+    heuristic, called one in the docs.
+  - **rustybuzz returns right-to-left text in visual order.** The first cursive test compared glyphs in the
+    wrong order, "failed", and looked like a shaping bug; printing the glyph ids for a few strings showed the
+    shaper was right and the test was backwards. `cursive_letters_take_the_form_...` now reverses to typing
+    order and checks the exact expected form ids; break-tested by emptying `substitutions()`.
+  - **The CJK app test's registration path is shared**: `the_bitmap_script_fonts_are_registered_...` waits for
+    both faces and checks glyphs from each script.
+  - Not done / said plainly: "Val" in the request is Vai; Syriac's variant finals and ligatures; Greek
+    capital tonos to the left; the joined forms and every Unifont script judged by eye only in a
+    software-rendered screenshot. Afaka and Yugtun are still unencoded (see the earlier entry).

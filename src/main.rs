@@ -246,10 +246,11 @@ fn ui_shot(
             match name {
                 "create" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Create,
                 "world-options" => *worlds_mode = craftmjne::menu::WorldsScreenMode::Options,
-                "fonts" | "scripts" | "cjk" | "natives" => {
+                "fonts" | "scripts" | "cjk" | "natives" | "world" => {
                     let scripts = name == "scripts";
                     let cjk = name == "cjk";
                     let natives = name == "natives";
+                    let world = name == "world";
                     for e in &buttons_roots {
                         commands.entity(e).despawn();
                     }
@@ -258,7 +259,22 @@ fn ui_shot(
                         BackgroundColor(Color::srgb(0.16, 0.12, 0.09)),
                     ))
                     .with_children(|p| {
-                        let sample: &[(f32, &str)] = if natives {
+                        let sample: &[(f32, &str)] = if world {
+                            &[
+                                (24.0, "Η γρήγορη καφέ αλεπού πηδά πάνω από το τεμπέλικο σκυλί. ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ ΐΰ"),
+                                (24.0, "Ἐν ἀρχῇ ἦν ὁ λόγος, καὶ ὁ λόγος ἦν πρὸς τὸν θεόν · Ϙ Ϡ Ϟ"),
+                                (24.0, "Հայաստան Երևան, Բարև աշխարհ։ ԱԲԳԴԵԶ աբգդեզ"),
+                                (24.0, "საქართველო თბილისი გამარჯობა მსოფლიო ᲐᲑᲒ Ⴀ ⴀ"),
+                                (24.0, "ܣܘܪܝܝܐ ܫܠܡܐ ܒܝܬ ܡܠܟܐ ܐܠܗܐ ܟܬܒܐ ܒܪܝܫܝܬ  ܫܠܵܡܵܐ"),
+                                (24.0, "ࡌࡀࡍࡃࡀࡉࡀ ࡁࡂࡃࡄࡅࡆࡇࡈࡉ ࡌࡍࡎࡏ ࡀࡔࡅࡄ"),
+                                (24.0, "Ⲙⲉⲧⲣⲉⲙⲛ̀ⲭⲏⲙⲓ ⲁⲃⲅⲇⲉⲋⲍⲏⲑ ⲀⲂⲄⲆ ϣϥϧϩϫϭϯ"),
+                                (24.0, "አማርኛ ኢትዮጵያ ሰላም ለዓለም ሀሁሂሃሄህሆ ግዕዝ ቀዳማዊ"),
+                                (24.0, "ⵜⴰⵎⴰⵣⵉⵖⵜ ⴰⵣⵓⵍ ⵜⵉⴼⵉⵏⴰⵖ ⴰⵎⴰⵣⵉⵖ ⵏ ⴻⵓⵜⵉⴼⵉⵏⴰⵖ ⵯ ⵿"),
+                                (24.0, "ߒߞߏ ߞߊ߲ ߘߋ߲ ߛߓߍ ߝߊ߲ߠߊ ߊߋߌߍߎߏ ߀߁߂߃"),
+                                (24.0, "ꕙꔤ ꗳ ꔔꘋ ꕉꕮ ꘉꘋꖸ ꔀꔁꔂ"),
+                                (12.0, "Αβγ Ա Ⴀ ܐ ࡀ Ⲁ አ ⵜ ߊ ꔀ (twelve)"),
+                            ]
+                        } else if natives {
                             &[
                                 (24.0, "ᏣᎳᎩ ᏓᎶᏂᎨᏍᏗ ᎠᏂᏴᏫᏯ ᎣᏏᏲ ᏙᎯᏧ  ꭰꭱꭲꭳꭴ ꮃꮄꮅ ᏗᎦᏘ"),
                                 (24.0, "ᓀᐦᐃᔭᐍᐏᐣ ᐊᓯᔾᔨᐧᐃᐧᑭᓯᓯᐤ ᐱᐢᑯᓯ ᑭᑌᐧᐃᓄᐊ ᑲᐦᐋᐧᐃ  ᐊᒥᐢᑯᐧᐃᓂᐃᐧᑯᐤ"),

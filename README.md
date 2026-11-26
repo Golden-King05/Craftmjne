@@ -1515,6 +1515,23 @@ default font that ships with Bevy is turned off, so there is no other font unles
     shapes to draw them from, so they are not guessed at. Capital eth/thorn and the Inuit letters are
     first-pass drawings that I judged only from a software-rendered screenshot.
   - `CRAFT_SHOT=natives` renders a sample.
+- **Greek, Armenian, Georgian, Syriac, Mandaic, Coptic, Ethiopic, Tifinagh, N'Ko and Vai**
+  (`src/pixel_greek.rs`, `src/scripts.rs`):
+  - **Modern Greek** (all letters, the tonos and dialytika, ΐ ΰ, the question mark and ano teleia, µ) is drawn
+    in the game's own 12-row Latin style. Capital tonos sits above the letter like every accent here, not to
+    its left as in print.
+  - **Everything else is GNU Unifont's bitmaps** (SIL OFL, `third_party/unifont/`), complete for what Unicode
+    encodes: polytonic Greek (Greek Extended) and the archaic letters, **Armenian** (and its ligatures),
+    **Georgian** (Mkhedruli, Mtavruli, Asomtavruli, Nuskhuri), **Syriac** (with its supplement), **Mandaic**,
+    **Coptic**, **Ethiopic** (with its supplement and both extensions), **Tifinagh** (Tuareg and neo-Tifinagh
+    are one Unicode block) and **Vai** and **N'Ko**. Each is checked against the Unicode ranges by a test.
+    Combining marks (Syriac points, N'Ko tone marks ...) take no room and sit over the letter before.
+  - **Joining.** Syriac, Mandaic and N'Ko are cursive and right-to-left. Unifont draws only each letter's
+    isolated shape, so the initial, medial and final forms are *derived* (the letter plus a connecting stroke
+    on the baseline) and chosen by `GSUB` from each letter's Unicode joining type. They read as joined writing
+    but are not calligraphy, and Syriac's special final-Alaph forms are not made. Judged from a
+    software-rendered screenshot only, not by someone who reads these scripts.
+  - Same 16-pixel geometry as Chinese/Japanese; `CRAFT_SHOT=world` renders a sample.
 - **Emoji.** 12x12 colour emoji (about 700 drawn, the rest generated, see below) drawn in the game's style (faces, hearts, animals, food,
   weather, objects, arrows, symbols, zodiac, flags). They are colour glyphs (COLR/CPAL) in a second
   built-in font used as a fallback, so they work anywhere text does, including chat and signs. In chat,
