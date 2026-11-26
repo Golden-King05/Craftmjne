@@ -39,7 +39,7 @@ pub fn is_bitmap_script(c: char) -> bool {
         | 0x1200..=0x139F | 0x2D80..=0x2DDF | 0xAB00..=0xAB2F | 0x1E7E0..=0x1E7FF
         | 0x2D30..=0x2D7F | 0x07C0..=0x07FF | 0xA500..=0xA63F | 0x102E0..=0x102FF | 0x1F00..=0x1FFF
         | 0x1800..=0x18AF | 0x11660..=0x1167F | 0xA840..=0xA87F | 0x11A00..=0x11AAF
-        | 0x0980..=0x0DFF | 0x111E0..=0x111FF | 0x0F00..=0x0FFF | 0x0780..=0x07BF | 0x1C50..=0x1C7F
+        | 0x0900..=0x097F | 0xA8E0..=0xA8FF | 0x0980..=0x0DFF | 0x111E0..=0x111FF | 0x0F00..=0x0FFF | 0x0780..=0x07BF | 0x1C50..=0x1C7F
         | 0x1000..=0x109F | 0xA9E0..=0xA9FF | 0xAA60..=0xAA7F | 0x1B170..=0x1B2FF | 0xA000..=0xA4FF
         | 0x16F00..=0x16F9F | 0x0E00..=0x0EFF | 0x1780..=0x17FF | 0x19E0..=0x19FF | 0x1700..=0x177F
         | 0x1A00..=0x1A1F | 0x1B00..=0x1BFF | 0xA980..=0xA9DF | 0x1CC0..=0x1CCF
@@ -170,6 +170,26 @@ fn mongolian() -> (Vec<GlyphSpec>, Vec<Substitution>) {
     (specs, subs)
 }
 
+/// Devanagari's right-hand vowel signs and the visarga. Unifont draws each in a cell of its own with the ink in the
+/// right-hand columns, meant to sit over the consonant's cell (the consonant's headline runs on into the sign's);
+/// given a cell of their own they leave a gap of a whole letter. So they take no room and hang over the letter before.
+/// The left-hand ones (the i sign, which comes before its consonant) keep their cell.
+const OVERLAID_SIGNS: &[u32] = &[0x903, 0x93B, 0x93E, 0x940, 0x949, 0x94A, 0x94B, 0x94C, 0x94F];
+
+fn overlay_spacing_signs(specs: &mut [GlyphSpec]) {
+    for s in specs {
+        if s.chars.first().is_some_and(|c| OVERLAID_SIGNS.contains(&(*c as u32))) {
+            for l in &mut s.layers {
+                for r in &mut l.rects {
+                    r.x0 -= s.advance;
+                    r.x1 -= s.advance;
+                }
+            }
+            s.advance = 0;
+        }
+    }
+}
+
 pub fn glyph_specs() -> Vec<GlyphSpec> {
     let rest: BTreeMap<u32, Glyph> = glyphs().into_iter().filter(|(cp, g)| !is_mongolian_letter(*cp, g)).collect();
     let mut specs = specs_from(&rest);
@@ -180,6 +200,7 @@ pub fn glyph_specs() -> Vec<GlyphSpec> {
         }
     }
     crate::conjuncts::lower_tibetan_subjoined(&mut specs);
+    overlay_spacing_signs(&mut specs);
     specs.extend(crate::conjuncts::derived(&glyphs()).0);
     specs
 }
@@ -236,7 +257,7 @@ mod tests {
         // Mongolian and relatives, South and Southeast Asia, Yi, Miao, Nushu, the Philippines, Indonesia;
         // and the zhuyin tone marks.
     (0x1800, 0x1819), (0x1820, 0x1878), (0x1880, 0x18AA), (0x11660, 0x1166C), (0xA840, 0xA877),
-    (0x11A50, 0x11AA2), (0x11A00, 0x11A47), (0x0980, 0x0983), (0x0985, 0x098C), (0x098F, 0x0990),
+    (0x11A50, 0x11AA2), (0x11A00, 0x11A47), (0x0900, 0x097F), (0xA8E0, 0xA8FF), (0x0980, 0x0983), (0x0985, 0x098C), (0x098F, 0x0990),
     (0x0993, 0x09A8), (0x09AA, 0x09B0), (0x09B2, 0x09B2), (0x09B6, 0x09B9), (0x09BC, 0x09C4),
     (0x09C7, 0x09C8), (0x09CB, 0x09CE), (0x09D7, 0x09D7), (0x09DC, 0x09DD), (0x09DF, 0x09E3),
     (0x09E6, 0x09FE), (0x0A01, 0x0A03), (0x0A05, 0x0A0A), (0x0A0F, 0x0A10), (0x0A13, 0x0A28),
@@ -381,6 +402,20 @@ mod tests {
         let medi = f[2].as_ref().unwrap().1;
         // Joining to the previous letter touches the right edge; to the next, the left edge.
         assert!(reaches(&fina, false) && reaches(&init, true) && reaches(&medi, false) && reaches(&medi, true));
+    }
+
+    #[test]
+    fn devanagari_signs_that_belong_over_the_letter_take_no_room_and_the_i_sign_keeps_its_cell() {
+        let specs = glyph_specs();
+        let spec = |cp: u32| specs.iter().find(|s| s.chars == [char::from_u32(cp).unwrap()]).unwrap();
+        for cp in OVERLAID_SIGNS {
+            let s = spec(*cp);
+            assert_eq!(s.advance, 0, "U+{cp:04X}");
+            assert!(s.layers[0].rects.iter().all(|r| r.x1 <= 0), "U+{cp:04X} hangs left of its origin, over the letter before");
+        }
+        // The i sign is drawn before its consonant, in a cell of its own; a letter is one too.
+        assert_eq!(spec(0x93F).advance, 16);
+        assert_eq!(spec(0x915).advance, 16);
     }
 
     #[test]

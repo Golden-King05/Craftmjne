@@ -54,7 +54,17 @@ struct Script {
     block: (u32, u32),
 }
 
+/// Devanagari consonants that have a stem to keep when they take their half form (a half क, ज, न...). The rest
+/// (ङ छ ट ठ ड ढ द ह) have no stem to cut, so in real Devanagari they keep a visible halant instead - as they do here.
+const DEVANAGARI_STEMMED: &[u32] = &[
+    0x915, 0x916, 0x917, 0x918, 0x91A, 0x91C, 0x91D, 0x91E, 0x923, 0x924, 0x925, 0x927, 0x928, 0x92A, 0x92B, 0x92C, 0x92D, 0x92E, 0x92F, 0x932, 0x933,
+    0x935, 0x936, 0x937, 0x938,
+];
+
 const SCRIPTS: &[Script] = &[
+    // Hindi, Nepali, Marathi: half forms and a reph; the ra after a halant (क्र) is a small ra below.
+    Script { name: "Devanagari", tags: &[*b"dev2", *b"deva"], features: &[*b"half"], virama: 0x94D, consonants: &[(0x915, 0x939)], kind: Kind::Half, only: DEVANAGARI_STEMMED, reph: Some(0x930), zwj: false, block: (0x900, 0x97F) },
+    Script { name: "Devanagari (ra below)", tags: &[*b"dev2", *b"deva"], features: &[*b"blwf"], virama: 0x94D, consonants: &[(0x915, 0x939)], kind: Kind::Below, only: &[0x930], reph: None, zwj: false, block: (0x900, 0x97F) },
     Script { name: "Bengali", tags: &[*b"bng2", *b"beng"], features: &[*b"half"], virama: 0x9CD, consonants: &[(0x995, 0x9B9)], kind: Kind::Half, only: &[], reph: Some(0x9B0), zwj: false, block: (0x980, 0x9FF) },
     Script { name: "Gujarati", tags: &[*b"gjr2", *b"gujr"], features: &[*b"half"], virama: 0xACD, consonants: &[(0xA95, 0xAB9)], kind: Kind::Half, only: &[], reph: Some(0xAB0), zwj: false, block: (0xA80, 0xAFF) },
     Script { name: "Odia", tags: &[*b"ory2", *b"orya"], features: &[*b"half"], virama: 0xB4D, consonants: &[(0xB15, 0xB39)], kind: Kind::Half, only: &[], reph: Some(0xB30), zwj: false, block: (0xB00, 0xB7F) },
@@ -142,7 +152,7 @@ pub fn derived(set: &std::collections::BTreeMap<u32, Glyph>) -> (Vec<GlyphSpec>,
     for (si, s) in SCRIPTS.iter().enumerate() {
         let Some(virama) = char::from_u32(s.virama) else { continue };
         for (&cp, g) in set {
-            if !wanted(s, cp) || g.combining || g.width != 16 {
+            if !(wanted(s, cp) || s.reph == Some(cp)) || g.combining || g.width != 16 {
                 continue;
             }
             let Some(c) = char::from_u32(cp) else { continue };
@@ -400,7 +410,7 @@ mod tests {
             let virama = char::from_u32(s.virama).unwrap();
             let lig = ligs
                 .iter()
-                .find(|l| l.components.contains(&virama) && s.tags.contains(&l.script) && l.feature != *b"rphf")
+                .find(|l| l.components.contains(&virama) && s.tags.contains(&l.script) && s.features.contains(&l.feature))
                 .unwrap_or_else(|| panic!("{} has no conjunct ligature", s.name));
             let g = glyph_of(&specs, lig.to);
             let ys: Vec<i32> = g.layers[0].rects.iter().map(|r| r.y0).collect();
@@ -422,7 +432,9 @@ mod tests {
         let reph: Vec<&Ligature> = ligs.iter().filter(|l| l.feature == *b"rphf").collect();
         for s in SCRIPTS {
             let has = reph.iter().any(|l| s.tags.contains(&l.script));
-            assert_eq!(has, s.reph.is_some(), "{}", s.name);
+            // A script can be listed twice (Devanagari's half forms and its ra-below): one of them owns the reph.
+            let wants = SCRIPTS.iter().any(|t| t.tags == s.tags && t.reph.is_some());
+            assert_eq!(has, wants, "{}", s.name);
         }
         for l in reph {
             let g = glyph_of(&specs, l.to);

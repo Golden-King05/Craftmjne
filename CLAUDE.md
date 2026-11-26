@@ -3876,3 +3876,18 @@ etc.) instead of inventing a new approach:
     Existing saved codes (`zh-Hant`, `zh-Hans`) still work, but `zh-Hant` now means the generic Mandarin text, not Taiwan's -
     the integration test that expected `設定` from `zh-Hant` had to move to `zh-Hant-TW`.
   - Plural rules treat `yue` like `zh` (no plural).
+
+- **Devanagari moved from hand-drawn glyphs to Unifont, and the old notes about `pixel_devanagari.rs` are
+  superseded (the file is deleted).** Unifont covers the whole block; `conjuncts.rs` now derives half forms,
+  reph and below-base ra for it, tested through cosmic-text in `fonts.rs`. Unifont draws right-hand signs and
+  visarga in their own cell, which made words look gapped, so `scripts::overlay_spacing_signs` gives
+  `OVERLAID_SIGNS` zero advance and shifts them onto the letter. Found by looking at a screenshot.
+- **Arabic (MSA) is the first RTL language, and mixed-direction text needs isolates.** `Meta.rtl` is only
+  recorded so far. `lang::both()` wraps each name in U+2068..2069 when either side has RTL characters, or
+  bidi shuffles "Español / Spanish"-style pairs; the font therefore needs zero-width glyphs for the bidi
+  controls (else they draw as boxes), and `glyphs_stay_inside_the_cell_and_have_ink` exempts zero-advance
+  blank glyphs. `plural_category` has the six-form Arabic rule; extra forms are plain `key.zero/.two/.few/.many`.
+  Long translations overflowed fixed-width tabs, so `ButtonOpts::grow` sizes a button to its label.
+  The translations are my own and unreviewed by a native reader; UI layout is not mirrored.
+- **Dialect-ready is a tested property, not a promise:** `a_dialect_can_name_a_new_thing_its_own_way_before_anyone_needs_it_to`
+  (eggplant: en / en-GB Aubergine / en-IN Brinjal / en-NZ inherits). Each dialect stays its own list entry.

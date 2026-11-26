@@ -285,17 +285,12 @@ fn rebuild_settings(
                     Section::Packs => 84.0,
                     _ => 72.0,
                 };
-                sbutton(
+                // A tab grows to fit its label, so a long translation is never drawn outside its button.
+                theme::button(
                     row,
-                    &tab_label(section, &bindings),
                     SettingsButton::Section(section),
-                    ButtonStyle::Choice,
-                    width,
-                    38.0,
-                    14.0,
-                    section == view.section,
-                    if clash { RED } else { theme::TEXT },
-                    clash.then_some(RED),
+                    &tab_label(section, &bindings),
+                    ButtonOpts::new(ButtonStyle::Choice).size(width, 38.0).font(14.0).selected(section == view.section).text(if clash { RED } else { theme::TEXT }).accent(clash.then_some(RED)).grow(),
                 );
             }
         });

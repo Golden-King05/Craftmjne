@@ -53,6 +53,9 @@ pub struct Meta {
     pub group: Option<String>,
     pub fallback: Option<String>,
     pub cjk: Option<String>,
+    /// Written right to left (Arabic). Recorded for the interface to use; text itself is laid out by the text
+    /// engine's bidi handling either way.
+    pub rtl: Option<bool>,
 }
 
 /// One parsed `lang/<code>.json`.
@@ -90,6 +93,7 @@ pub struct Language {
     pub group: String,
     pub fallback: Option<String>,
     pub cjk: Option<String>,
+    pub rtl: bool,
     pub strings: HashMap<String, String>,
 }
 
@@ -117,7 +121,7 @@ impl Catalog {
         let mut langs: BTreeMap<String, Language> = BTreeMap::new();
         langs.insert(
             ENGLISH.into(),
-            Language { code: ENGLISH.into(), name: "English (United States)".into(), group: "English".into(), fallback: None, cjk: None, strings: HashMap::new() },
+            Language { code: ENGLISH.into(), name: "English (United States)".into(), group: "English".into(), fallback: None, cjk: None, rtl: false, strings: HashMap::new() },
         );
         for f in files {
             let lang = langs.entry(f.code.clone()).or_insert_with(|| Language {
@@ -126,6 +130,7 @@ impl Catalog {
                 group: f.code.clone(),
                 fallback: None,
                 cjk: None,
+                rtl: false,
                 strings: HashMap::new(),
             });
             if let Some(m) = &f.meta {
@@ -138,6 +143,7 @@ impl Catalog {
                 }
                 lang.fallback = lang.fallback.take().or_else(|| m.fallback.clone());
                 lang.cjk = lang.cjk.take().or_else(|| m.cjk.clone());
+                lang.rtl |= m.rtl.unwrap_or(false);
             }
             lang.strings.extend(f.entries);
         }
@@ -216,9 +222,23 @@ impl Catalog {
     }
 }
 
-/// `one` or `other`, by the language's own rule (the base language of the code decides).
+/// `zero`, `one`, `two`, `few`, `many` or `other`, by the language's own rule (the base language of the code decides).
+/// Only Arabic needs more than `one`/`other` so far; a language file gives the forms its rule can produce
+/// (`key.one`, `key.two`...) and `key.other` is what every language must have.
 pub fn plural_category(code: &str, n: i64) -> &'static str {
     let base = code.split('-').next().unwrap_or(code);
+    if base == "ar" {
+        // CLDR: 0 zero, 1 one, 2 two, 3-10 few (by the last two digits), 11-99 many, the rest other.
+        let m = n.unsigned_abs() % 100;
+        return match n.unsigned_abs() {
+            0 => "zero",
+            1 => "one",
+            2 => "two",
+            _ if (3..=10).contains(&m) => "few",
+            _ if (11..=99).contains(&m) => "many",
+            _ => "other",
+        };
+    }
     let one = match base {
         // No plural forms.
         "zh" | "yue" | "ja" | "ko" | "vi" | "th" | "id" => false,
@@ -386,12 +406,25 @@ impl Languages {
     }
 }
 
-/// A name next to its translation, once if they are the same.
+/// A name next to its translation, once if they are the same. When one of them is written right to left
+/// (Arabic) each is wrapped in a Unicode isolate, so the two stay in their own runs instead of the bidi algorithm
+/// shuffling the Latin and Arabic words of one line into each other.
 fn both(native: &str, translated: Option<&str>) -> String {
     match translated {
-        Some(t) if !t.is_empty() && t != native => format!("{native} / {t}"),
+        Some(t) if !t.is_empty() && t != native => {
+            if has_rtl(native) || has_rtl(t) {
+                format!("\u{2068}{native}\u{2069} / \u{2068}{t}\u{2069}")
+            } else {
+                format!("{native} / {t}")
+            }
+        }
         _ => native.to_string(),
     }
+}
+
+/// Whether `s` has any character from a right-to-left script (Hebrew, Arabic, Syriac, Thaana, N'Ko...).
+fn has_rtl(s: &str) -> bool {
+    s.chars().any(|c| matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF))
 }
 
 pub struct LanguagePlugin;
@@ -528,6 +561,38 @@ mod tests {
     }
 
     #[test]
+    fn a_dialect_can_name_a_new_thing_its_own_way_before_anyone_needs_it_to() {
+        // The day an eggplant is added: English has the reference word, the British branch has its own, the
+        // Indian one another - and everyone else (and every other language's fallback) gets the reference.
+        let c = catalog(&[
+            ("en", r#"{"block.eggplant": "Eggplant", "Done": "Done"}"#),
+            ("en-GB", r#"{"_meta": {"name": "English (United Kingdom)", "group": "English"}, "block.eggplant": "Aubergine"}"#),
+            ("en-IN", r#"{"_meta": {"name": "English (India)", "group": "English"}, "block.eggplant": "Brinjal"}"#),
+            ("en-NZ", r#"{"_meta": {"name": "English (New Zealand)", "group": "English"}}"#),
+        ]);
+        assert_eq!(c.lookup("en-GB", "block.eggplant"), Some("Aubergine"));
+        assert_eq!(c.lookup("en-IN", "block.eggplant"), Some("Brinjal"));
+        assert_eq!(c.lookup("en-NZ", "block.eggplant"), Some("Eggplant"), "no word of its own yet");
+        assert_eq!(c.lookup("en", "block.eggplant"), Some("Eggplant"));
+        assert_eq!(c.lookup("en-GB", "Done"), Some("Done"), "everything else is inherited");
+        // None of them are "behind": a dialect is the reference text plus its differences.
+        for code in ["en", "en-GB", "en-IN", "en-NZ"] {
+            assert_eq!(c.percent(code), 100, "{code}");
+        }
+        // They are separate entries in the list, under one heading.
+        assert_eq!(c.groups().iter().find(|g| g.name == "English").unwrap().members.len(), 4);
+    }
+
+    #[test]
+    fn a_name_in_a_right_to_left_script_is_kept_in_its_own_run() {
+        assert_eq!(both("Español", Some("Spanish")), "Español / Spanish", "left to right: untouched");
+        assert_eq!(both("العربية", Some("Arabic")), "\u{2068}العربية\u{2069} / \u{2068}Arabic\u{2069}");
+        assert_eq!(both("Español", Some("الإسبانية")), "\u{2068}Español\u{2069} / \u{2068}الإسبانية\u{2069}");
+        assert_eq!(both("العربية", Some("العربية")), "العربية", "the same name shows once");
+        assert!(has_rtl("עברית") && has_rtl("ܐܠܗܐ") && !has_rtl("中文"));
+    }
+
+    #[test]
     fn plural_rules_follow_each_language() {
         assert_eq!(plural_category("en", 1), "one");
         assert_eq!(plural_category("en", 0), "other");
@@ -539,6 +604,9 @@ mod tests {
         assert_eq!(plural_category("hi", 0), "one");
         assert_eq!(plural_category("zh-Hant", 1), "other", "Chinese has no plural");
         assert_eq!(plural_category("yue-Hant", 1), "other", "nor does Cantonese");
+        // Arabic has six forms; the last two digits decide few and many.
+        let forms: Vec<&str> = [0, 1, 2, 3, 10, 11, 99, 100, 102, 103, 111, 200].iter().map(|n| plural_category("ar", *n)).collect();
+        assert_eq!(forms, ["zero", "one", "two", "few", "few", "many", "many", "other", "other", "few", "many", "other"]);
     }
 
     #[test]
@@ -635,7 +703,7 @@ mod tests {
     }
 
     const EXPECTED: &[&str] = &[
-        "en", "en-GB", "en-NZ", "en-IN", "en-ZA", "es-ES", "es-MX", "es-PR", "pt-PT", "pt-BR", "fr-FR", "hi", "zh-Hans", "zh-Hant", "zh-Hans-TW", "zh-Hant-TW",
+        "ar", "en", "en-GB", "en-NZ", "en-IN", "en-ZA", "es-ES", "es-MX", "es-PR", "pt-PT", "pt-BR", "fr-FR", "hi", "zh-Hans", "zh-Hant", "zh-Hans-TW", "zh-Hant-TW",
         "zh-Hans-SG", "zh-Hant-SG", "yue-Hant", "yue-Hans",
     ];
 
@@ -649,7 +717,9 @@ mod tests {
             let l = c.language(code).unwrap_or_else(|| panic!("{code} is missing"));
             assert_ne!(l.name, l.code, "{code} has no _meta name");
             for k in l.strings.keys() {
-                assert!(english.contains(k.as_str()), "{code} has {k:?}, which English doesn't");
+                // Arabic's extra plural forms (`key.few`...) belong to a key English has as `key.other`.
+                let plural_of = k.rsplit_once('.').filter(|(_, f)| ["zero", "two", "few", "many"].contains(f)).map(|(b, _)| format!("{b}.other"));
+                assert!(english.contains(k.as_str()) || plural_of.is_some_and(|o| english.contains(o.as_str())), "{code} has {k:?}, which English doesn't");
             }
         }
         for (code, fallback) in [
@@ -670,6 +740,8 @@ mod tests {
         assert_eq!(members("Español").len(), 3);
         assert_eq!(members("中文 (普通话)").len(), 6);
         assert_eq!(members("粵語 (廣東話)"), vec!["yue-Hans".to_string(), "yue-Hant".to_string()]);
+        assert_eq!(members("العربية"), vec!["ar".to_string()]);
+        assert!(c.language("ar").unwrap().rtl && !c.language("en").unwrap().rtl, "Arabic is marked right to left");
     }
 
     #[test]
@@ -714,7 +786,11 @@ mod tests {
         };
         for code in EXPECTED.iter().filter(|c| **c != "en") {
             for (k, v) in &c.language(code).unwrap().strings {
-                let en = c.language("en").unwrap().strings.get(k).unwrap();
+                // Extra plural forms have no English twin; a singular or dual form may drop the number ("one mod").
+                let Some(en) = c.language("en").unwrap().strings.get(k) else { continue };
+                if k.ends_with(".one") || k.ends_with(".two") {
+                    continue;
+                }
                 assert_eq!(holes(v), holes(en), "{code}: {k:?}");
             }
         }
@@ -724,7 +800,7 @@ mod tests {
     /// English and not yet translated (the translations are done when asked for), lower the affected entries
     /// here on purpose - the test then keeps them from slipping further.
     const SHIPPED_PERCENT: &[(&str, u8)] = &[
-        ("en", 100), ("en-GB", 100), ("en-NZ", 100), ("en-IN", 100), ("en-ZA", 100), ("es-ES", 100), ("es-MX", 100), ("es-PR", 100), ("pt-PT", 100),
+        ("ar", 100), ("en", 100), ("en-GB", 100), ("en-NZ", 100), ("en-IN", 100), ("en-ZA", 100), ("es-ES", 100), ("es-MX", 100), ("es-PR", 100), ("pt-PT", 100),
         ("pt-BR", 100), ("fr-FR", 100), ("hi", 100), ("zh-Hans", 100), ("zh-Hant", 100), ("zh-Hans-TW", 100), ("zh-Hant-TW", 100), ("zh-Hans-SG", 100),
         ("zh-Hant-SG", 100), ("yue-Hant", 100), ("yue-Hans", 100),
     ];

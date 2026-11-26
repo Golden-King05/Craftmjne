@@ -91,6 +91,18 @@ fn the_saved_language_is_what_the_game_speaks_and_switching_follows_through() {
     app.update();
     assert_eq!(lang::tr("Done"), "Listo");
     assert_eq!(lang::tr("Settings"), "Configuración");
+    // Arabic: right to left, and six plural forms picked by the count.
+    app.world_mut().resource_mut::<Languages>().select("ar");
+    app.update();
+    assert_eq!(lang::tr("Settings"), "الإعدادات");
+    let mods = |n| lang::tr_n("count.mods", n, "{n} mod", "{n} mods", &[]);
+    assert_eq!(mods(0), "لا تعديلات");
+    assert_eq!(mods(1), "تعديل واحد");
+    assert_eq!(mods(2), "تعديلان");
+    assert_eq!(mods(5), "5 تعديلات", "few: 3-10");
+    assert_eq!(mods(11), "11 تعديلًا", "many: 11-99");
+    assert_eq!(mods(100), "100 تعديل", "other");
+    assert_eq!(mods(103), "103 تعديلات", "few again by the last two digits");
     app.world_mut().resource_mut::<Languages>().select("zh-Hans");
     app.update();
     assert_eq!(lang::tr("Settings"), "设置");

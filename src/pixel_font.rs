@@ -262,9 +262,7 @@ pub fn substitutions() -> Vec<crate::font_gen::Substitution> {
 
 /// The `GSUB` ligatures of the typeface.
 pub fn ligatures() -> Vec<crate::font_gen::Ligature> {
-    let mut v = crate::pixel_arabic::ligatures();
-    v.extend(crate::pixel_devanagari::ligatures());
-    v
+    crate::pixel_arabic::ligatures()
 }
 
 /// Every glyph of the typeface (the space is the font's own).
@@ -342,7 +340,8 @@ mod tests {
     #[test]
     fn glyphs_stay_inside_the_cell_and_have_ink() {
         for g in glyphs() {
-            if g.chars == ['\u{A0}'] {
+            // Non-breaking space and the bidi controls are deliberately blank.
+            if g.chars == ['\u{A0}'] || g.advance == 0 && g.layers.iter().all(|l| l.rects.is_empty()) {
                 continue;
             }
             let rects: Vec<_> = g.layers.iter().flat_map(|l| l.rects.iter()).collect();

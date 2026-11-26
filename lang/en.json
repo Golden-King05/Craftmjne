@@ -333,5 +333,7 @@
  "lang.name.yue-Hant": "Cantonese Chinese (Traditional)",
  "lang.name.yue-Hans": "Cantonese Chinese (Simplified)",
  "lang.group.English": "English",
- "lang.group.粵語 (廣東話)": "Cantonese Chinese"
+ "lang.group.粵語 (廣東話)": "Cantonese Chinese",
+ "lang.name.ar": "Arabic (Modern Standard)",
+ "lang.group.العربية": "Arabic"
 }

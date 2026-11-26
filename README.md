@@ -1724,7 +1724,7 @@ default font that ships with Bevy is turned off, so there is no other font unles
 | Hebrew | the 22 letters, 5 final forms, vowel points (niqqud), dagesh, shin and sin dots | right-to-left layout is the text engine's |
 | Korean | all 11,172 syllables (가-힣) plus the standalone letters (ㄱ-ㅣ) | drawn from strokes (`pixel_hangul.rs`), so they are small and plain |
 | Arabic | the letters with their joining forms (initial, medial, final, isolated), ء أ إ آ ؤ ئ ة, tatweel, ، ؛ ؟, the lam-alef ligature (ل + ا أ إ آ), vowel marks (tashkeel), Persian and Urdu letters (پ چ ژ گ ک ی ٹ ڈ ڑ ں ھ ہ ے), Arabic-Indic and Persian digits | letter bodies are short next to the Latin text; some Urdu letters (ٹ ڈ ڑ) use a simplified mark; the digits ٢ ٣ ٤ ٥ ٦ are best-effort shapes |
-| Hindi (Devanagari) | consonants, independent vowels, vowel signs, anusvara/candrabindu/visarga, halant, nukta, danda, **half forms** (क्ष, ज्ञ, त्त, प्र... are the half-form letter + the next one), reph (र् over a consonant) and the below-base ra (क्र) | consonants with no stem (ङ छ ट ठ ड ढ द ह र) have no half form, so their clusters keep a visible halant; conjuncts are *composed*, not the special ligature shapes (क्ष and ज्ञ look like half + full letter); digits are drawn like 0-9; the letter art is a first pass and crude at this size |
+| Hindi (Devanagari) | the whole Devanagari block (and Vedic extensions) from Unifont, with **half forms** (क्ष, ज्ञ, त्त, प्र...), reph (र् over a consonant) and the below-base ra (क्र) derived by `conjuncts.rs`; right-hand signs and visarga are overlaid on their letter instead of taking their own cell | consonants with no stem keep a visible halant; conjuncts are composed, not the special ligature shapes; 16-pixel letters among 12-pixel Latin |
 
 How they work, so a pack author knows what to expect:
 
@@ -2159,3 +2159,15 @@ fully smooth, per-vertex-averaged Minecraft-style corner blend).
 ## License
 
 MIT — all textures are generated at runtime; no third-party assets.
+
+## Arabic and dialects
+
+Modern Standard Arabic (`lang/ar.json`) is the first right-to-left language. Its `_meta` sets `"rtl": true`
+(recorded for a future mirrored layout; the UI is not mirrored yet), and it uses all six Arabic plural forms
+(`key.zero/.one/.two/.few/.many/.other`). Names that mix scripts in the language list are wrapped in Unicode
+isolates so Arabic and Latin text don't reorder each other. Arabic dialects will be separate files that
+fall back to it, like Spanish (Mexico) does to Spanish (Spain).
+
+Dialects are ready for words that differ: a dialect file only holds the keys it names differently and inherits
+the rest. If the game ever adds an eggplant, `en-GB.json` can say `"block.eggplant": "Aubergine"` and British
+English players see it, while everyone else sees "Eggplant" (a test covers this).

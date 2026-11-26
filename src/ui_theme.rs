@@ -157,11 +157,13 @@ pub struct ButtonOpts {
     pub accent: Option<Color>,
     /// A controller button's picture drawn before the label.
     pub glyph: Option<crate::gamepad::PadButton>,
+    /// The width is a minimum: the button grows to fit a longer label (a translation).
+    pub grow: bool,
 }
 
 impl ButtonOpts {
     pub fn new(style: ButtonStyle) -> Self {
-        Self { style, width: 320.0, height: 46.0, font: 19.0, selected: false, text: TEXT, accent: None, glyph: None }
+        Self { style, width: 320.0, height: 46.0, font: 19.0, selected: false, text: TEXT, accent: None, glyph: None, grow: false }
     }
 
     pub fn size(mut self, width: f32, height: f32) -> Self {
@@ -182,6 +184,12 @@ impl ButtonOpts {
 
     pub fn text(mut self, color: Color) -> Self {
         self.text = color;
+        self
+    }
+
+    /// Lets the button grow wider than `size`'s width to fit its label.
+    pub fn grow(mut self) -> Self {
+        self.grow = true;
         self
     }
 
@@ -209,11 +217,12 @@ pub fn button(parent: &mut ChildSpawnerCommands, action: impl Bundle, label: &st
             action,
             ThemedButton { style: o.style, selected: o.selected, accent: o.accent },
             Node {
-                width: Val::Px(o.width),
+                width: if o.grow { Val::Auto } else { Val::Px(o.width) },
+                min_width: if o.grow { Val::Px(o.width) } else { Val::Auto },
                 height: Val::Px(o.height),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
-                padding: UiRect::horizontal(Val::Px(14.0)),
+                padding: UiRect::horizontal(Val::Px(if o.grow { 8.0 } else { 14.0 })),
                 ..default()
             },
         ))

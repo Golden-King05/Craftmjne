@@ -535,6 +535,38 @@ mod tests {
     }
 
     #[test]
+    fn the_bidi_control_characters_are_in_the_font_and_take_no_room() {
+        let bytes = default_font_bytes();
+        let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+        for c in ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{61C}'] {
+            let g = face.glyph_index(c).unwrap_or_else(|| panic!("U+{:04X} has no glyph, so it would draw as a box", c as u32));
+            assert_eq!(face.glyph_hor_advance(g), Some(0), "U+{:04X} must take no room", c as u32);
+        }
+    }
+
+    #[test]
+    fn hindi_conjuncts_form_from_unifonts_letters_in_the_real_text_engine() {
+        let mut fs = engine();
+        // Half forms: क्ष (ksha), क्त, न्द, ज्ञ - the first letter is cut to its stem, so two glyphs.
+        for (name, text) in [("ksha", "\u{915}\u{94D}\u{937}"), ("kta", "\u{915}\u{94D}\u{924}"), ("nda", "\u{928}\u{94D}\u{926}"), ("jnya", "\u{91C}\u{94D}\u{91E}")] {
+            assert_eq!(count(&mut fs, text), 2, "{name}");
+        }
+        // Reph (र् over the next letter) and the ra below (क्र): one glyph for the ra + halant each.
+        assert_eq!(count(&mut fs, "\u{930}\u{94D}\u{915}"), 2, "reph");
+        assert_eq!(count(&mut fs, "\u{915}\u{94D}\u{930}"), 2, "ra below");
+        assert_ne!(first_glyph(&mut fs, "\u{915}\u{94D}\u{930}"), first_glyph(&mut fs, "\u{915}\u{94D}\u{924}") + 1);
+        // Letters with no stem keep a visible halant (ट्ट stays three glyphs), and so does a final halant.
+        assert_eq!(count(&mut fs, "\u{91F}\u{94D}\u{91F}"), 3, "no stem to cut");
+        assert_eq!(count(&mut fs, "\u{915}\u{94D}"), 2, "final halant");
+        // The i sign is typed after its letter and drawn before it: कि is two glyphs, the sign first.
+        let ki = engine_glyphs(&mut fs, "\u{915}\u{93F}");
+        assert_eq!(ki.len(), 2);
+        assert_eq!(ki[1].2, first_glyph(&mut fs, "\u{915}"), "the consonant comes second");
+        // A real word: हिन्दी (Hindi) = ह + ि + न + ् + द + ी: the न takes its half form, the sign reorders.
+        assert_eq!(count(&mut fs, "\u{939}\u{93F}\u{928}\u{94D}\u{926}\u{940}"), 5);
+    }
+
+    #[test]
     fn sinhala_conjuncts_need_the_joiner_and_tamil_keeps_its_pulli_except_in_its_two_ligatures() {
         let mut fs = engine();
         // Yansaya / rakaransaya: al-lakuna + zero-width joiner + letter.

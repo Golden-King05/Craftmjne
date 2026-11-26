@@ -196,7 +196,10 @@ pub fn glyphs() -> Vec<GlyphSpec> {
     out.extend(crate::pixel_vietnamese::glyphs());
     out.extend(crate::pixel_hangul::glyphs());
     out.extend(crate::pixel_arabic::glyphs());
-    out.extend(crate::pixel_devanagari::glyphs());
+    // The invisible direction controls (isolates, direction marks): without a glyph each is drawn as a box.
+    for c in ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{61C}'] {
+        out.push(crate::font_gen::GlyphSpec { chars: vec![c], advance: 0, layers: vec![crate::font_gen::Layer { color: 0, rects: vec![] }], colour: false });
+    }
     out
 }
 
