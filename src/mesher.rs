@@ -405,6 +405,57 @@ fn push_floor(bucket: &mut MeshBucket, padded: &PaddedChunk, tables: &Tables, at
     bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
 }
 
+/// How far in from the cell's corners a plant's two crossed pictures start,
+/// so their ends don't touch the blocks beside them (vanilla's value).
+const PLANT_INSET: f32 = 0.15;
+
+/// A plant (`blocks::Shape::Plant`): its texture on two flat pictures
+/// crossed in an X along the cell's diagonals, `tables.plant_height` blocks
+/// tall, both lit by the plant's own cell and tinted by the biome when its
+/// top face is `tinted`. The chunk material draws both sides and cuts out
+/// the transparent pixels, so the same picture serves both planes.
+///
+/// A plant shorter than its tile shows the tile's *bottom* part, so a pixel
+/// stays square: a half-block plant uses the lower 8 rows of its 16.
+#[allow(clippy::too_many_arguments)]
+fn push_plant(
+    bucket: &mut MeshBucket,
+    padded: &PaddedChunk,
+    tables: &Tables,
+    at: [f32; 3],
+    cell: usize,
+    id: BlockId,
+    tint: [f32; 3],
+) {
+    let (block_rgb, sky_rgb) = vertex_light(padded, tables, [cell; 4]);
+    let height = tables.plant_height[id as usize];
+    let tile = tables.tiles[id as usize * 6 + 2] as usize;
+    let tu = (tile % ATLAS_TILES) as f32 * UV_TILE;
+    let tv = (tile / ATLAS_TILES) as f32 * UV_TILE;
+    let m = tint_brightness(tint);
+    let (lo, hi) = (PLANT_INSET, 1.0 - PLANT_INSET);
+    // Each picture: its two ends on the floor, as (x, z).
+    for ends in [[(lo, lo), (hi, hi)], [(hi, lo), (lo, hi)]] {
+        let vi = bucket.positions.len() as u32;
+        // Corner order: bottom-left, bottom-right, top-left, top-right.
+        for (u, top) in [(0.0f32, false), (1.0, false), (0.0, true), (1.0, true)] {
+            let (x, z) = ends[u as usize];
+            bucket.positions.push([at[0] + x, at[1] + if top { height } else { 0.0 }, at[2] + z]);
+            let v = if top { 1.0 - height } else { 1.0 };
+            bucket.uvs.push([tu + tables.uv_pad + u * tables.uv_span, tv + tables.uv_pad + v * tables.uv_span]);
+            bucket.colors.push([
+                block_rgb[0].max(AMBIENT_LIGHT) * m,
+                block_rgb[1].max(AMBIENT_LIGHT) * m,
+                block_rgb[2].max(AMBIENT_LIGHT) * m,
+                sky_rgb[0] * m,
+            ]);
+            bucket.sky_gb.push([sky_rgb[1] * m, sky_rgb[2] * m]);
+            bucket.tint.push(tint);
+        }
+        bucket.indices.extend([vi, vi + 1, vi + 2, vi + 2, vi + 1, vi + 3]);
+    }
+}
+
 /// A block drawn by a resource pack's model (`models.rs`): each textured box face as one quad,
 /// lit from the cell outside that face, shaded like an ordinary face of that direction. A face
 /// lying on the cell's edge is hidden by a neighbour that occludes (`Tables::occludes`), exactly
@@ -546,6 +597,16 @@ pub fn mesh_chunk_styled(
                 if let Some(model) = &tables.pack_models[id as usize] {
                     let bucket = if tables.translucent[id as usize] { &mut water } else { &mut solid };
                     push_pack_model(bucket, padded, tables, model, [x as f32, y as f32, z as f32], cell);
+                    continue;
+                }
+
+                if tables.plant[id as usize] {
+                    let tint = if tables.tinted[id as usize * 6 + 2] {
+                        crate::biome::grass_tint(climate, chunk_origin.0 + x, chunk_origin.1 + z)
+                    } else {
+                        [1.0; 3]
+                    };
+                    push_plant(&mut solid, padded, tables, [x as f32, y as f32, z as f32], cell, id, tint);
                     continue;
                 }
 
@@ -1667,5 +1728,56 @@ mod tests {
         padded.blocks[padded_index(5, 10, 4)] = stone;
         let beside = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
         assert_eq!(beside.solid.positions.len(), 6 * 4, "all six faces of the stone, including the one against the dummy");
+    }
+
+    /// The corners of a plant's pictures, for the plant at (5, 11, 5) on stone.
+    fn plant_mesh(name: &str) -> (Vec<[f32; 3]>, Vec<[f32; 2]>, usize) {
+        let (reg, tables) = tables();
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 10, 5)] = reg.id("stone");
+        padded.blocks[padded_index(5, 11, 5)] = reg.id(name);
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        let n = mesh.solid.positions.len();
+        (mesh.solid.positions[24..].to_vec(), mesh.solid.uvs[24..].to_vec(), n)
+    }
+
+    #[test]
+    fn a_plant_is_two_pictures_crossed_in_an_x_as_tall_as_it_says() {
+        for (name, height) in [("grass_short", 0.5f32), ("grass_plain", 1.0), ("grass_medium_top", 0.5), ("grass_large_top", 1.0)] {
+            let (pos, _, n) = plant_mesh(name);
+            assert_eq!(n, 24 + 8, "{name}: the stone's six faces and the plant's two quads");
+            assert!(pos.iter().all(|p| p[1] == 11.0 || (p[1] - (11.0 + height)).abs() < 1e-6), "{name} stands {height} tall");
+            assert_eq!(pos.iter().filter(|p| p[1] != 11.0).count(), 4);
+            // One picture along each diagonal of the cell: the two corner
+            // pairs (lo,lo)-(hi,hi) and (hi,lo)-(lo,hi).
+            let (lo, hi) = (5.0 + PLANT_INSET, 6.0 - PLANT_INSET);
+            let at = |x: f32, z: f32| pos.iter().any(|p| (p[0] - x).abs() < 1e-6 && (p[2] - z).abs() < 1e-6);
+            assert!(at(lo, lo) && at(hi, hi) && at(hi, lo) && at(lo, hi), "{name}: both diagonals");
+        }
+    }
+
+    #[test]
+    fn a_half_height_plant_shows_the_bottom_half_of_its_tile_so_pixels_stay_square() {
+        let (_, tables) = tables();
+        let (_, uvs_full, _) = plant_mesh("grass_plain");
+        let (_, uvs_half, _) = plant_mesh("grass_short");
+        let span = |uvs: &[[f32; 2]]| {
+            let (lo, hi) = uvs.iter().fold((f32::MAX, f32::MIN), |(l, h), uv| (l.min(uv[1]), h.max(uv[1])));
+            hi - lo
+        };
+        let (full, half) = (span(&uvs_full), span(&uvs_half));
+        assert!((full - tables.uv_span).abs() < 1e-6, "a block-tall plant uses the whole tile");
+        assert!((half - tables.uv_span * 0.5).abs() < 1e-6, "a half-block one uses half of it");
+    }
+
+    #[test]
+    fn a_plant_hides_nothing_next_to_it() {
+        let (reg, tables) = tables();
+        let mut padded = lit_padded();
+        padded.blocks[padded_index(5, 11, 5)] = reg.id("grass_plain");
+        padded.blocks[padded_index(6, 11, 5)] = reg.id("stone");
+        let mesh = mesh_chunk(&padded, &tables, &no_tint(), (0, 0));
+        // The stone keeps all six faces, the one beside the plant included.
+        assert_eq!(mesh.solid.positions.len(), 6 * 4 + 8);
     }
 }

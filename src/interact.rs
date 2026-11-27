@@ -489,6 +489,10 @@ fn interact(
             // A thin box around something lying on the ground, a cube otherwise.
             let (centre, size) = if flat {
                 (hit.pos.as_vec3() + Vec3::new(0.5, 0.05, 0.5), Vec3::new(1.002, 0.1, 1.002))
+            } else if registry.def(id).shape == Shape::Plant {
+                // As tall as the plant, and as wide as its crossed pictures.
+                let h = registry.def(id).height;
+                (hit.pos.as_vec3() + Vec3::new(0.5, h * 0.5, 0.5), Vec3::new(0.72, h + 0.002, 0.72))
             } else {
                 (hit.pos.as_vec3() + Vec3::splat(0.5), Vec3::splat(1.002))
             };
@@ -594,7 +598,7 @@ fn interact(
             let blocked = registry.def(id).solid
                 && (player.intersects_block(place_pos) || player.solids.iter().any(|b| b.overlaps_cell(place_pos)));
             // Something that lies on the ground needs ground under it.
-            let unsupported = registry.def(id).shape == Shape::Floor
+            let unsupported = matches!(registry.def(id).shape, Shape::Floor | Shape::Plant)
                 && !registry.def(map.get_block(place_pos - IVec3::Y)).solid;
             // A block two cells tall needs the cell above free too.
             let upper = registry.upper_half(id);
@@ -662,7 +666,7 @@ fn interact(
     }
 }
 
-/// Breaks off a floor-shaped block (a pebble, a twig) whose support just
+/// Breaks off a floor-shaped block or plant (a pebble, a twig, grass) whose support just
 /// went - the block under it was mined, or replaced by something it can't
 /// rest on - dropping it as an item, the way it would drop if mined.
 fn pop_unsupported(
@@ -677,18 +681,32 @@ fn pop_unsupported(
         let after = content.blocks.left_behind(map.get_block(above));
         if let Some(prev) = unsupported_floor(&map, &content.blocks, above).and_then(|_| map.set_block(above, after)) {
             events.p1().write(BlockSetEvent { pos: above, id: after, prev });
-            if let Some(stack) = content.items.drop_of(&content.blocks, prev, 0.0) {
-                drops.write(mined_drop(above, stack));
+            // The top half of a tall plant falling with its bottom half
+            // drops nothing: the bottom half drops the one item.
+            if content.blocks.lower_half(prev).is_none() {
+                if let Some(stack) = content.items.drop_of(&content.blocks, prev, 0.0) {
+                    drops.write(mined_drop(above, stack));
+                }
             }
         }
     }
 }
 
-/// `Some` if the block at `pos` lies on the ground and nothing solid is
-/// under it any more.
+/// `Some` if the block at `pos` lies on the ground (or is a plant's upper half)
+/// and nothing solid (or its lower half) is under it any more.
 pub fn unsupported_floor(map: &ChunkMap, blocks: &BlockRegistry, pos: IVec3) -> Option<BlockId> {
     let id = map.get_block(pos);
-    (blocks.def(id).shape == Shape::Floor && !blocks.def(map.get_block(pos - IVec3::Y)).solid).then_some(id)
+    if !matches!(blocks.def(id).shape, Shape::Floor | Shape::Plant) {
+        return None;
+    }
+    let below = map.get_block(pos - IVec3::Y);
+    // The upper half of a tall plant stands on its lower half; anything
+    // else on solid ground.
+    let held = match blocks.lower_half(id) {
+        Some(lower) => below == lower,
+        None => blocks.def(below).solid,
+    };
+    (!held).then_some(id)
 }
 
 /// The block, item and recipe lists, as one system parameter.
@@ -1046,5 +1064,26 @@ mod tests {
         assert!(!upper_fits(&map, &reg, lower, at), "a block overhead leaves no room");
         assert!(upper_fits(&map, &reg, stone, at), "a one-cell block doesn't care");
         assert!(!upper_fits(&map, &reg, lower, IVec3::new(4, WORLD_HEIGHT - 1, 4)), "nor does the top of the world");
+    }
+
+    #[test]
+    fn a_plant_needs_solid_ground_and_a_tall_ones_top_half_needs_its_bottom_half() {
+        let (mut map, reg) = dummy_world();
+        let (stone, short, medium, top) = (reg.id("stone"), reg.id("grass_short"), reg.id("grass_medium"), reg.id("grass_medium_top"));
+        let at = IVec3::new(4, 20, 4);
+        map.set_block(at - IVec3::Y, stone);
+        map.set_block(at, medium);
+        map.set_block(at + IVec3::Y, top);
+        assert_eq!(unsupported_floor(&map, &reg, at), None);
+        assert_eq!(unsupported_floor(&map, &reg, at + IVec3::Y), None, "stands on its bottom half");
+        // The ground goes: the bottom half is loose, and then so is the top.
+        map.set_block(at - IVec3::Y, AIR);
+        assert_eq!(unsupported_floor(&map, &reg, at), Some(medium));
+        map.set_block(at, AIR);
+        assert_eq!(unsupported_floor(&map, &reg, at + IVec3::Y), Some(top));
+        // A short plant on a plant is not on the ground.
+        map.set_block(at, short);
+        map.set_block(at + IVec3::Y, short);
+        assert_eq!(unsupported_floor(&map, &reg, at + IVec3::Y), Some(short));
     }
 }

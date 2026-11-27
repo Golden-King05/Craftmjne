@@ -326,6 +326,23 @@ Mine the block under one and it drops as an item. Both are
 cell, and you swim past it as if it were water. They're the first step
 toward the first tools.
 
+### Grass plants
+
+Four plants grow on grass, in patches (some bare, some thick; about a third of
+the grass columns in all): **short grass** (half a block tall), **plain grass**
+(one), **medium grass** (one and a half) and **large grass** (two), commonest
+first. They are `"shape": "plant"` blocks: two copies of one texture crossed in
+an X inside the cell, tinted by the biome like the grass block's top, with no
+collision (you walk through them), instant to pick up, and placeable again
+on solid ground. Medium and large grass are two blocks, `grass_medium` +
+`grass_medium_top` (the top half is half a block) and `grass_large` +
+`grass_large_top`, placed and broken together like the training dummy; mining
+either half gives one item. If the ground under one goes, it breaks off.
+Water that reaches one replaces it. Textures: `textures/blocks/grass_short.png`,
+`grass_plain.png`, `grass_medium.png`, `grass_medium_top.png`, `grass_large.png`,
+`grass_large_top.png` (grey masks: the biome colours them); a shorter-than-a-block
+plant draws the *bottom* part of its tile.
+
 ### Throwing
 
 **Left click with a pebble in hand throws it** (it stacks like any block item).
@@ -1937,7 +1954,8 @@ by) is required. Everything else defaults sanely:
 | `solid` | `true` (`false` if `fluid`) | collides with entities |
 | `selectable` | `true` (`false` if `fluid`) | can be targeted by the crosshair |
 | `replaceable` | `false` (`true` if `fluid`) | placing into this cell overwrites it |
-| `shape` | `"cube"` | `"floor"` lies flat on the block below (pebbles, twigs): only its top texture is drawn, a hair above the ground. Defaults to no collision, see-through, replaceable, a flat icon, and needs something solid under it |
+| `shape` | `"cube"` | `"plant"` is two copies of the top texture crossed in an X, `height` tall (see `height`), walk-through, replaceable, flat icon, needs solid ground; `"floor"` lies flat on the block below (pebbles, twigs): only its top texture is drawn, a hair above the ground. Defaults to no collision, see-through, replaceable, a flat icon, and needs something solid under it |
+| `height` | `1.0` | how tall a `"plant"` stands in blocks (at most 1 per cell; a taller plant is a block with an `upper` half). A plant shows the lower part of its tile when shorter than 1, so pixels stay square |
 | `breakable` | `true` | whether it can be mined at all, in either mode; bedrock sets this `false` |
 | `hardness` | `1.0` | how long it takes to mine in Survival: `hardness` x 1.5 seconds by hand. `0` is instant (torch), dirt `0.5`, stone `1.5` |
 | `drops` | `true` | what mining it in Survival gives: `true` itself, `false` nothing, or a block id (`"dirt"` for grass). An unknown id fails at startup |

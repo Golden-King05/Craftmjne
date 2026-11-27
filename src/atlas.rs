@@ -431,6 +431,39 @@ pub fn normalize_tint_mask_tile(atlas: &mut AtlasData, name: &str) {
     }
 }
 
+/// Where the blades of a grass plant tile end.
+enum Tips {
+    /// Each blade ends on its own row in this range (inclusive).
+    Between(i32, i32),
+    /// Every blade reaches the top edge, to carry on into the half above.
+    ToTop,
+}
+
+/// The columns grass blades stand in. Every grass tile uses the same ones,
+/// so a tall plant's halves line up.
+const BLADE_COLUMNS: [i32; 8] = [1, 3, 4, 7, 9, 11, 12, 14];
+
+/// Paints grass blades from row 15 up to a tip, nothing above `top_row`.
+fn grass_blades(t: &mut TilePainter, rng: &mut dyn FnMut() -> f32, top_row: i32, tips: Tips) {
+    for &x in &BLADE_COLUMNS {
+        let tip = match tips {
+            Tips::ToTop => 0,
+            Tips::Between(lo, hi) => (lo + (rng() * (hi - lo + 1) as f32) as i32).clamp(lo.max(top_row), hi),
+        };
+        for y in tip..=15 {
+            // Paler toward the tip, darker in the shade at the roots.
+            let v = 150.0 + 80.0 * (1.0 - y as f32 / 15.0) + (rng() - 0.5) * 24.0;
+            t.px(x, y, [v * 0.8, v, v * 0.65]);
+        }
+        // Blades are wider at the root.
+        if x % 2 == 1 {
+            for y in 12..=15 {
+                t.px(x + 1, y, [140.0, 175.0, 115.0]);
+            }
+        }
+    }
+}
+
 /// Runs `paint` into a fresh `BASE_TILE_SIZE` scratch tile (seeded from
 /// `name`, so the same name always paints the same way) and upscales to
 /// `tile_size` if the atlas resolution ended up larger - the one place
@@ -744,6 +777,19 @@ pub fn default_painters() -> Painters {
         }
     });
 
+    // Grass plants: blades standing on a transparent background, drawn as a
+    // light mask (like `grass_top`) because the biome tints them green. A
+    // plant shorter than its tile shows only the tile's lower rows (see
+    // `mesher::push_plant`), so a short one is drawn in the bottom half.
+    // A tall plant's upper half uses the same blade columns as its lower
+    // half, so the blades carry on across the join.
+    p.register("grass_short", |t, rng| grass_blades(t, rng, 8, Tips::Between(8, 12)));
+    p.register("grass_plain", |t, rng| grass_blades(t, rng, 0, Tips::Between(1, 8)));
+    p.register("grass_medium", |t, rng| grass_blades(t, rng, 0, Tips::ToTop));
+    p.register("grass_medium_top", |t, rng| grass_blades(t, rng, 8, Tips::Between(9, 13)));
+    p.register("grass_large", |t, rng| grass_blades(t, rng, 0, Tips::ToTop));
+    p.register("grass_large_top", |t, rng| grass_blades(t, rng, 0, Tips::Between(2, 8)));
+
     // The training dummy's inventory icon: a little grey figure on a
     // transparent background (its world model is drawn by `block_models.rs`).
     p.register("training_dummy", |t, rng| {
@@ -910,7 +956,7 @@ mod tests {
         let a = build_atlas(&default_painters());
         let b = build_atlas(&default_painters());
         assert_eq!(a.pixels, b.pixels);
-        assert_eq!(a.indices.len(), 28 + DESTROY_STAGES);
+        assert_eq!(a.indices.len(), 34 + DESTROY_STAGES);
         // No custom textures are supplied in this test run, so the atlas
         // stays at the base procedural resolution.
         assert_eq!(a.tile_size, BASE_TILE_SIZE);

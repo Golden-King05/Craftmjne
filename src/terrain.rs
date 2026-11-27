@@ -59,6 +59,16 @@ const TWIG_RADIUS: i32 = 2;
 const TWIG_CHANCE: f32 = 0.09;
 /// Chance any other dry, open column has a pebble on it.
 const PEBBLE_CHANCE: f32 = 0.016;
+/// Grass plants grow in patches this many blocks across; each patch has its
+/// own density, so a meadow is thick in places and bare in others.
+const PLANT_PATCH: i32 = 5;
+/// The densest a patch gets: the chance a column in it holds a grass plant.
+const PLANT_MAX_COVER: f32 = 0.8;
+/// Patches whose roll is under this stay bare.
+const PLANT_BARE_BELOW: f32 = 0.25;
+/// Which of the four grass plants a column gets, as cumulative shares of the
+/// roll: short, plain, medium, then large for the rest.
+const PLANT_SHARES: [f32; 3] = [0.40, 0.75, 0.93];
 /// Chance a river, lake or sea bed column (two or more blocks deep) has one.
 const BED_PEBBLE_CHANCE: f32 = 0.02;
 
@@ -539,6 +549,20 @@ impl<'a> Blend<'a> {
     }
 }
 
+/// Which grass plant, if any, grows on the grass at this column: a pure
+/// function of the column, so it needs nothing from neighbouring chunks.
+/// Returns the plant's block and, for one taller than a cell, its upper half.
+fn grass_plant_at(wx: i32, wz: i32, seed: u32, ids: &TerrainIds) -> Option<(BlockId, Option<BlockId>)> {
+    let patch = hash2(wx.div_euclid(PLANT_PATCH), wz.div_euclid(PLANT_PATCH), seed ^ 0x6a55);
+    let cover = ((patch - PLANT_BARE_BELOW) / (1.0 - PLANT_BARE_BELOW)).max(0.0) * PLANT_MAX_COVER;
+    if hash2(wx, wz, seed ^ 0x3c91) >= cover {
+        return None;
+    }
+    let roll = hash2(wx, wz, seed ^ 0x51d7);
+    let kind = PLANT_SHARES.iter().position(|&share| roll < share).unwrap_or(PLANT_SHARES.len());
+    Some(ids.grass_plants[kind])
+}
+
 struct TerrainIds {
     stone: BlockId,
     dirt: BlockId,
@@ -557,6 +581,9 @@ struct TerrainIds {
     salt: BlockId,
     pebble: BlockId,
     twig: BlockId,
+    /// The four grass plants, shortest first, each with the block that
+    /// stands on top of it if it is taller than one cell.
+    grass_plants: [(BlockId, Option<BlockId>); 4],
     /// A pebble sitting in a water cell: one block, tagged as both.
     pebble_water: BlockId,
 }
@@ -636,6 +663,12 @@ impl TerrainGenerator {
                 pebble: reg.id("pebble"),
                 pebble_water: reg.id("pebble@water"),
                 twig: reg.id("twig"),
+                grass_plants: [
+                    (reg.id("grass_short"), None),
+                    (reg.id("grass_plain"), None),
+                    (reg.id("grass_medium"), Some(reg.id("grass_medium_top"))),
+                    (reg.id("grass_large"), Some(reg.id("grass_large_top"))),
+                ],
             },
             terrain: SimplexNoise::new(seed),
             mountain: SimplexNoise::new(seed ^ 0x9e3779b9),
@@ -1725,6 +1758,18 @@ impl TerrainGenerator {
                     && hash2(wx, wz, seed ^ 0x9eb1) < PEBBLE_CHANCE
                 {
                     blocks[above] = ids.pebble;
+                } else if ground == ids.grass {
+                    if let Some((lower, upper)) = grass_plant_at(wx, wz, seed, &ids) {
+                        // A tall plant needs the cell over it free (a leaf may be there).
+                        match upper {
+                            Some(top) if blocks[above + 1] == AIR => {
+                                blocks[above] = lower;
+                                blocks[above + 1] = top;
+                            }
+                            Some(_) => {}
+                            None => blocks[above] = lower,
+                        }
+                    }
                 }
             }
         }
@@ -3418,4 +3463,47 @@ mod tests {
         assert!(crossing >= 5 && carried == crossing, "only {carried} of {crossing} edge trees carry their canopy into the next chunk");
     }
 
+
+    /// Grass plants of all four heights grow on grass (and only on grass),
+    /// in patches, and the tall ones come with their upper half.
+    #[test]
+    fn grass_plants_grow_in_patches_on_grass_and_the_tall_ones_stack() {
+        let reg = BlockRegistry::with_defaults();
+        let gen = TerrainGenerator::new(7, &reg);
+        let kinds: Vec<_> = ["grass_short", "grass_plain", "grass_medium", "grass_large"].iter().map(|n| reg.id(n)).collect();
+        let tops = [reg.id("grass_medium_top"), reg.id("grass_large_top")];
+        let mut counts = [0usize; 4];
+        let (mut grass_columns, mut plant_columns) = (0usize, 0usize);
+        for i in 0..14 {
+            for j in 0..14 {
+                let chunk = gen.generate(i * 5 - 35, j * 5 - 35);
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let ground = chunk.columns[x + CS * z].ground as usize;
+                        if ground + 3 >= H {
+                            continue;
+                        }
+                        let at = |y: usize| chunk.blocks[block_index(x, y, z)];
+                        grass_columns += (at(ground) == reg.id("grass")) as usize;
+                        let Some(kind) = kinds.iter().position(|&k| k == at(ground + 1)) else {
+                            // No plant: and no top half hanging on nothing either.
+                            assert!(!tops.contains(&at(ground + 1)));
+                            continue;
+                        };
+                        counts[kind] += 1;
+                        plant_columns += 1;
+                        assert_eq!(at(ground), reg.id("grass"), "plants grow on grass only");
+                        // (A short plant may have a tree's leaves over it.)
+                        if let Some(upper) = reg.upper_half(kinds[kind]) {
+                            assert_eq!(upper, at(ground + 2), "a tall plant's top half sits right over its bottom half");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(counts.iter().all(|&c| c > 50), "every height shows up: {counts:?}");
+        assert!(counts[0] > counts[3] && counts[1] > counts[3], "large grass is the rare one: {counts:?}");
+        let cover = plant_columns as f32 / grass_columns as f32;
+        assert!((0.1..0.5).contains(&cover), "a meadow, not a lawn or a desert: {cover}");
+    }
 }

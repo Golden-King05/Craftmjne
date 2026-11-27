@@ -557,7 +557,7 @@ fn refresh_item_meshes(
             // stick) is its flat picture, spinning like a card.
             let bucket = match registry.block_of(item.stack.id) {
                 // Something that lies flat (a pebble) drops as its picture.
-                Some(block) if tables.0.floor[block as usize] => crate::mesher::sprite_mesh(
+                Some(block) if tables.0.floor[block as usize] || tables.0.plant[block as usize] => crate::mesher::sprite_mesh(
                     &tables.0,
                     SPRITE_SIZE,
                     light,

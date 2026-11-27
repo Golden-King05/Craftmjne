@@ -1,0 +1,13 @@
+{
+  "sound": "grass",
+  "id": "grass_medium_top",
+  "name": "Medium Grass (upper half)",
+  "shape": "plant",
+  "height": 0.5,
+  "hardness": 0,
+  "tinted": {
+    "top": true
+  },
+  "item": false,
+  "drops": "grass_medium"
+}

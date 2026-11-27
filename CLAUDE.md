@@ -3891,3 +3891,24 @@ etc.) instead of inventing a new approach:
   The translations are my own and unreviewed by a native reader; UI layout is not mirrored.
 - **Dialect-ready is a tested property, not a promise:** `a_dialect_can_name_a_new_thing_its_own_way_before_anyone_needs_it_to`
   (eggplant: en / en-GB Aubergine / en-IN Brinjal / en-NZ inherits). Each dialect stays its own list entry.
+
+- **Grass plants are a third `Shape` (`Plant`), and "taller than a cell" reused the two-cell machinery instead of a
+  new one.** `height` (a definition tag, clamped 0.05-1 per cell) sets how tall `mesher::push_plant` draws the two
+  crossed quads (along the cell's diagonals, inset `PLANT_INSET` 0.15, the same texture on both, the chunk material
+  draws both sides). Medium (1.5) and large (2) grass are a lower block plus an `upper` one, exactly like the
+  training dummy, so placing, breaking both halves and "one drop" came free. Things that mattered:
+  - **A shorter plant shows the *bottom* of its tile, not a squashed whole**, so a pixel stays square; painters draw a
+    short plant in the lower rows, and both halves of a tall plant use the same blade columns (`BLADE_COLUMNS`) so they
+    join. A pack's own PNG follows the same rule.
+  - **Support has one rule, `interact::unsupported_floor`**, now for floor blocks and plants: solid ground below, or,
+    for a plant that has a `lower_half`, that lower half. When the ground goes the bottom pops and the top then pops
+    next frame through the same event; the top half must drop nothing, or one tall plant gives two items.
+  - **Collision stays off by *not* using `collision_boxes`** (that table is the player's collider as well as the aim
+    box), so aiming is cell-level like pebbles and only the outline is plant-shaped (0.72 wide, `height` tall).
+  - **Generation is a pure per-column rule** (`terrain::grass_plant_at`: a per-5-block-patch density, then a column
+    roll, then a height roll), skipping columns near old chunks and anywhere a pebble or twig already went. A tall plant
+    needs the cell over it free (a leaf may be there) or the column gets nothing. Short grass under leaves is fine.
+  - **Icons are the pale tinted mask** (`block_icon` doesn't tint), so grass icons read paler than the world; the
+    biome tint is applied only by the mesher. Water replaces a plant (they aren't waterloggable).
+  - Not done: seeds/drops other than the item itself, shears, flowers, plants growing back, plants on dirt, a
+    plant-specific sound beyond the `grass` group, wind sway.

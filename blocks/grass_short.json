@@ -1,0 +1,11 @@
+{
+  "sound": "grass",
+  "id": "grass_short",
+  "name": "Short Grass",
+  "shape": "plant",
+  "height": 0.5,
+  "hardness": 0,
+  "tinted": {
+    "top": true
+  }
+}

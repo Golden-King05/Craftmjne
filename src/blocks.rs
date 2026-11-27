@@ -123,10 +123,14 @@
 //!   the placed block instance, not the definition, so two logs placed
 //!   differently render differently even though they share one `BlockDef` -
 //!   see `Chunk::axis` in `world.rs`.
-//! - `shape` is `"cube"` (the default) or `"floor"`: lying flat on the
+//! - `shape` is `"cube"` (the default), `"floor"` or `"plant"`: lying flat on the
 //!   block below, like a pebble or a twig (see [`Shape`]). A floor block
 //!   defaults to `solid: false`, `replaceable: true`, `transparent:
 //!   "partial"` and `item_model: "face"`, and draws only its `top` texture.
+//!   `"plant"` is the same idea standing up: two copies of the `top` texture
+//!   crossed in an X, `height` blocks tall (default and most 1, at most 1 per
+//!   cell), walk-through, tinted with the biome if `tinted.top` is set. A
+//!   plant taller than one cell is a bottom block with an `upper` one.
 //! - `light` makes this block a light source (see [`LightSpec`]). `level` is
 //!   its brightness in light levels (`0`, the default, emits nothing; `16` is
 //!   the maximum and reaches 15 blocks); `color` is a 0-255 RGB hue, white by
@@ -450,6 +454,14 @@ pub enum Shape {
     /// something solid - and it breaks off, dropping itself, if that
     /// support is removed (`interact::pop_unsupported`).
     Floor,
+    /// A plant: two flat pictures crossed in an X inside its cell (the same
+    /// texture on both, like Minecraft's grass), `height` blocks tall, which
+    /// can be walked through. It defaults like [`Shape::Floor`] (no
+    /// collision, see-through, replaceable, a flat icon, needs solid ground
+    /// under it and breaks off without it) and its `tinted.top` setting
+    /// colours it with the biome. A plant taller than its cell (1.5 or 2
+    /// blocks) is two blocks: see `upper`.
+    Plant,
     /// Occupies its cell (and collides like a block) but the mesher draws
     /// nothing for it: something else renders it - the training dummy's
     /// player model (`block_models.rs`). It defaults to see-through, so the
@@ -861,6 +873,10 @@ pub struct BlockDef {
     /// either takes the other with it (and only one drop). See
     /// `interact::tall_partner`.
     pub upper: Option<String>,
+    /// How tall a [`Shape::Plant`] stands, in blocks (at most 1 per cell: a
+    /// taller plant is a lower block plus an `upper` one). Only the plant
+    /// shape reads it.
+    pub height: f32,
     /// May hold a fluid (or the ice it freezes into) in the same cell as
     /// itself. See the module docs' `waterloggable` section.
     pub waterloggable: bool,
@@ -958,6 +974,7 @@ impl Default for BlockDef {
             throwable: false,
             throw: ThrowSpec::DEFAULT,
             upper: None,
+            height: 1.0,
             waterloggable: false,
             states: Vec::new(),
             state_defs: Vec::new(),
@@ -1064,6 +1081,7 @@ pub(crate) struct BlockFile {
     #[serde(flatten)]
     throw: ThrowFile,
     upper: Option<String>,
+    height: Option<f32>,
 }
 
 fn default_true() -> bool {
@@ -1087,12 +1105,12 @@ impl BlockFile {
         // except that it can be targeted, so it can be picked up.
         let (solid, selectable, replaceable) = if self.fluid {
             (false, false, true)
-        } else if self.shape == Shape::Floor {
+        } else if matches!(self.shape, Shape::Floor | Shape::Plant) {
             (false, true, true)
         } else {
             (true, true, false)
         };
-        let floor = self.shape == Shape::Floor;
+        let floor = matches!(self.shape, Shape::Floor | Shape::Plant);
         // Declaring a state tag turns on the behaviour it needs.
         let mut rotation = self.rotation;
         let mut waterloggable = self.waterloggable;
@@ -1151,6 +1169,7 @@ impl BlockFile {
             throwable: self.throwable,
             throw: self.throw.spec(),
             upper: self.upper,
+            height: self.height.filter(|h| h.is_finite()).unwrap_or(1.0).clamp(0.05, 1.0),
             waterloggable,
             states,
             state_defs: self
@@ -1198,6 +1217,10 @@ pub struct Tables {
     pub floor: Vec<bool>,
     /// Drawn by something other than the mesher (`Shape::Model`).
     pub model: Vec<bool>,
+    /// Two crossed pictures (`Shape::Plant`).
+    pub plant: Vec<bool>,
+    /// How tall each plant stands in its cell (1.0 for anything else).
+    pub plant_height: Vec<f32>,
     /// A resource pack's model for this block, if one changes its look (see `models.rs`).
     /// Drawing only - collision, light and everything physical still follow the block definition.
     pub pack_models: Vec<Option<Arc<crate::models::CompiledModel>>>,
@@ -1685,6 +1708,8 @@ impl BlockRegistry {
             rotates: vec![false; n],
             floor: vec![false; n],
             model: vec![false; n],
+            plant: vec![false; n],
+            plant_height: vec![1.0; n],
             pack_models: vec![None; n],
             occludes: vec![false; n],
             collision_boxes: vec![None; n],
@@ -1722,6 +1747,8 @@ impl BlockRegistry {
             tables.rotates[id] = def.rotation != Rotation::None;
             tables.floor[id] = def.shape == Shape::Floor;
             tables.model[id] = def.shape == Shape::Model;
+            tables.plant[id] = def.shape == Shape::Plant;
+            tables.plant_height[id] = def.height;
             tables.requires_crouch[id] = def.requires_crouch;
             tables.shatter_speed[id] = def.shatters_at.unwrap_or(f32::INFINITY);
             tables.shatter_keep[id] = def.shatter_keep;
@@ -2326,4 +2353,35 @@ mod tests {
         assert_eq!(reg.def(reg.id("stone")).shatters_at, None);
     }
 
+
+    #[test]
+    fn the_grass_plants_are_walk_through_plants_of_four_heights() {
+        let mut reg = BlockRegistry::with_defaults();
+        let atlas = crate::atlas::build_atlas(&crate::atlas::default_painters());
+        let tables = reg.compile(&atlas.indices, atlas.tile_size);
+        let heights = [("grass_short", 0.5), ("grass_plain", 1.0), ("grass_medium", 1.0), ("grass_medium_top", 0.5), ("grass_large", 1.0), ("grass_large_top", 1.0)];
+        for (name, height) in heights {
+            let id = reg.id(name);
+            let def = reg.def(id);
+            assert_eq!(def.shape, Shape::Plant, "{name}");
+            assert!(!def.solid && def.selectable && def.replaceable, "{name}: you walk through it, can aim at it, and a block replaces it");
+            assert_eq!(def.transparency, Transparency::Partial, "{name}");
+            assert!(tables.plant[id as usize] && !tables.solid[id as usize] && !tables.opaque[id as usize]);
+            assert_eq!(tables.plant_height[id as usize], height, "{name}");
+            assert!(tables.tinted[id as usize * 6 + 2], "{name} takes the biome's colour");
+        }
+        // Together the cells add up to 0.5, 1, 1.5 and 2 blocks.
+        let total = |lower: &str| {
+            let id = reg.id(lower);
+            let own = reg.def(id).height;
+            own + reg.upper_half(id).map_or(0.0, |u| reg.def(u).height)
+        };
+        assert_eq!([total("grass_short"), total("grass_plain"), total("grass_medium"), total("grass_large")], [0.5, 1.0, 1.5, 2.0]);
+        // The top halves aren't items of their own: they drop their bottom half.
+        for (lower, upper) in [("grass_medium", "grass_medium_top"), ("grass_large", "grass_large_top")] {
+            assert_eq!(reg.upper_half(reg.id(lower)), Some(reg.id(upper)));
+            assert!(reg.def(reg.id(lower)).item && !reg.def(reg.id(upper)).item);
+            assert!(matches!(&reg.def(reg.id(upper)).drops, Drops::Item { item, count: 1, .. } if item == lower));
+        }
+    }
 }
